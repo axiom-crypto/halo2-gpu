@@ -1,0 +1,33 @@
+runners:
+  # Spot pool. Used by quick jobs (e.g. clippy) that tolerate occasional
+  # interruption — a re-run just picks back up.
+  test-gpu-nvidia:
+    family: ["g6.*", "g5", "g4dn", "g6e"]
+    image: ubuntu24-gpu-x64
+    cpu: [4, 8, 16, 32]
+    disk: default
+    spot: capacity-optimized
+    extras: s3-cache
+    preinstall: |
+      nvidia-smi
+      nvidia-smi -L
+      echo 'CUDA_ARCH=75,86,89' >> $GITHUB_ENV
+
+  # On-demand pool for long-running monolithic test runs that cannot
+  # tolerate spot reclaim mid-execution. halo2-gpu has a single test
+  # job spanning the whole workspace (~8 min total), which is too long
+  # a vulnerable window on spot. Sister repos (openvm, stark-backend)
+  # split their CUDA tests into many shorter per-crate jobs and stay
+  # on spot; halo2-gpu's single-crate workspace makes that split
+  # impractical, so we trade ~2-3x runner cost for stability.
+  test-gpu-nvidia-ondemand:
+    family: ["g6.*", "g5"]
+    image: ubuntu24-gpu-x64
+    cpu: [8, 16, 32]
+    disk: default
+    spot: false
+    extras: s3-cache
+    preinstall: |
+      nvidia-smi
+      nvidia-smi -L
+      echo 'CUDA_ARCH=75,86,89' >> $GITHUB_ENV

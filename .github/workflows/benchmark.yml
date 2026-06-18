@@ -1,0 +1,205 @@
+name: Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      profiling:
+        type: choice
+        description: Profiling mode, samply generates an firefox profile trace, nsys generates nsys profile, just_run just runs with metrics collection instrumented in the repo
+        options:
+          - samply
+          - nsys
+          - just_run
+        default: just_run
+      instance_family:
+        type: string
+        required: false
+        description: The GPU family of the instance, can be multiple ones concat with "+" e.g. g6+g5
+        default: g6e.2xlarge
+  workflow_call:
+    inputs:
+      profiling:
+        type: string
+        required: false
+        description: Profiling mode (samply | nsys | just_run). samply generates a firefox profile trace, nsys generates an nsys profile, just_run just runs with metrics collection instrumented in the repo
+        default: just_run
+      instance_family:
+        type: string
+        required: false
+        description: The GPU family of the instance, can be multiple ones concat with "+" e.g. g6+g5
+        default: g6e.2xlarge
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+    branches: ["**"]
+    paths:
+      - "benchmarks/**"
+      - "halo2_proofs/**"
+      - ".github/workflows/benchmark.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  push:
+    branches:
+      - main
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+jobs:
+  bench:
+    name: halo2-gpu benchmark
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'benchmark')
+    timeout-minutes: 120
+    runs-on:
+      - runs-on=${{ github.run_id }}/runner=test-gpu-nvidia-ondemand/family=${{ inputs.instance_family || github.event.inputs.instance_family || 'g6e.2xlarge' }}/extras=s3-cache
+    steps:
+      - uses: runs-on/action@v2
+        with:
+          sccache: s3
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        env:
+          RUSTUP_PERMIT_COPY_RENAME: "1"
+      - name: Install pinned nightly toolchain (used by run_bench.sh)
+        run: rustup toolchain install nightly-2026-01-18 --profile minimal
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: ./.github/actions/rust-cache-cuda
+        with:
+          cache-on-failure: true
+
+      - name: Verify GPU setup
+        run: |
+          nvidia-smi
+          nvidia-smi -L
+          nvcc --version
+
+      - name: Install solc 0.8.19
+        run: |
+          cargo install --locked --version 0.5.24 svm-rs
+          svm install 0.8.19
+          solc --version
+      
+      - name: set profiling permissions
+        run: |
+          echo -1 | sudo tee /proc/sys/kernel/perf_event_paranoid
+          echo 0 | sudo tee /proc/sys/kernel/kptr_restrict
+      
+      - name: Setup halo2 KZG params
+        run: bash ./scripts/trusted_setup_s3.sh
+
+      - name: Install perf and samply
+        if: inputs.profiling == 'samply'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y linux-tools-common linux-tools-generic \
+                                  linux-tools-$(uname -r) || true
+          cargo install --git https://github.com/mstange/samply.git samply --force
+
+      - name: Build cargo-openvm and openvm-prof
+        run: |
+          git clone --depth=1 --branch=develop-v2.0.0-rc.2 \
+            https://github.com/openvm-org/openvm.git /tmp/openvm
+          cargo build --manifest-path /tmp/openvm/Cargo.toml \
+            -p cargo-openvm -p openvm-prof
+          echo "/tmp/openvm/target/debug" >> $GITHUB_PATH
+
+      - name: Run benchmark
+        run: |
+          ARGS=()
+          if [[ "${{ inputs.profiling }}" == "nsys" ]]; then
+            ARGS+=(--nsys)
+          fi
+          if [[ "${{ inputs.profiling }}" == "samply" ]]; then
+            ARGS+=(--samply)
+          fi
+          ./benchmarks/run.sh "${ARGS[@]}"
+
+      - name: Generate metrics.md
+        run: |
+          openvm-prof --json-paths metrics.json --num-devices 1 --proofs-per-device 1
+          python3 scripts/aggregate_primitive.py --json-path metrics.json --metric_md metrics.detailed.md
+
+      - name: Append result to workflow summary
+        if: always()
+        run: |
+          if [[ -f metrics.detailed.md ]]; then
+            echo "### Benchmark result — (${{ inputs.profiling }})" \
+              >> $GITHUB_STEP_SUMMARY
+            cat metrics.detailed.md >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload metrics
+        uses: actions/upload-artifact@v4
+        with:
+          name: metrics-${{ github.run_id }}
+          path: |
+            metrics.json
+            metrics.md
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload samply profile
+        if: inputs.profiling == 'samply'
+        uses: actions/upload-artifact@v4
+        with:
+          name: samply-profile-${{ github.run_id }}
+          path: samply_profile/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload nsys profile
+        if: inputs.profiling == 'nsys'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nsys-profile-${{ github.run_id }}
+          path: halo-gpu.nsys-rep
+          if-no-files-found: warn
+          retention-days: 14
+
+      ##########################################################################
+      # Update PR comment upon a pull request event                            #
+      ##########################################################################
+      - name: Collapse previous comment (if exists)
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number
+            });
+            for (const comment of comments.data) {
+              if (comment.user.login == "github-actions[bot]" && comment.body.startsWith("<!--Benchmark Results-->")) {
+                console.log("collapse comment ", comment.id);
+                const resp = await github.graphql(`
+                  mutation {
+                    minimizeComment(input: {classifier: OUTDATED, subjectId: "${comment.node_id}"}) {
+                      minimizedComment {
+                        isMinimized
+                      }
+                    }
+                  }
+                `);
+              }
+            }
+
+      - name: Add comment to pull request
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs')
+            const newBenchmark = fs.readFileSync('metrics.detailed.md', { encoding: 'utf8', flag: 'r' })
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `<!--Benchmark Results-->\n${newBenchmark}`
+            });
+      
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true

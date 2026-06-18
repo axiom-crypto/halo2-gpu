@@ -1,0 +1,47 @@
+name: Tests
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["**"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  tests:
+    name: cargo nextest run
+    timeout-minutes: 60
+    runs-on:
+      - runs-on=${{ github.run_id }}/runner=test-gpu-nvidia-ondemand/family=g6.*+g5/extras=s3-cache
+    steps:
+      - uses: runs-on/action@v2
+        with:
+          sccache: s3
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        env:
+          RUSTUP_PERMIT_COPY_RENAME: "1"
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: ./.github/actions/rust-cache-cuda
+        with:
+          cache-on-failure: true
+      - uses: taiki-e/install-action@nextest
+
+      - name: Verify GPU setup
+        run: |
+          nvidia-smi
+          nvidia-smi -L
+          nvcc --version
+
+      - name: Run tests
+        run: cargo nextest run --workspace --no-fail-fast --test-threads=1
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true

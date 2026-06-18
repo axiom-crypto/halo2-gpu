@@ -1,0 +1,21 @@
+[workspace.package]
+name = "benchmark-bins"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+members = ["fibonacci"]
+
+[workspace.dependencies]
+
+openvm = { git = "https://github.com/openvm-org/openvm.git", branch = "develop-v2.0.0-rc.2", default-features = false }
+
+[profile.release]
+panic = "abort"
+lto = "fat"
+strip = true
+
+[profile.profiling]
+inherits = "release"
+debug = 2
+strip = false

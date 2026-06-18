@@ -1,0 +1,35 @@
+[package]
+name = "benchmarks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+dashmap = "6.2"
+eyre = "0.6"
+metrics = "0.23"
+metrics-tracing-context = "0.16"
+metrics-util = "0.17"
+serde_json = "1"
+tracing = "0.1.44"
+tracing-forest = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+openvm = { git = "https://github.com/openvm-org/openvm.git", branch = "develop-v2.0.0-rc.2", default-features = false }
+openvm-sdk = { git = "https://github.com/openvm-org/openvm.git", branch = "develop-v2.0.0-rc.2", default-features = false }
+openvm-transpiler = { git = "https://github.com/openvm-org/openvm.git", branch = "develop-v2.0.0-rc.2", default-features = false }
+openvm-stark-sdk = { git = "https://github.com/openvm-org/stark-backend.git", branch = "develop-v2", default-features = false }
+
+[features]
+default = ["parallel", "jemalloc", "evm-verify", "cuda", "nvtx", "metrics"]
+parallel = ["openvm-sdk/parallel"]
+jemalloc = ["openvm-sdk/jemalloc"]
+root-prover = ["openvm-sdk/root-prover"]
+evm-prove = ["openvm-sdk/evm-prove"]
+evm-verify = ["openvm-sdk/evm-verify"]
+cuda = ["openvm-sdk/cuda"]
+aot = ["openvm-sdk/aot"]
+tco = ["openvm-sdk/tco"]
+nvtx = ["openvm-stark-sdk/nvtx"]
+metrics = ["openvm-sdk/metrics"]
