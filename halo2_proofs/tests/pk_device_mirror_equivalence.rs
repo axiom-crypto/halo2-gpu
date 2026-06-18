@@ -17,7 +17,7 @@
 use ff::Field;
 use halo2_axiom_gpu::cuda::funcs::ColumnPool;
 use halo2_axiom_gpu::cuda::utils::HALO2_GPU_CTX;
-use halo2_axiom_gpu::poly::{Device, LagrangeCoeff, Polynomial};
+use halo2_axiom_gpu::poly::{Device, DevicePolyExt, LagrangeCoeff, Polynomial};
 use halo2curves::bn256::Fr;
 use openvm_cuda_common::copy::MemCopyH2D;
 use rand_core::OsRng;

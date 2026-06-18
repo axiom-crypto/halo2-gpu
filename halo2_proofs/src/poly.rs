@@ -6,11 +6,8 @@ use crate::helpers::SerdePrimeField;
 use crate::plonk::Assigned;
 use crate::SerdeFormat;
 
-use std::fmt::Debug;
 use std::io;
-use std::marker::{PhantomData, Sync};
 use std::mem;
-use std::ops::{Add, Deref, DerefMut, Index, IndexMut, Mul, Range, RangeFrom, RangeFull, Sub};
 
 use group::ff::Field;
 
@@ -22,7 +19,6 @@ use openvm_cuda_common::d_buffer::DeviceBuffer;
 use openvm_cuda_common::error::MemCopyError;
 use openvm_cuda_common::stream::GpuDeviceCtx;
 
-use crate::cpu::arithmetic::parallelize;
 use crate::cuda::culib::_halo2_poly_elementwise_multiply;
 #[cfg(test)]
 use crate::cuda::funcs::batch_invert_gpu;
@@ -59,59 +55,19 @@ pub enum Error {
     SamplingError,
 }
 
-/// The basis over which a polynomial is described.
-pub trait Basis: Copy + Debug + Send + Sync {}
-
-/// The polynomial is defined as coefficients
-#[derive(Clone, Copy, Debug)]
-pub struct Coeff;
-impl Basis for Coeff {}
-
-/// The polynomial is defined as coefficients of Lagrange basis polynomials
-#[derive(Clone, Copy, Debug)]
-pub struct LagrangeCoeff;
-impl Basis for LagrangeCoeff {}
-
-/// The polynomial is defined as coefficients of Lagrange basis polynomials in
-/// an extended size domain which supports multiplication
-#[derive(Clone, Copy, Debug)]
-pub struct ExtendedLagrangeCoeff;
-impl Basis for ExtendedLagrangeCoeff {}
-
-/// Residency marker for a [`Polynomial`]. Implementors associate the backing
-/// container type via the [`Storage::Backing`] GAT: `Vec<F>` for [`Host`] and
-/// `DeviceBuffer<F>` for [`Device`]. Generic over `F` so a single marker can
-/// type every scalar choice the prover instantiates.
-pub trait Storage: 'static {
-    type Backing<F>;
-
-    /// Length of the backing container in elements.
-    fn backing_len<F>(b: &Self::Backing<F>) -> usize;
-
-    /// Compile-time tag distinguishing the two storage flavours. Used by
-    /// the few code paths that are generic over `S` and want to take a
-    /// runtime-fast branch without virtual dispatch (the optimiser folds
-    /// the branch since `IS_DEVICE` is `const`).
-    const IS_DEVICE: bool;
-}
-
-/// Marker indicating a host-resident polynomial whose coefficients live in a
-/// `Vec<F>`.
-#[derive(Clone, Copy, Debug)]
-pub struct Host;
+/// The unified [`Polynomial`] type and its storage-marker machinery
+/// (`Storage`/`Host`/`Basis` + the basis markers + `Rotation`) now live in the
+/// CPU crate `halo2-axiom`. halo2-gpu re-exports them so existing
+/// `crate::poly::*` paths keep resolving, and implements the `Device` storage
+/// plus all Device-side behaviour locally below.
+pub use halo2_axiom::poly::{
+    Basis, Coeff, ExtendedLagrangeCoeff, Host, LagrangeCoeff, Polynomial, Rotation, Storage,
+};
 
 /// Marker indicating a device-resident polynomial whose coefficients live in a
 /// `DeviceBuffer<F>` on the shared CUDA stream.
 #[derive(Clone, Copy, Debug)]
 pub struct Device;
-
-impl Storage for Host {
-    type Backing<F> = Vec<F>;
-    fn backing_len<F>(b: &Vec<F>) -> usize {
-        b.len()
-    }
-    const IS_DEVICE: bool = false;
-}
 
 impl Storage for Device {
     type Backing<F> = DeviceBuffer<F>;
@@ -119,13 +75,6 @@ impl Storage for Device {
         b.len()
     }
     const IS_DEVICE: bool = true;
-}
-
-/// Represents a univariate polynomial defined over a field and a particular
-/// basis, parameterised by its storage residency.
-pub struct Polynomial<F, B, S: Storage = Host> {
-    storage: S::Backing<F>,
-    _marker: PhantomData<B>,
 }
 
 /// Additive type aliases that make residency visible at the function-signature
@@ -212,82 +161,60 @@ impl<F, B> From<Polynomial<F, B, Device>> for MaybeDevice<F, B> {
     }
 }
 
-impl<F, B, S: Storage> std::fmt::Debug for Polynomial<F, B, S> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Polynomial")
-            .field("len", &S::backing_len::<F>(&self.storage))
-            .field("residency", &if S::IS_DEVICE { "Device" } else { "Host" })
-            .finish()
-    }
-}
-
-// Safety contract:
+// ============================================================================
+// Device-side and host<->device crossing behaviour.
+//
+// `Polynomial` is now foreign to this crate (it lives in `halo2-axiom`), so the
+// methods that used to be inherent on it can no longer be written as inherent
+// impls here. They are re-expressed as local extension traits that build and
+// read the foreign `Polynomial` exclusively through its public generic seam
+// (`from_backing` / `backing` / `into_backing`) and the public Host helpers
+// (`new` / `values` / `into_values`). Method names are preserved verbatim so
+// call sites only need the relevant trait in scope.
+//
+// Safety contract for `Device` storage:
 //
 // `DeviceBuffer<F>` (the inner storage of a `Polynomial<_, _, Device>`) lives
 // behind `HALO2_GPU_CTX.stream` — a single explicit `cudaStream_t` shared
 // across the entire prover (see `cuda/utils.rs`). All device work serializes
 // through that stream; cross-thread races on the underlying device memory are
-// impossible by construction. Host-resident polynomials carry a `Vec<F>`
-// whose `Send`/`Sync` behaviour is the standard one.
-unsafe impl<F, B, S: Storage> Sync for Polynomial<F, B, S> {}
-unsafe impl<F: Send, B, S: Storage> Send for Polynomial<F, B, S> {}
+// impossible by construction. `Send`/`Sync` for the device polynomial now
+// auto-derive from `DeviceBuffer<F>`'s own unconditional `Send`/`Sync` impls
+// (in `openvm_cuda_common`), so no manual `unsafe impl` is needed here.
+// ============================================================================
 
-impl<F: Clone, B> Clone for Polynomial<F, B, Host> {
-    fn clone(&self) -> Self {
-        Self {
-            storage: self.storage.clone(),
-            _marker: PhantomData,
-        }
-    }
+/// Host-resident extension methods (crossing into Device + fallible clone).
+pub trait HostPolyExt<F, B> {
+    /// H→D copy producing a device-resident polynomial on `device_ctx`.
+    fn to_device_on(
+        &self,
+        device_ctx: &GpuDeviceCtx,
+    ) -> Result<Polynomial<F, B, Device>, MemCopyError>;
+
+    /// Fallible clone of a host-resident polynomial. Wraps `Vec::clone` in the
+    /// same `Result` shape as the Device `try_clone` so callers can write
+    /// residency-generic code.
+    fn try_clone(&self) -> Result<Polynomial<F, B, Host>, HaloGpuError>;
 }
 
-impl<F, B> Polynomial<F, B, Host> {
-    /// Construct a host-resident polynomial directly from `Vec<F>`.
-    pub fn new(val: Vec<F>) -> Self {
-        Self {
-            storage: val,
-            _marker: PhantomData,
-        }
-    }
-
-    /// Direct host slice accessor.
-    pub fn values(&self) -> &[F] {
-        self.storage.as_slice()
-    }
-
-    /// Direct mutable host slice accessor.
-    pub fn values_mut(&mut self) -> &mut [F] {
-        self.storage.as_mut_slice()
-    }
-
-    /// Consume the polynomial and return the owned `Vec<F>` of host
-    /// coefficients.
-    pub fn into_values(self) -> Vec<F> {
-        self.storage
-    }
-
-    /// Iterate over the values.
-    pub fn iter(&self) -> impl Iterator<Item = &F> {
-        self.storage.iter()
-    }
-
-    /// Iterate over the values mutably.
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut F> {
-        self.storage.iter_mut()
-    }
-
-    pub fn to_device_on(
+impl<F: Clone, B> HostPolyExt<F, B> for Polynomial<F, B, Host> {
+    fn to_device_on(
         &self,
         device_ctx: &GpuDeviceCtx,
     ) -> Result<Polynomial<F, B, Device>, MemCopyError> {
-        Ok(Polynomial {
-            storage: self.values().to_device_on(device_ctx)?,
-            _marker: PhantomData,
-        })
+        Ok(Polynomial::from_backing(
+            self.values().to_device_on(device_ctx)?,
+        ))
+    }
+
+    fn try_clone(&self) -> Result<Polynomial<F, B, Host>, HaloGpuError> {
+        Ok(Polynomial::from_backing(self.backing().clone()))
     }
 }
 
-impl<F, B> Polynomial<F, B, Device> {
+/// Device-resident extension methods: construction, accessors, fallible clone,
+/// and the D→H crossings.
+pub trait DevicePolyExt<F, B>: Sized {
     /// Construct a device-resident polynomial wrapping `buf`.
     ///
     /// Callers MUST verify VRAM headroom before allocating the underlying
@@ -295,29 +222,53 @@ impl<F, B> Polynomial<F, B, Device> {
     /// `crate::cuda::modules::QuotientLookupsGpu::is_gpu_memory_enough` or
     /// equivalent free-bytes check); by the time this constructor is reached
     /// the buffer is already allocated, so we do not re-check here.
-    pub fn from_device(buf: DeviceBuffer<F>) -> Self {
-        Self {
-            storage: buf,
-            _marker: PhantomData,
-        }
-    }
+    fn from_device(buf: DeviceBuffer<F>) -> Self;
 
     /// Returns the underlying device buffer.
-    pub fn device_buf(&self) -> &DeviceBuffer<F> {
-        &self.storage
-    }
+    fn device_buf(&self) -> &DeviceBuffer<F>;
 
     /// Consume the polynomial and return the owned device buffer.
-    pub fn into_device_buf(self) -> DeviceBuffer<F> {
-        self.storage
-    }
+    fn into_device_buf(self) -> DeviceBuffer<F>;
+
+    /// Fallible clone of a device-resident polynomial. Allocates a new
+    /// `DeviceBuffer<F>` and submits a D→D copy
+    /// (`cudaMemcpyAsync(DeviceToDevice)`) on the explicit stream.
+    fn try_clone(&self) -> Result<Self, HaloGpuError>;
 
     /// D→H copy producing a host-resident polynomial without consuming the
     /// device-resident original. Emits a `tracing::warn!` on the
     /// `halo2_proofs::poly` target so unexpected materializations show up in
     /// trace output.
-    pub fn to_host(&self) -> Polynomial<F, B, Host> {
-        let buf = &self.storage;
+    fn to_host(&self) -> Polynomial<F, B, Host>;
+
+    /// D→H copy that consumes the device polynomial and returns the
+    /// host-resident equivalent. Emits a `tracing::warn!` on the
+    /// `halo2_proofs::poly` target so unexpected materializations show up
+    /// in trace output.
+    fn materialize_host(self) -> Polynomial<F, B, Host>;
+}
+
+impl<F, B> DevicePolyExt<F, B> for Polynomial<F, B, Device> {
+    fn from_device(buf: DeviceBuffer<F>) -> Self {
+        Polynomial::from_backing(buf)
+    }
+
+    fn device_buf(&self) -> &DeviceBuffer<F> {
+        self.backing()
+    }
+
+    fn into_device_buf(self) -> DeviceBuffer<F> {
+        self.into_backing()
+    }
+
+    fn try_clone(&self) -> Result<Self, HaloGpuError> {
+        use openvm_cuda_common::copy::MemCopyD2D;
+        let dst = self.backing().device_copy_on(&HALO2_GPU_CTX)?;
+        Ok(Polynomial::from_backing(dst))
+    }
+
+    fn to_host(&self) -> Polynomial<F, B, Host> {
+        let buf = self.backing();
         let n = buf.len();
         let bytes = n * mem::size_of::<F>();
         tracing::warn!(
@@ -344,18 +295,11 @@ impl<F, B> Polynomial<F, B, Device> {
             .stream
             .to_host_sync()
             .expect("stream sync after D2H to_host failed");
-        Polynomial {
-            storage: host,
-            _marker: PhantomData,
-        }
+        Polynomial::from_backing(host)
     }
 
-    /// D→H copy that consumes the device polynomial and returns the
-    /// host-resident equivalent. Emits a `tracing::warn!` on the
-    /// `halo2_proofs::poly` target so unexpected materializations show up
-    /// in trace output.
-    pub fn materialize_host(self) -> Polynomial<F, B, Host> {
-        let buf = self.storage;
+    fn materialize_host(self) -> Polynomial<F, B, Host> {
+        let buf = self.into_backing();
         let n = buf.len();
         let bytes = n * mem::size_of::<F>();
         tracing::warn!(
@@ -382,157 +326,35 @@ impl<F, B> Polynomial<F, B, Device> {
             .stream
             .to_host_sync()
             .expect("stream sync after D2H materialization failed");
-        Polynomial {
-            storage: host,
-            _marker: PhantomData,
-        }
+        Polynomial::from_backing(host)
     }
 }
 
-impl<F, B, S: Storage> Polynomial<F, B, S> {
-    /// Number of coefficients.
-    pub fn len(&self) -> usize {
-        S::backing_len::<F>(&self.storage)
-    }
+/// Storage-agnostic evaluation of a coefficient-basis polynomial at a point.
+/// The Host arm runs the rayon-parallel CPU Horner implementation; the Device
+/// arm dispatches to the device-input Horner FFI.
+pub trait PolyEvalAt<F> {
+    /// Evaluate the polynomial at `point`.
+    fn eval_at(&self, point: F) -> F;
+}
 
-    /// `true` if there are no coefficients.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// Synonym for [`Polynomial::len`].
-    pub fn num_coeffs(&self) -> usize {
-        self.len()
+impl<F: Field> PolyEvalAt<F> for Polynomial<F, Coeff, Host> {
+    fn eval_at(&self, point: F) -> F {
+        crate::arithmetic::eval_polynomial(self.values(), point)
     }
 }
 
-impl<F, B> AsRef<[F]> for Polynomial<F, B, Host> {
-    fn as_ref(&self) -> &[F] {
-        self.values()
-    }
-}
-
-impl<F, B> AsMut<[F]> for Polynomial<F, B, Host> {
-    fn as_mut(&mut self) -> &mut [F] {
-        self.values_mut()
-    }
-}
-
-impl<F, B> Deref for Polynomial<F, B, Host> {
-    type Target = [F];
-
-    fn deref(&self) -> &[F] {
-        self.values()
-    }
-}
-
-impl<F, B> DerefMut for Polynomial<F, B, Host> {
-    fn deref_mut(&mut self) -> &mut [F] {
-        self.values_mut()
-    }
-}
-
-impl<F, B> Index<usize> for Polynomial<F, B, Host> {
-    type Output = F;
-
-    fn index(&self, index: usize) -> &F {
-        &self.values()[index]
-    }
-}
-
-impl<F, B> IndexMut<usize> for Polynomial<F, B, Host> {
-    fn index_mut(&mut self, index: usize) -> &mut F {
-        &mut self.values_mut()[index]
-    }
-}
-
-impl<F, B> Index<Range<usize>> for Polynomial<F, B, Host> {
-    type Output = [F];
-
-    fn index(&self, index: Range<usize>) -> &[F] {
-        &self.values()[index]
-    }
-}
-
-impl<F, B> Index<RangeFrom<usize>> for Polynomial<F, B, Host> {
-    type Output = [F];
-
-    fn index(&self, index: RangeFrom<usize>) -> &[F] {
-        &self.values()[index]
-    }
-}
-
-impl<F, B> IndexMut<Range<usize>> for Polynomial<F, B, Host> {
-    fn index_mut(&mut self, index: Range<usize>) -> &mut [F] {
-        &mut self.values_mut()[index]
-    }
-}
-
-impl<F, B> IndexMut<RangeFrom<usize>> for Polynomial<F, B, Host> {
-    fn index_mut(&mut self, index: RangeFrom<usize>) -> &mut [F] {
-        &mut self.values_mut()[index]
-    }
-}
-
-impl<F, B> Index<RangeFull> for Polynomial<F, B, Host> {
-    type Output = [F];
-
-    fn index(&self, _index: RangeFull) -> &[F] {
-        self.values()
-    }
-}
-
-impl<F, B> IndexMut<RangeFull> for Polynomial<F, B, Host> {
-    fn index_mut(&mut self, index: RangeFull) -> &mut [F] {
-        &mut self.values_mut()[index]
-    }
-}
-
-impl<F: Clone, B> Polynomial<F, B, Host> {
-    /// Fallible clone of a host-resident polynomial. Wraps `Vec::clone` in
-    /// the same `Result` shape as [`Polynomial<F, B, Device>::try_clone`] so
-    /// callers can write residency-generic code.
-    pub fn try_clone(&self) -> Result<Self, HaloGpuError> {
-        Ok(Self {
-            storage: self.storage.clone(),
-            _marker: PhantomData,
-        })
-    }
-}
-
-impl<F, B> Polynomial<F, B, Device> {
-    /// Fallible clone of a device-resident polynomial. Allocates a new
-    /// `DeviceBuffer<F>` and submits a D→D copy
-    /// (`cudaMemcpyAsync(DeviceToDevice)`) on the explicit stream.
-    pub fn try_clone(&self) -> Result<Self, HaloGpuError> {
-        use openvm_cuda_common::copy::MemCopyD2D;
-        let dst = self.storage.device_copy_on(&HALO2_GPU_CTX)?;
-        Ok(Self {
-            storage: dst,
-            _marker: PhantomData,
-        })
-    }
-}
-
-impl<F: Field> Polynomial<F, Coeff, Host> {
-    /// Evaluate the polynomial at `point` using the rayon-parallel CPU Horner
-    /// implementation.
-    pub fn eval_at(&self, point: F) -> F {
-        crate::arithmetic::eval_polynomial(&self.storage, point)
-    }
-}
-
-impl<F: Field> Polynomial<F, Coeff, Device> {
-    /// Evaluate the polynomial at `point` on-GPU via `eval_polynomial_device`.
+impl<F: Field> PolyEvalAt<F> for Polynomial<F, Coeff, Device> {
     /// The kernel tags its own 32-byte result D2H under
     /// `cuda.eval_polynomial_device.result`.
-    pub fn eval_at(&self, point: F) -> F {
-        crate::cuda::funcs::eval_polynomial_device(&self.storage, point)
+    fn eval_at(&self, point: F) -> F {
+        crate::cuda::funcs::eval_polynomial_device(self.backing(), point)
             .expect("eval_polynomial_device failed in Polynomial::eval_at")
     }
 }
 
-impl<F> Polynomial<F, Coeff, Device> {
+/// Device-resident coefficient-basis chunking.
+pub trait DeviceChunks<F>: Sized {
     /// Splits a Device-resident `Polynomial<F, Coeff, Device>` into pieces of
     /// length `chunk_len` each. Self is consumed; the parent allocation is
     /// freed after the loop completes. Peak transient device memory is
@@ -543,9 +365,12 @@ impl<F> Polynomial<F, Coeff, Device> {
     /// At fibonacci shape `parent.len() == n * quotient_poly_degree`,
     /// `chunk_len == n`, `num_chunks == quotient_poly_degree` (3 for outer,
     /// 4 for wrapper); both tile cleanly.
-    pub fn chunks_device(self, chunk_len: usize) -> Vec<Polynomial<F, Coeff, Device>> {
-        use openvm_cuda_common::copy::cuda_memcpy_on;
-        let parent = self.storage;
+    fn chunks_device(self, chunk_len: usize) -> Vec<Polynomial<F, Coeff, Device>>;
+}
+
+impl<F> DeviceChunks<F> for Polynomial<F, Coeff, Device> {
+    fn chunks_device(self, chunk_len: usize) -> Vec<Polynomial<F, Coeff, Device>> {
+        let parent = self.into_backing();
         let total_len = parent.len();
         assert!(
             chunk_len > 0 && total_len.is_multiple_of(chunk_len),
@@ -574,27 +399,40 @@ impl<F> Polynomial<F, Coeff, Device> {
                 )
                 .expect("D2D copy in chunks_device failed");
             }
-            chunks.push(Polynomial::from_device(dst));
+            chunks.push(Polynomial::from_backing(dst));
         }
         drop(parent);
         chunks
     }
 }
 
-impl<F: SerdePrimeField, B> Polynomial<F, B, Host> {
-    /// Reads polynomial from buffer using `SerdePrimeField::read`.
-    pub(crate) fn read<R: io::Read>(reader: &mut R, format: SerdeFormat) -> Self {
+/// Host-resident polynomial serialization. These mirror the `pub(crate)`
+/// `read`/`write` that the CPU crate keeps private; halo2-gpu re-expresses them
+/// locally over the public `new`/`values` API so its keygen/proving-key
+/// serialization keeps working.
+pub(crate) trait HostPolyIo<F, B> {
+    /// Reads polynomial from buffer using `SerdePrimeField::read`. Named
+    /// `read_poly` (not `read`) so it is not shadowed by the CPU crate's
+    /// `pub(crate)` inherent `read`, which is in-name-but-out-of-scope here.
+    fn read_poly<R: io::Read>(reader: &mut R, format: SerdeFormat) -> Self;
+
+    /// Writes polynomial to buffer using `SerdePrimeField::write`. Named
+    /// `write_poly` for the same reason as [`HostPolyIo::read_poly`].
+    fn write_poly<W: io::Write>(&self, writer: &mut W, format: SerdeFormat);
+}
+
+impl<F: SerdePrimeField, B> HostPolyIo<F, B> for Polynomial<F, B, Host> {
+    fn read_poly<R: io::Read>(reader: &mut R, format: SerdeFormat) -> Self {
         let mut poly_len = [0u8; 4];
         reader.read_exact(&mut poly_len).unwrap();
         let poly_len = u32::from_be_bytes(poly_len);
         let values: Vec<F> = (0..poly_len)
             .map(|_| F::read(reader, format).unwrap())
             .collect();
-        Self::new(values)
+        Polynomial::new(values)
     }
 
-    /// Writes polynomial to buffer using `SerdePrimeField::write`.
-    pub(crate) fn write<W: io::Write>(&self, writer: &mut W, format: SerdeFormat) {
+    fn write_poly<W: io::Write>(&self, writer: &mut W, format: SerdeFormat) {
         let values = self.values();
         writer
             .write_all(&(values.len() as u32).to_be_bytes())
@@ -674,120 +512,9 @@ where
         if status.code != 0 {
             return Err(status.into());
         }
-        results.push(Polynomial::from_device(d_col));
+        results.push(Polynomial::from_backing(d_col));
     }
     Ok(results)
-}
-
-impl<F: Field> Polynomial<Assigned<F>, LagrangeCoeff> {
-    pub fn invert(
-        &self,
-        inv_denoms: impl ExactSizeIterator<Item = F>,
-    ) -> Polynomial<F, LagrangeCoeff> {
-        let src = self.values();
-        assert_eq!(inv_denoms.len(), src.len());
-        let values: Vec<F> = src
-            .iter()
-            .zip(inv_denoms)
-            .map(|(a, inv_den)| a.numerator() * inv_den)
-            .collect();
-        Polynomial::new(values)
-    }
-}
-
-impl<'a, F: Field, B: Basis> Add<&'a Polynomial<F, B, Host>> for Polynomial<F, B, Host> {
-    type Output = Polynomial<F, B, Host>;
-
-    fn add(mut self, rhs: &'a Polynomial<F, B, Host>) -> Polynomial<F, B, Host> {
-        let rhs_slice = rhs.values();
-        parallelize(self.values_mut(), |lhs, start| {
-            for (lhs, rhs) in lhs.iter_mut().zip(rhs_slice[start..].iter()) {
-                *lhs += *rhs;
-            }
-        });
-        self
-    }
-}
-
-impl<'a, F: Field, B: Basis> Sub<&'a Polynomial<F, B, Host>> for Polynomial<F, B, Host> {
-    type Output = Polynomial<F, B, Host>;
-
-    fn sub(mut self, rhs: &'a Polynomial<F, B, Host>) -> Polynomial<F, B, Host> {
-        let rhs_slice = rhs.values();
-        parallelize(self.values_mut(), |lhs, start| {
-            for (lhs, rhs) in lhs.iter_mut().zip(rhs_slice[start..].iter()) {
-                *lhs -= *rhs;
-            }
-        });
-        self
-    }
-}
-
-impl<F: Field> Polynomial<F, LagrangeCoeff, Host> {
-    /// Rotates the values in a Lagrange basis polynomial by `Rotation`
-    pub fn rotate(&self, rotation: Rotation) -> Polynomial<F, LagrangeCoeff, Host> {
-        let mut values = self.values().to_vec();
-        if rotation.0 < 0 {
-            values.rotate_right((-rotation.0) as usize);
-        } else {
-            values.rotate_left(rotation.0 as usize);
-        }
-        Polynomial::new(values)
-    }
-}
-
-impl<F: Field, B: Basis> Mul<F> for Polynomial<F, B, Host> {
-    type Output = Polynomial<F, B, Host>;
-
-    fn mul(mut self, rhs: F) -> Polynomial<F, B, Host> {
-        if rhs == F::ZERO {
-            return Polynomial::new(vec![F::ZERO; self.len()]);
-        }
-        if rhs == F::ONE {
-            return self;
-        }
-
-        parallelize(self.values_mut(), |lhs, _| {
-            for lhs in lhs.iter_mut() {
-                *lhs *= rhs;
-            }
-        });
-
-        self
-    }
-}
-
-impl<F: Field, B: Basis> Sub<F> for &Polynomial<F, B, Host> {
-    type Output = Polynomial<F, B, Host>;
-
-    fn sub(self, rhs: F) -> Polynomial<F, B, Host> {
-        let mut res = self.clone();
-        res.values_mut()[0] -= rhs;
-        res
-    }
-}
-
-/// Describes the relative rotation of a vector. Negative numbers represent
-/// reverse (leftmost) rotations and positive numbers represent forward (rightmost)
-/// rotations. Zero represents no rotation.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct Rotation(pub i32);
-
-impl Rotation {
-    /// The current location in the evaluation domain
-    pub fn cur() -> Rotation {
-        Rotation(0)
-    }
-
-    /// The previous location in the evaluation domain
-    pub fn prev() -> Rotation {
-        Rotation(-1)
-    }
-
-    /// The next location in the evaluation domain
-    pub fn next() -> Rotation {
-        Rotation(1)
-    }
 }
 
 #[cfg(test)]
@@ -1038,8 +765,8 @@ mod tests {
                 })
                 .collect();
 
-            let host_input: Vec<&[Assigned<Fr>]> = columns.iter().map(|c| c.as_slice()).collect();
-            let device_input: Vec<&[Assigned<Fr>]> = host_input.clone();
+            let host_input: Vec<Vec<Assigned<Fr>>> = columns.clone();
+            let device_input: Vec<Vec<Assigned<Fr>>> = columns;
 
             let host_polys: Vec<Polynomial<Fr, LagrangeCoeff>> =
                 batch_invert_assigned_gpu(host_input).expect("host-output batch_invert failed");

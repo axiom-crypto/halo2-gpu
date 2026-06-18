@@ -13,7 +13,10 @@ use crate::helpers::{
     polynomial_slice_byte_length, read_polynomial_vec, write_polynomial_slice, SerdeCurveAffine,
     SerdePrimeField,
 };
-use crate::poly::{Coeff, EvaluationDomain, LagrangeCoeff, PinnedEvaluationDomain, Polynomial};
+use crate::poly::{
+    Coeff, DevicePolyExt, EvaluationDomain, HostPolyExt, HostPolyIo, LagrangeCoeff,
+    PinnedEvaluationDomain, Polynomial,
+};
 use crate::transcript::{ChallengeScalar, EncodedChallenge, Transcript};
 use crate::SerdeFormat;
 use once_cell::sync::OnceCell;
@@ -613,9 +616,9 @@ where
     /// Does so by first writing the verifying key and then serializing the rest of the data (in the form of field polynomials)
     pub fn write<W: io::Write>(&self, writer: &mut W, format: SerdeFormat) -> io::Result<()> {
         self.vk.write(writer, format)?;
-        self.l0.write(writer, format);
-        self.l_last.write(writer, format);
-        self.l_active_row.write(writer, format);
+        self.l0.write_poly(writer, format);
+        self.l_last.write_poly(writer, format);
+        self.l_active_row.write_poly(writer, format);
         write_polynomial_slice(&self.fixed_values, writer, format);
         write_polynomial_slice(&self.fixed_polys, writer, format);
         self.permutation.write(writer, format);
@@ -644,9 +647,9 @@ where
             #[cfg(feature = "circuit-params")]
             params,
         )?;
-        let l0 = Polynomial::read(reader, format);
-        let l_last = Polynomial::read(reader, format);
-        let l_active_row = Polynomial::read(reader, format);
+        let l0 = Polynomial::read_poly(reader, format);
+        let l_last = Polynomial::read_poly(reader, format);
+        let l_active_row = Polynomial::read_poly(reader, format);
         let fixed_values = read_polynomial_vec(reader, format);
         let fixed_polys = read_polynomial_vec(reader, format);
         let permutation = permutation::ProvingKey::read(reader, format);

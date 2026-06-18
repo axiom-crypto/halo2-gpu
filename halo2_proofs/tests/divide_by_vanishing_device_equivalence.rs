@@ -3,7 +3,9 @@
 //! Host and device execution should produce identical extended-Lagrange output.
 
 use ff::Field;
-use halo2_axiom_gpu::poly::{Device, EvaluationDomain, ExtendedLagrangeCoeff, Polynomial};
+use halo2_axiom_gpu::poly::{
+    Device, DevicePolyExt, EvaluationDomain, ExtendedLagrangeCoeff, Polynomial,
+};
 use halo2curves::bn256::Fr;
 use rand_core::OsRng;
 

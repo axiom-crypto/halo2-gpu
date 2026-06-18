@@ -19,7 +19,8 @@ use crate::{
     plonk::{ChallengeX, Error},
     poly::{
         commitment::{Blind, ParamsProver},
-        Coeff, Device, EvaluationDomain, ExtendedLagrangeCoeff, Host, Polynomial, ProverQuery,
+        Coeff, Device, DeviceChunks, DevicePolyExt, EvaluationDomain, ExtendedLagrangeCoeff, Host,
+        Polynomial, ProverQuery,
     },
     transcript::{EncodedChallenge, TranscriptWrite},
 };

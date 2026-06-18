@@ -9,7 +9,10 @@ use crate::plonk::evaluation::{get_rotation_idx, Evaluator, EvaluatorVkView};
 use crate::plonk::{lookup, permutation, Any};
 use crate::{
     arithmetic::{best_fft, CurveAffine},
-    poly::{Coeff, EvaluationDomain, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial, Rotation},
+    poly::{
+        Coeff, DevicePolyExt, EvaluationDomain, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial,
+        Rotation,
+    },
 };
 
 /// CPU equivalent of [`EvaluationDomain::coeff_to_extended_part`].
@@ -476,8 +479,8 @@ mod test_eval {
         FixedQuery, Gate, InstanceQuery,
     };
     use crate::poly::{
-        Coeff, Device, EvaluationDomain, ExtendedLagrangeCoeff, LagrangeCoeff, MaybeDevice,
-        Polynomial, Rotation,
+        Coeff, Device, DevicePolyExt, EvaluationDomain, ExtendedLagrangeCoeff, HostPolyExt,
+        LagrangeCoeff, MaybeDevice, Polynomial, Rotation,
     };
 
     use rand::Rng;

@@ -1,5 +1,7 @@
 //! CPU counterparts of operations defined in `crate::poly`.
 
+use std::ops::Deref;
+
 use group::ff::{BatchInvert, Field};
 use itertools::Itertools;
 use rayon::prelude::*;
@@ -18,7 +20,7 @@ pub(crate) fn batch_invert_assigned<F: Field, PR>(
     assigned: impl AsRef<[PR]>,
 ) -> Vec<Polynomial<F, LagrangeCoeff>>
 where
-    PR: AsRef<[Assigned<F>]> + Send + Sync,
+    PR: Deref<Target = [Assigned<F>]> + Send + Sync,
 {
     batch_invert_assigned_par(assigned)
 }
@@ -27,13 +29,13 @@ pub(crate) fn batch_invert_assigned_par<F: Field, PR>(
     assigned: impl AsRef<[PR]>,
 ) -> Vec<Polynomial<F, LagrangeCoeff>>
 where
-    PR: AsRef<[Assigned<F>]> + Send + Sync,
+    PR: Deref<Target = [Assigned<F>]> + Send + Sync,
 {
     let assigned = assigned.as_ref();
     if assigned.is_empty() {
         return vec![];
     }
-    let n = assigned[0].as_ref().len();
+    let n = assigned[0].deref().len();
     // 1d vector better for memory allocation
     let mut assigned_denominators: Vec<Option<_>> = assigned
         .par_iter()
@@ -64,7 +66,7 @@ where
         .par_iter()
         .zip(assigned_denominators.par_chunks(n))
         .map(|(poly, inv_denoms)| {
-            let poly = poly.as_ref();
+            let poly = poly.deref();
             debug_assert_eq!(inv_denoms.len(), poly.len());
             let values: Vec<F> = poly
                 .par_iter()
@@ -94,7 +96,7 @@ pub(crate) fn batch_invert_assigned_gpu<F: Field, PR>(
     assigned: impl AsRef<[PR]>,
 ) -> Result<Vec<Polynomial<F, LagrangeCoeff>>, HaloGpuError>
 where
-    PR: AsRef<[Assigned<F>]> + Send + Sync,
+    PR: Deref<Target = [Assigned<F>]> + Send + Sync,
 {
     #[cfg(feature = "profile")]
     let time = std::time::Instant::now();
@@ -102,12 +104,12 @@ where
     if assigned.is_empty() {
         return Ok(vec![]);
     }
-    let n = assigned[0].as_ref().len();
+    let n = assigned[0].deref().len();
     // 1d vector better for memory allocation
     let mut assigned_denominators: Vec<_> = assigned
         .par_iter()
         .flat_map(|f| {
-            f.as_ref()
+            f.deref()
                 .par_iter()
                 .map(|value| value.denominator().unwrap_or(F::ONE))
         })
@@ -123,7 +125,7 @@ where
         .par_iter()
         .zip(assigned_denominators.par_chunks_exact(n))
         .map(|(poly, inv_denoms)| {
-            let poly = poly.as_ref();
+            let poly = poly.deref();
             debug_assert_eq!(inv_denoms.len(), poly.len());
             let values: Vec<F> = poly
                 .par_iter()

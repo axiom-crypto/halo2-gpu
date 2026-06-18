@@ -14,7 +14,7 @@ use crate::cuda::utils::{
     HALO2_GPU_CTX,
 };
 use crate::cuda::HaloGpuError;
-use crate::poly::{Coeff, NttType, Polynomial};
+use crate::poly::{Coeff, DevicePolyExt, NttType, Polynomial};
 use ff::Field;
 use openvm_cuda_common::copy::MemCopyH2D;
 use openvm_cuda_common::d_buffer::DeviceBuffer;

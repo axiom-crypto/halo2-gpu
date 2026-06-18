@@ -3,7 +3,9 @@
 //! Host and device execution should produce identical flattened output.
 
 use ff::Field;
-use halo2_axiom_gpu::poly::{Device, EvaluationDomain, LagrangeCoeff, MaybeDevice, Polynomial};
+use halo2_axiom_gpu::poly::{
+    Device, DevicePolyExt, EvaluationDomain, LagrangeCoeff, MaybeDevice, Polynomial,
+};
 use halo2curves::bn256::Fr;
 use rand_core::OsRng;
 
