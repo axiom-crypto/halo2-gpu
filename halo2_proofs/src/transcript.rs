@@ -426,8 +426,9 @@ where
         Ok(())
     }
 
-    fn common_scalar(&mut self, _scalar: C::Scalar) -> io::Result<()> {
+    fn common_scalar(&mut self, scalar: C::Scalar) -> io::Result<()> {
         self.state.update([KECCAK256_PREFIX_SCALAR]);
+        self.state.update(scalar.to_repr().as_ref());
         Ok(())
     }
 }
