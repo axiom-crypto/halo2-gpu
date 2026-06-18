@@ -84,7 +84,7 @@ fn main() -> Result<()> {
     let openvm_verifier = sdk
         .generate_halo2_verifier_solidity()
         .expect("generate_halo2_verifier_solidity failed");
-    Sdk::verify_evm_halo2_proof(&openvm_verifier, evm_proof)
+    Sdk::verify_evm_halo2_proof(&openvm_verifier, evm_proof, None)
         .expect("verify_evm_halo2_proof failed");
 
     Ok(())
