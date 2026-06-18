@@ -29,3 +29,6 @@ strip = false
 inherits = "release"
 lto = "fat"
 codegen-units = 1
+
+[patch."https://github.com/axiom-crypto/halo2-gpu.git"]
+halo2-axiom-gpu = { path = "halo2_proofs" }
