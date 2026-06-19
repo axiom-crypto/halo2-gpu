@@ -118,6 +118,10 @@ pub struct GpuProvingKey<C: CurveAffine> {
     domain: EvaluationDomain<C::Scalar>,
     /// GPU quotient evaluator, `Evaluator::new(&self.cs)`.
     ev: Evaluator<C>,
+    /// Cached maximum degree of `cs` (constant after construction). Avoids
+    /// rescanning all gates/lookups via `cs.degree()` on the hot proof path
+    /// (the permutation commit and the quotient `EvaluatorVkView`).
+    cs_degree: usize,
     /// Cached `transcript_repr` of the canonical vk, copied at `from_host`.
     /// Lets `hash_into` write the vk representative without re-borrowing the
     /// canonical vk (whose `get_vk()` accessor is `FromUniformBytes`-bounded),
@@ -155,6 +159,7 @@ impl<C: CurveAffine> Clone for GpuProvingKey<C> {
             cs: self.cs.clone(),
             domain: self.domain.clone(),
             ev: self.ev.clone(),
+            cs_degree: self.cs_degree,
             transcript_repr: self.transcript_repr,
             fixed_polys_device: OnceCell::new(),
             fixed_values_device: OnceCell::new(),
@@ -185,12 +190,14 @@ where
         let domain =
             EvaluationDomain::new(hdomain.get_quotient_poly_degree() as u32 + 1, hdomain.k());
         let ev = Evaluator::new(&cs);
+        let cs_degree = cs.degree();
         let transcript_repr = inner.get_vk().transcript_repr();
         GpuProvingKey {
             inner,
             cs,
             domain,
             ev,
+            cs_degree,
             transcript_repr,
             fixed_polys_device: OnceCell::new(),
             fixed_values_device: OnceCell::new(),

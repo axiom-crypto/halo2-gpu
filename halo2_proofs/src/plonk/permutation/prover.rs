@@ -92,8 +92,8 @@ impl Argument {
         // We need to multiply by z(X) and (1 - (l_last(X) + l_blind(X))). This
         // will never underflow because of the requirement of at least a degree
         // 3 circuit for the permutation argument.
-        assert!(pk.cs.degree() >= 3);
-        let chunk_len = pk.cs.degree() - 2;
+        assert!(pk.cs_degree >= 3);
+        let chunk_len = pk.cs_degree - 2;
         let blinding_factors = pk.cs.blinding_factors();
 
         // Each column gets its own delta power.

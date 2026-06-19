@@ -1074,7 +1074,7 @@ where
     // `GpuProvingKey` (the prover never touches the canonical vk's forked cs).
     let view = EvaluatorVkView {
         blinding_factors: pk.cs.blinding_factors(),
-        cs_degree: pk.cs.degree(),
+        cs_degree: pk.cs_degree,
         permutation_argument: &pk.cs.permutation,
         domain: &pk.domain,
     };
