@@ -3,7 +3,7 @@ use super::{
     strategy::Guard,
     Coeff, LagrangeCoeff, Polynomial,
 };
-use crate::poly::Error;
+use crate::poly::{DevicePolyExt, Error};
 use crate::transcript::{EncodedChallenge, TranscriptRead, TranscriptWrite};
 use ff::Field;
 use halo2curves::CurveAffine;

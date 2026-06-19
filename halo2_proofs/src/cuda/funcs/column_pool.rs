@@ -1,5 +1,6 @@
 use crate::cuda::utils::{query_device_free_bytes_for_chunking, HALO2_GPU_CTX};
 use crate::cuda::HaloGpuError;
+use crate::poly::DevicePolyExt;
 use ff::Field;
 use openvm_cuda_common::copy::MemCopyH2D;
 use openvm_cuda_common::d_buffer::DeviceBuffer;

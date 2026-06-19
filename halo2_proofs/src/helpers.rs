@@ -1,4 +1,4 @@
-use crate::poly::Polynomial;
+use crate::poly::{PolyIo, Polynomial};
 use ff::PrimeField;
 use halo2curves::{serde::SerdeObject, CurveAffine};
 
@@ -122,7 +122,7 @@ pub(crate) fn read_polynomial_vec<R: io::Read, F: SerdePrimeField, B>(
     let len = u32::from_be_bytes(len);
 
     (0..len)
-        .map(|_| Polynomial::<F, B>::read(reader, format))
+        .map(|_| Polynomial::<F, B>::read_poly(reader, format))
         .collect()
 }
 
@@ -136,7 +136,7 @@ pub(crate) fn write_polynomial_slice<W: io::Write, F: SerdePrimeField, B>(
         .write_all(&(slice.len() as u32).to_be_bytes())
         .unwrap();
     for poly in slice.iter() {
-        poly.write(writer, format);
+        poly.write_poly(writer, format);
     }
 }
 

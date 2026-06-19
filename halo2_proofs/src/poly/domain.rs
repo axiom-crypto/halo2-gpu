@@ -2,6 +2,7 @@
 //! domain that is of a suitable size for the application.
 use std::collections::HashMap;
 
+use std::ops::{Deref, DerefMut};
 use std::panic;
 
 use crate::cuda::culib::_halo2_fft_normal_check_memory;
@@ -23,7 +24,9 @@ use crate::{
 use openvm_cuda_common::copy::MemCopyH2D;
 use openvm_cuda_common::d_buffer::DeviceBuffer;
 
-use super::{Coeff, Device, ExtendedLagrangeCoeff, Host, LagrangeCoeff, Polynomial, Rotation};
+use super::{
+    Coeff, Device, DevicePolyExt, ExtendedLagrangeCoeff, Host, LagrangeCoeff, Polynomial, Rotation,
+};
 
 /// Helper trait dispatching [`EvaluationDomain::lagrange_to_coeff_many`] per
 /// input residency. Impl'd for `Polynomial<F, LagrangeCoeff, Host>` and
@@ -951,7 +954,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         in_many: &[PR],
     ) -> Result<Vec<Polynomial<F, ExtendedLagrangeCoeff>>, Error>
     where
-        PR: AsRef<[F]> + Send + Sync,
+        PR: Deref<Target = [F]> + Send + Sync,
     {
         crate::perf_section!("coeff_to_extended_many");
         log::info!("using coeff_to_extended_many: vec_num[{}]", in_many.len());
@@ -1197,20 +1200,20 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
 
     fn cosetfft_many<PR, PM>(&self, a_many: &[PR], b_many: &mut [PM]) -> Result<(), HaloGpuError>
     where
-        PR: AsRef<[F]> + Send + Sync,
-        PM: AsMut<[F]> + Send + Sync,
+        PR: Deref<Target = [F]> + Send + Sync,
+        PM: DerefMut<Target = [F]> + Send + Sync,
     {
         let get_slice_polys_ffi_in = |polys: &[PR]| {
             polys
                 .iter()
-                .map(|poly| FFITraitObject::from_slice(poly.as_ref()))
+                .map(|poly| FFITraitObject::from_slice(poly))
                 .collect::<Vec<FFITraitObject>>()
         };
 
         let get_slice_polys_ffi_out = |polys: &mut [PM]| {
             polys
                 .iter_mut()
-                .map(|poly| FFITraitObject::from_slice(poly.as_mut()))
+                .map(|poly| FFITraitObject::from_slice(poly))
                 .collect::<Vec<FFITraitObject>>()
         };
 
@@ -1234,13 +1237,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             )?;
         } else {
             for (a, b) in a_many.iter().zip(b_many.iter_mut()) {
-                self.coset_fft_single_gpu(
-                    a.as_ref(),
-                    b.as_mut(),
-                    self.extended_omega,
-                    self.k,
-                    self.extended_k,
-                )?;
+                self.coset_fft_single_gpu(a, b, self.extended_omega, self.k, self.extended_k)?;
             }
         }
         Ok(())

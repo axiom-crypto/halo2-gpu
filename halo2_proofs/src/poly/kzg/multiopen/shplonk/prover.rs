@@ -18,7 +18,7 @@ use crate::helpers::SerdeCurveAffine;
 use crate::poly::commitment::{Blind, ParamsProver, Prover};
 use crate::poly::kzg::commitment::{KZGCommitmentScheme, ParamsKZG};
 use crate::poly::query::{PolynomialPointer, ProverQuery};
-use crate::poly::{Coeff, Device, PolyRef, Polynomial};
+use crate::poly::{Coeff, Device, DevicePolyExt, PolyRef, Polynomial};
 use crate::transcript::{EncodedChallenge, TranscriptWrite};
 use openvm_cuda_common::copy::{MemCopyD2H, MemCopyH2D};
 use openvm_cuda_common::d_buffer::DeviceBuffer;

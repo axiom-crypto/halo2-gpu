@@ -19,7 +19,7 @@ use crate::{
     plonk::{self, Error},
     poly::{
         commitment::{Blind, Params},
-        Coeff, Device, LagrangeCoeff, Polynomial, ProverQuery, Rotation,
+        Coeff, Device, DevicePolyExt, LagrangeCoeff, PolyEvalAt, Polynomial, ProverQuery, Rotation,
     },
     transcript::{EncodedChallenge, TranscriptWrite},
 };

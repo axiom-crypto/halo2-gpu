@@ -15,8 +15,8 @@ use crate::{
     arithmetic::CurveAffine,
     poly::{
         commitment::{Blind, Params},
-        Coeff, Device, EvaluationDomain, LagrangeCoeff, MaybeDevice, Polynomial, ProverQuery,
-        Rotation,
+        Coeff, Device, DevicePolyExt, EvaluationDomain, LagrangeCoeff, MaybeDevice, PolyEvalAt,
+        Polynomial, ProverQuery, Rotation,
     },
     transcript::{EncodedChallenge, TranscriptWrite},
 };

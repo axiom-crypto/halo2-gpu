@@ -33,7 +33,7 @@ use crate::{
 use crate::{end_timer, start_timer};
 
 use crate::{
-    poly::{batch_invert_assigned_device, Device},
+    poly::{batch_invert_assigned_device, Device, DevicePolyExt, HostPolyExt},
     transcript::{EncodedChallenge, TranscriptWrite},
 };
 

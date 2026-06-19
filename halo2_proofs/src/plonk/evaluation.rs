@@ -11,8 +11,8 @@ use crate::cuda::utils::{
 use crate::cuda::HaloGpuError;
 use crate::plonk::{lookup, permutation, Any, Gate, ProvingKey, VerifyingKey};
 use crate::poly::{
-    Basis, Coeff, Device, EvaluationDomain, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial,
-    Rotation,
+    Basis, Coeff, Device, DevicePolyExt, EvaluationDomain, ExtendedLagrangeCoeff, LagrangeCoeff,
+    Polynomial, Rotation,
 };
 use ff::{Field, PrimeField, WithSmallOrderMulGroup};
 use halo2curves::CurveAffine;

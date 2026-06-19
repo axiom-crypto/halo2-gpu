@@ -30,7 +30,7 @@ use crate::cuda::funcs::{
 use crate::cuda::utils::FFITraitObject;
 use crate::cuda::utils::HALO2_GPU_CTX;
 use crate::fft::recursive::FFTData;
-use crate::poly::{EvaluationDomain, NttType};
+use crate::poly::{DeviceChunks, DevicePolyExt, EvaluationDomain, NttType};
 use openvm_cuda_common::copy::{MemCopyD2H, MemCopyH2D};
 use openvm_cuda_common::d_buffer::DeviceBuffer;
 

@@ -21,7 +21,7 @@ use crate::cuda::utils::HALO2_GPU_CTX;
 #[cfg(feature = "vram-fallback")]
 use crate::cuda::HaloGpuError;
 #[cfg(feature = "vram-fallback")]
-use crate::poly::{Device, ExtendedLagrangeCoeff, Host, MaybeDevice};
+use crate::poly::{Device, DevicePolyExt, ExtendedLagrangeCoeff, Host, MaybeDevice};
 
 #[allow(clippy::uninit_vec)]
 pub(crate) fn lagrange_to_coeff_many_host<F: WithSmallOrderMulGroup<3>>(

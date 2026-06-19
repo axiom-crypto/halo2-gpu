@@ -6,7 +6,7 @@ use crate::cuda::funcs::{
 use crate::cuda::utils::HALO2_GPU_CTX;
 use crate::helpers::SerdeCurveAffine;
 use crate::poly::commitment::{Blind, CommitmentScheme, Params, ParamsProver, ParamsVerifier};
-use crate::poly::{Coeff, LagrangeCoeff, Polynomial};
+use crate::poly::{Coeff, DevicePolyExt, LagrangeCoeff, Polynomial};
 use crate::SerdeFormat;
 
 use ff::{Field, PrimeField};

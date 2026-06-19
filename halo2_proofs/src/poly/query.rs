@@ -4,7 +4,7 @@ use super::commitment::MSM;
 use crate::{
     arithmetic::eval_polynomial,
     cuda::funcs::eval_polynomial_device,
-    poly::{Coeff, Device, Host, Polynomial},
+    poly::{Coeff, Device, DevicePolyExt, Host, Polynomial},
 };
 use halo2curves::CurveAffine;
 
