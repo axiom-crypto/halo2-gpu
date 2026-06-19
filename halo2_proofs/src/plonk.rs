@@ -14,8 +14,8 @@ use crate::helpers::{
     SerdePrimeField,
 };
 use crate::poly::{
-    Coeff, DevicePolyExt, EvaluationDomain, HostPolyExt, HostPolyIo, LagrangeCoeff,
-    PinnedEvaluationDomain, Polynomial,
+    Coeff, DevicePolyExt, EvaluationDomain, HostPolyExt, LagrangeCoeff, PinnedEvaluationDomain,
+    PolyIo, Polynomial,
 };
 use crate::transcript::{ChallengeScalar, EncodedChallenge, Transcript};
 use crate::SerdeFormat;

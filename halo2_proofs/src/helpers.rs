@@ -1,4 +1,4 @@
-use crate::poly::{HostPolyIo, Polynomial};
+use crate::poly::{PolyIo, Polynomial};
 use ff::PrimeField;
 use halo2curves::{serde::SerdeObject, CurveAffine};
 

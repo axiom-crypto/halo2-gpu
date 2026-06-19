@@ -55,11 +55,9 @@ pub enum Error {
     SamplingError,
 }
 
-/// The unified [`Polynomial`] type and its storage-marker machinery
-/// (`Storage`/`Host`/`Basis` + the basis markers + `Rotation`) now live in the
-/// CPU crate `halo2-axiom`. halo2-gpu re-exports them so existing
-/// `crate::poly::*` paths keep resolving, and implements the `Device` storage
-/// plus all Device-side behaviour locally below.
+/// The unified [`Polynomial`] and its storage-marker machinery
+/// (`Storage`/`Host`/`Basis`/`Rotation`) live in `halo2-axiom`, re-exported here
+/// so `crate::poly::*` resolves; `Device` storage is implemented below.
 pub use halo2_axiom::poly::{
     Basis, Coeff, ExtendedLagrangeCoeff, Host, LagrangeCoeff, Polynomial, Rotation, Storage,
 };
@@ -77,18 +75,15 @@ impl Storage for Device {
     const IS_DEVICE: bool = true;
 }
 
-/// Additive type aliases that make residency visible at the function-signature
-/// level. The underlying generic [`Polynomial`] stays the canonical type;
-/// these aliases give readers a one-token signal of the storage residency
-/// without forcing them to inspect the generic parameter list.
+/// Residency-visible aliases over the generic [`Polynomial`] — a one-token
+/// signal of storage residency at the signature level.
 pub type HostPoly<F, B> = Polynomial<F, B, Host>;
 /// Device-resident counterpart of [`HostPoly`]; see its docs for rationale.
 pub type DevicePoly<F, B> = Polynomial<F, B, Device>;
 
-/// Owned residency-tagged polynomial used at boundary sites where the
-/// producer's residency choice is decided at runtime (typically by GPU
-/// availability or VRAM-fallback feature gates) but the consumer must dispatch
-/// per residency at compile time.
+/// Owned residency-tagged polynomial for boundary sites where residency is
+/// decided at runtime (GPU availability / VRAM fallback) but consumers must
+/// dispatch per residency.
 pub enum MaybeDevice<F, B> {
     Host(Polynomial<F, B, Host>),
     Device(Polynomial<F, B, Device>),
@@ -161,27 +156,9 @@ impl<F, B> From<Polynomial<F, B, Device>> for MaybeDevice<F, B> {
     }
 }
 
-// ============================================================================
-// Device-side and host<->device crossing behaviour.
-//
-// `Polynomial` is now foreign to this crate (it lives in `halo2-axiom`), so the
-// methods that used to be inherent on it can no longer be written as inherent
-// impls here. They are re-expressed as local extension traits that build and
-// read the foreign `Polynomial` exclusively through its public generic seam
-// (`from_backing` / `backing` / `into_backing`) and the public Host helpers
-// (`new` / `values` / `into_values`). Method names are preserved verbatim so
-// call sites only need the relevant trait in scope.
-//
-// Safety contract for `Device` storage:
-//
-// `DeviceBuffer<F>` (the inner storage of a `Polynomial<_, _, Device>`) lives
-// behind `HALO2_GPU_CTX.stream` — a single explicit `cudaStream_t` shared
-// across the entire prover (see `cuda/utils.rs`). All device work serializes
-// through that stream; cross-thread races on the underlying device memory are
-// impossible by construction. `Send`/`Sync` for the device polynomial now
-// auto-derive from `DeviceBuffer<F>`'s own unconditional `Send`/`Sync` impls
-// (in `openvm_cuda_common`), so no manual `unsafe impl` is needed here.
-// ============================================================================
+// `Polynomial` lives in `halo2-axiom`; device and host<->device crossings are
+// provided here as extension traits over its public seam. `Device` storage is
+// `Send`/`Sync` via `DeviceBuffer` (all work serializes through the shared stream).
 
 /// Host-resident extension methods (crossing into Device + fallible clone).
 pub trait HostPolyExt<F, B> {
@@ -191,9 +168,7 @@ pub trait HostPolyExt<F, B> {
         device_ctx: &GpuDeviceCtx,
     ) -> Result<Polynomial<F, B, Device>, MemCopyError>;
 
-    /// Fallible clone of a host-resident polynomial. Wraps `Vec::clone` in the
-    /// same `Result` shape as the Device `try_clone` so callers can write
-    /// residency-generic code.
+    /// Fallible clone (wraps `Vec::clone` in the Device `try_clone`'s `Result`).
     fn try_clone(&self) -> Result<Polynomial<F, B, Host>, HaloGpuError>;
 }
 
@@ -215,13 +190,8 @@ impl<F: Clone, B> HostPolyExt<F, B> for Polynomial<F, B, Host> {
 /// Device-resident extension methods: construction, accessors, fallible clone,
 /// and the D→H crossings.
 pub trait DevicePolyExt<F, B>: Sized {
-    /// Construct a device-resident polynomial wrapping `buf`.
-    ///
-    /// Callers MUST verify VRAM headroom before allocating the underlying
-    /// `DeviceBuffer<F>` (typically via
-    /// `crate::cuda::modules::QuotientLookupsGpu::is_gpu_memory_enough` or
-    /// equivalent free-bytes check); by the time this constructor is reached
-    /// the buffer is already allocated, so we do not re-check here.
+    /// Wraps `buf` in a device-resident polynomial. Callers must ensure VRAM
+    /// headroom before allocating `buf`; this constructor does not re-check.
     fn from_device(buf: DeviceBuffer<F>) -> Self;
 
     /// Returns the underlying device buffer.
@@ -230,21 +200,13 @@ pub trait DevicePolyExt<F, B>: Sized {
     /// Consume the polynomial and return the owned device buffer.
     fn into_device_buf(self) -> DeviceBuffer<F>;
 
-    /// Fallible clone of a device-resident polynomial. Allocates a new
-    /// `DeviceBuffer<F>` and submits a D→D copy
-    /// (`cudaMemcpyAsync(DeviceToDevice)`) on the explicit stream.
+    /// Fallible clone: allocates a new `DeviceBuffer` and submits a D→D copy.
     fn try_clone(&self) -> Result<Self, HaloGpuError>;
 
-    /// D→H copy producing a host-resident polynomial without consuming the
-    /// device-resident original. Emits a `tracing::warn!` on the
-    /// `halo2_proofs::poly` target so unexpected materializations show up in
-    /// trace output.
+    /// D→H copy leaving the device original intact. Warns on `halo2_proofs::poly`.
     fn to_host(&self) -> Polynomial<F, B, Host>;
 
-    /// D→H copy that consumes the device polynomial and returns the
-    /// host-resident equivalent. Emits a `tracing::warn!` on the
-    /// `halo2_proofs::poly` target so unexpected materializations show up
-    /// in trace output.
+    /// D→H copy consuming the device polynomial. Warns on `halo2_proofs::poly`.
     fn materialize_host(self) -> Polynomial<F, B, Host>;
 }
 
@@ -355,16 +317,9 @@ impl<F: Field> PolyEvalAt<F> for Polynomial<F, Coeff, Device> {
 
 /// Device-resident coefficient-basis chunking.
 pub trait DeviceChunks<F>: Sized {
-    /// Splits a Device-resident `Polynomial<F, Coeff, Device>` into pieces of
-    /// length `chunk_len` each. Self is consumed; the parent allocation is
-    /// freed after the loop completes. Peak transient device memory is
-    /// roughly `2 * parent.len() * sizeof::<F>()` during the loop (parent +
-    /// all chunks alive simultaneously); this matches the prior host path's
-    /// `to_vec()` per chunk transient.
-    ///
-    /// At fibonacci shape `parent.len() == n * quotient_poly_degree`,
-    /// `chunk_len == n`, `num_chunks == quotient_poly_degree` (3 for outer,
-    /// 4 for wrapper); both tile cleanly.
+    /// Splits the consumed polynomial into `chunk_len`-sized device pieces via
+    /// D→D copies. `chunk_len` must divide the length. Peak transient memory is
+    /// ~2x the parent (parent + all chunks live during the loop).
     fn chunks_device(self, chunk_len: usize) -> Vec<Polynomial<F, Coeff, Device>>;
 }
 
@@ -406,22 +361,20 @@ impl<F> DeviceChunks<F> for Polynomial<F, Coeff, Device> {
     }
 }
 
-/// Host-resident polynomial serialization. These mirror the `pub(crate)`
-/// `read`/`write` that the CPU crate keeps private; halo2-gpu re-expresses them
-/// locally over the public `new`/`values` API so its keygen/proving-key
-/// serialization keeps working.
-pub(crate) trait HostPolyIo<F, B> {
-    /// Reads polynomial from buffer using `SerdePrimeField::read`. Named
-    /// `read_poly` (not `read`) so it is not shadowed by the CPU crate's
-    /// `pub(crate)` inherent `read`, which is in-name-but-out-of-scope here.
+/// Length-prefixed polynomial serialization, matching the wire format of the
+/// CPU crate's `pub(crate)` `read`/`write`. Deserialization yields a host
+/// polynomial; cross to device explicitly via [`HostPolyExt::to_device_on`].
+pub(crate) trait PolyIo<F, B> {
+    /// Reads a polynomial via `SerdePrimeField::read`. Named `read_poly` (not
+    /// `read`) to avoid shadowing the CPU crate's `pub(crate)` inherent `read`.
     fn read_poly<R: io::Read>(reader: &mut R, format: SerdeFormat) -> Self;
 
-    /// Writes polynomial to buffer using `SerdePrimeField::write`. Named
-    /// `write_poly` for the same reason as [`HostPolyIo::read_poly`].
+    /// Writes a polynomial using `SerdePrimeField::write`. Named `write_poly`
+    /// for the same reason as [`PolyIo::read_poly`].
     fn write_poly<W: io::Write>(&self, writer: &mut W, format: SerdeFormat);
 }
 
-impl<F: SerdePrimeField, B> HostPolyIo<F, B> for Polynomial<F, B, Host> {
+impl<F: SerdePrimeField, B> PolyIo<F, B> for Polynomial<F, B, Host> {
     fn read_poly<R: io::Read>(reader: &mut R, format: SerdeFormat) -> Self {
         let mut poly_len = [0u8; 4];
         reader.read_exact(&mut poly_len).unwrap();
@@ -443,25 +396,9 @@ impl<F: SerdePrimeField, B> HostPolyIo<F, B> for Polynomial<F, B, Host> {
     }
 }
 
-/// Inverts the per-cell denominators on device, then reconstructs each
-/// column's `numerator * inv_denom` product into a per-column
-/// `DeviceBuffer<F>` via the `_halo2_poly_elementwise_multiply` kernel.
-/// Returns one `Polynomial<F, LagrangeCoeff, Device>` per input column.
-///
-/// Each `&[Assigned<F>]` column is uploaded as raw `#[repr(C, u8)]`
-/// bytes (single H2D, no host enum-decode pass) and decoded on device
-/// by `_halo2_decode_assigned` into a per-column numerator buffer plus
-/// a slice into the concatenated denominator buffer. The denominators
-/// are then batch-inverted in place and the numerator * inv-denom
-/// product is reduced per column with the existing elementwise
-/// multiply kernel. Cells with `None` denominator (`Assigned::Zero` /
-/// `Assigned::Trivial`) get a `F::ONE` denominator emitted directly by
-/// the decode kernel so the multiply preserves their numerator
-/// unchanged.
-///
-/// All work is enqueued on `HALO2_GPU_CTX.stream`; the function returns
-/// before the kernels complete. Same-stream subsequent device ops see
-/// the result. Host reads require an explicit `to_host_sync()`.
+/// Device batch-inversion of per-cell denominators: each column's
+/// `numerator * inv_denom` is reduced into a `DeviceBuffer<F>` (one
+/// `Polynomial<_, LagrangeCoeff, Device>` per column), all on the shared stream.
 pub(crate) fn batch_invert_assigned_device<F: Field, PR>(
     assigned: impl AsRef<[PR]>,
 ) -> Result<Vec<Polynomial<F, LagrangeCoeff, Device>>, HaloGpuError>
@@ -677,10 +614,8 @@ mod tests {
 
         fn run_one(log_n: u32) {
             let n: usize = 1usize << log_n;
-            // Exercise all 3 variants in varied positions: every 3rd
-            // element is Zero / Trivial / Rational, plus a salt that
-            // shifts the pattern so consecutive columns sample
-            // different variant orderings.
+            // Every 3rd element is Zero / Trivial / Rational, with a salt that
+            // shifts the pattern so consecutive columns sample different orders.
             let column: Vec<Assigned<Fr>> = (0..n)
                 .map(|j| match (j + 7) % 3 {
                     0 => Assigned::Zero,
