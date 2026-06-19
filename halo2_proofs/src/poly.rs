@@ -2,11 +2,8 @@
 //! various forms, including computing commitments to them and provably opening
 //! the committed polynomials at arbitrary points.
 
-use crate::helpers::SerdePrimeField;
 use crate::plonk::Assigned;
-use crate::SerdeFormat;
 
-use std::io;
 use std::mem;
 
 use group::ff::Field;
@@ -361,40 +358,8 @@ impl<F> DeviceChunks<F> for Polynomial<F, Coeff, Device> {
     }
 }
 
-/// Length-prefixed polynomial serialization, matching the wire format of the
-/// CPU crate's `pub(crate)` `read`/`write`. Deserialization yields a host
-/// polynomial; cross to device explicitly via [`HostPolyExt::to_device_on`].
-pub(crate) trait PolyIo<F, B> {
-    /// Reads a polynomial via `SerdePrimeField::read`. Named `read_poly` (not
-    /// `read`) to avoid shadowing the CPU crate's `pub(crate)` inherent `read`.
-    fn read_poly<R: io::Read>(reader: &mut R, format: SerdeFormat) -> Self;
-
-    /// Writes a polynomial using `SerdePrimeField::write`. Named `write_poly`
-    /// for the same reason as [`PolyIo::read_poly`].
-    fn write_poly<W: io::Write>(&self, writer: &mut W, format: SerdeFormat);
-}
-
-impl<F: SerdePrimeField, B> PolyIo<F, B> for Polynomial<F, B, Host> {
-    fn read_poly<R: io::Read>(reader: &mut R, format: SerdeFormat) -> Self {
-        let mut poly_len = [0u8; 4];
-        reader.read_exact(&mut poly_len).unwrap();
-        let poly_len = u32::from_be_bytes(poly_len);
-        let values: Vec<F> = (0..poly_len)
-            .map(|_| F::read(reader, format).unwrap())
-            .collect();
-        Polynomial::new(values)
-    }
-
-    fn write_poly<W: io::Write>(&self, writer: &mut W, format: SerdeFormat) {
-        let values = self.values();
-        writer
-            .write_all(&(values.len() as u32).to_be_bytes())
-            .unwrap();
-        for value in values.iter() {
-            value.write(writer, format).unwrap();
-        }
-    }
-}
+// NOTE: the `PolyIo` host-polynomial serde trait was removed along with the
+// gpu pk/vk serde — pk serialization is now the canonical halo2-axiom path.
 
 /// Device batch-inversion of per-cell denominators: each column's
 /// `numerator * inv_denom` is reduced into a `DeviceBuffer<F>` (one

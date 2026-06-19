@@ -6,7 +6,7 @@ use super::super::{
 use super::Argument;
 use crate::{
     arithmetic::CurveAffine,
-    plonk::{Error, VerifyingKey},
+    plonk::{Error, GpuVerifyingKey},
     poly::{commitment::MSM, Rotation, VerifierQuery},
     transcript::{EncodedChallenge, TranscriptRead},
 };
@@ -170,7 +170,7 @@ impl<C: CurveAffine> Evaluated<C> {
 
     pub(in crate::plonk) fn queries<'r, M: MSM<C> + 'r>(
         &'r self,
-        vk: &'r VerifyingKey<C>,
+        vk: &'r GpuVerifyingKey<C>,
         x: ChallengeX<C>,
     ) -> impl Iterator<Item = VerifierQuery<'r, C, M>> + Clone {
         let x_inv = vk.domain.rotate_omega(*x, Rotation::prev());

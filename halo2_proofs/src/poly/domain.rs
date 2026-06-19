@@ -419,7 +419,9 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     }
 
     /// Returns an empty (zero) polynomial in the Lagrange coefficient basis, with
-    /// deferred inversions.
+    /// deferred inversions. Retained as a domain counterpart to `empty_lagrange`;
+    /// its former gpu-keygen caller now lives in halo2-axiom.
+    #[allow(dead_code)]
     pub(crate) fn empty_lagrange_assigned(&self) -> Polynomial<Assigned<F>, LagrangeCoeff> {
         Polynomial::new(vec![F::ZERO.into(); self.n as usize])
     }

@@ -9,7 +9,7 @@ use crate::cuda::utils::{
     HALO2_GPU_CTX,
 };
 use crate::cuda::HaloGpuError;
-use crate::plonk::{lookup, permutation, Any, Gate, ProvingKey, VerifyingKey};
+use crate::plonk::{lookup, permutation, Any, Gate, GpuProvingKey};
 use crate::poly::{
     Basis, Coeff, Device, DevicePolyExt, EvaluationDomain, ExtendedLagrangeCoeff, LagrangeCoeff,
     Polynomial, Rotation,
@@ -27,17 +27,6 @@ pub(crate) struct EvaluatorVkView<'a, F: Field> {
     pub(crate) cs_degree: usize,
     pub(crate) permutation_argument: &'a permutation::Argument,
     pub(crate) domain: &'a EvaluationDomain<F>,
-}
-
-fn evaluator_view_from_vk<'a, C: CurveAffine>(
-    vk: &'a VerifyingKey<C>,
-) -> EvaluatorVkView<'a, C::ScalarExt> {
-    EvaluatorVkView {
-        blinding_factors: vk.cs.blinding_factors(),
-        cs_degree: vk.cs.degree(),
-        permutation_argument: &vk.cs.permutation,
-        domain: &vk.domain,
-    }
 }
 
 /// Return the index in the polynomial of size `isize` after rotation `rot`.
@@ -463,7 +452,7 @@ impl<C: CurveAffine> Evaluator<C> {
 
     /// Creates a new evaluation structure
     pub fn new(cs: &ConstraintSystem<C::ScalarExt>) -> Self {
-        Self::new_inner(&cs.gates, &cs.lookups)
+        Self::new_inner(cs.gates(), cs.lookups())
     }
 
     fn encode(&self) -> (Vec<CalcRule>, Vec<u64>) {
@@ -1067,7 +1056,7 @@ pub(in crate::plonk) fn quotient_device<C: CurveAffine>(
 // some limitations of the current impl is that it only supports BN256.
 pub(in crate::plonk) fn evaluate_h_device<C: CurveAffine>(
     evaluator: &Evaluator<C>,
-    pk: &ProvingKey<C>,
+    pk: &GpuProvingKey<C>,
     advice_polys: &[&[Polynomial<C::ScalarExt, Coeff, Device>]],
     instance_polys: &[&[Polynomial<C::ScalarExt, Coeff, Device>]],
     challenges: &[C::ScalarExt],
@@ -1081,9 +1070,17 @@ pub(in crate::plonk) fn evaluate_h_device<C: CurveAffine>(
 where
     C::ScalarExt: WithSmallOrderMulGroup<3>,
 {
+    // The evaluator view reads the rebuilt GPU `cs`/`domain` held on the
+    // `GpuProvingKey` (the prover never touches the canonical vk's forked cs).
+    let view = EvaluatorVkView {
+        blinding_factors: pk.cs.blinding_factors(),
+        cs_degree: pk.cs.degree(),
+        permutation_argument: &pk.cs.permutation,
+        domain: &pk.domain,
+    };
     evaluate_h_inner(
         evaluator,
-        &evaluator_view_from_vk(&pk.vk),
+        &view,
         pk.l0_device().expect("l0 device failed to transport"),
         pk.l_last_device()
             .expect("l_last device failed to transport"),

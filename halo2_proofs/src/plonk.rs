@@ -4,21 +4,13 @@
 //!
 //! [halo]: https://eprint.iacr.org/2019/1021
 //! [plonk]: https://eprint.iacr.org/2019/953
-use blake2b_simd::Params as Blake2bParams;
-use group::ff::{Field, FromUniformBytes, PrimeField};
+use group::ff::FromUniformBytes;
 
 use crate::arithmetic::CurveAffine;
 use crate::cuda::utils::{query_device_free_bytes_for_chunking, HALO2_GPU_CTX};
-use crate::helpers::{
-    polynomial_slice_byte_length, read_polynomial_vec, write_polynomial_slice, SerdeCurveAffine,
-    SerdePrimeField,
-};
-use crate::poly::{
-    Coeff, DevicePolyExt, EvaluationDomain, HostPolyExt, LagrangeCoeff, PinnedEvaluationDomain,
-    PolyIo, Polynomial,
-};
-use crate::transcript::{ChallengeScalar, EncodedChallenge, Transcript};
-use crate::SerdeFormat;
+use crate::helpers::{SerdeCurveAffine, SerdePrimeField};
+use crate::poly::{Coeff, DevicePolyExt, EvaluationDomain, HostPolyExt, LagrangeCoeff, Polynomial};
+use crate::transcript::{ChallengeScalar, EncodedChallenge, Transcript, TranscriptWrite};
 use once_cell::sync::OnceCell;
 use openvm_cuda_common::copy::MemCopyH2D;
 
@@ -46,375 +38,216 @@ use evaluation::Evaluator;
 
 use std::io;
 
-/// This is a verifying key which allows for the verification of proofs for a
-/// particular circuit.
+// The canonical proving/verifying key structs are the halo2-axiom CPU types:
+// one source-of-truth struct family, byte-identical serialization for CPU and
+// GPU by construction. The GPU crate keeps its own forked composing types
+// (`ConstraintSystem`/`EvaluationDomain`/`Evaluator`/`Expression`/`lookup` and
+// `permutation::Argument`), which the GPU prover/verifier operate on after a
+// cheap host-only rebuild (`GpuProvingKey`/`GpuVerifyingKey::from_host`).
+pub use halo2_axiom::plonk::{ProvingKey, VerifyingKey};
+
+/// GPU-side verifying key. NOT serialized — the canonical, serialized
+/// verifying key is [`VerifyingKey`] (halo2-axiom). `GpuVerifyingKey` holds the
+/// GPU-crate forks (`cs`/`domain`/`permutation`) that the GPU verifier's
+/// inherent methods (`commit`/`evaluate`/`queries`) attach to, rebuilt from a
+/// canonical [`VerifyingKey`] via [`GpuVerifyingKey::from_host`].
 #[derive(Clone, Debug)]
-pub struct VerifyingKey<C: CurveAffine> {
-    domain: EvaluationDomain<C::Scalar>,
-    fixed_commitments: Vec<C>,
-    permutation: permutation::VerifyingKey<C>,
-    cs: ConstraintSystem<C::Scalar>,
+pub struct GpuVerifyingKey<C: CurveAffine> {
+    pub(crate) domain: EvaluationDomain<C::Scalar>,
+    pub(crate) fixed_commitments: Vec<C>,
+    pub(crate) permutation: permutation::VerifyingKey<C>,
+    pub(crate) cs: ConstraintSystem<C::Scalar>,
     /// Cached maximum degree of `cs` (which doesn't change after construction).
-    cs_degree: usize,
+    pub(crate) cs_degree: usize,
     /// The representative of this `VerifyingKey` in transcripts.
-    transcript_repr: C::Scalar,
-    selectors: Vec<Vec<bool>>,
-    /// Whether selector compression is turned on or not.
-    compress_selectors: bool,
+    pub(crate) transcript_repr: C::Scalar,
 }
 
-impl<C: SerdeCurveAffine> VerifyingKey<C>
+impl<C: CurveAffine> GpuVerifyingKey<C>
 where
-    C::Scalar: SerdePrimeField + FromUniformBytes<64>, // the FromUniformBytes<64> should not be necessary: currently serialization always stores a Blake2b hash of verifying key; this should be removed
+    C::Scalar: FromUniformBytes<64>,
 {
-    /// Writes a verifying key to a buffer.
-    ///
-    /// Writes a curve element according to `format`:
-    /// - `Processed`: Writes a compressed curve element with coordinates in standard form.
-    ///   Writes a field element in standard form, with endianness specified by the
-    ///   `PrimeField` implementation.
-    /// - Otherwise: Writes an uncompressed curve element with coordinates in Montgomery form
-    ///   Writes a field element into raw bytes in its internal Montgomery representation,
-    ///   WITHOUT performing the expensive Montgomery reduction.
-    pub fn write<W: io::Write>(&self, writer: &mut W, format: SerdeFormat) -> io::Result<()> {
-        // Version byte that will be checked on read.
-        writer.write_all(&[0x02])?;
-        writer.write_all(&self.domain.k().to_le_bytes())?;
-        writer.write_all(&[self.compress_selectors as u8])?;
-        writer.write_all(&(self.fixed_commitments.len() as u32).to_le_bytes())?;
-        for commitment in &self.fixed_commitments {
-            commitment.write(writer, format)?;
-        }
-        self.permutation.write(writer, format)?;
-
-        if !self.compress_selectors {
-            assert!(self.selectors.is_empty());
-        }
-        // write self.selectors
-        for selector in &self.selectors {
-            // since `selector` is filled with `bool`, we pack them 8 at a time into bytes and then write
-            for bits in selector.chunks(8) {
-                writer.write_all(&[crate::helpers::pack(bits)])?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Reads a verification key from a buffer.
-    ///
-    /// Reads a curve element from the buffer and parses it according to the `format`:
-    /// - `Processed`: Reads a compressed curve element and decompresses it.
-    ///   Reads a field element in standard form, with endianness specified by the
-    ///   `PrimeField` implementation, and checks that the element is less than the modulus.
-    /// - `RawBytes`: Reads an uncompressed curve element with coordinates in Montgomery form.
-    ///   Checks that field elements are less than modulus, and then checks that the point is on the curve.
-    /// - `RawBytesUnchecked`: Reads an uncompressed curve element with coordinates in Montgomery form;
-    ///   does not perform any checks
-    pub fn read<R: io::Read, ConcreteCircuit: Circuit<C::Scalar>>(
-        reader: &mut R,
-        format: SerdeFormat,
-        #[cfg(feature = "circuit-params")] params: ConcreteCircuit::Params,
-    ) -> io::Result<Self> {
-        let mut version_byte = [0u8; 1];
-        reader.read_exact(&mut version_byte)?;
-        if 0x02 != version_byte[0] {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "unexpected version byte",
-            ));
-        }
-        let mut k = [0u8; 4];
-        reader.read_exact(&mut k)?;
-        let k = u32::from_le_bytes(k);
-        let mut compress_selectors = [0u8; 1];
-        reader.read_exact(&mut compress_selectors)?;
-        if compress_selectors[0] != 0 && compress_selectors[0] != 1 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "unexpected compress_selectors not boolean",
-            ));
-        }
-        let compress_selectors = compress_selectors[0] == 1;
-        let (domain, cs, _) = keygen::create_domain::<C, ConcreteCircuit>(
-            k,
-            #[cfg(feature = "circuit-params")]
-            params,
-        );
-        let mut num_fixed_columns = [0u8; 4];
-        reader.read_exact(&mut num_fixed_columns)?;
-        let num_fixed_columns = u32::from_le_bytes(num_fixed_columns);
-
-        let fixed_commitments: Vec<_> = (0..num_fixed_columns)
-            .map(|_| C::read(reader, format))
-            .collect::<io::Result<_>>()?;
-
-        let permutation = permutation::VerifyingKey::read(reader, &cs.permutation, format)?;
-
-        let (cs, selectors) = if compress_selectors {
-            // read selectors
-            let selectors: Vec<Vec<bool>> = vec![vec![false; 1 << k]; cs.num_selectors]
-                .into_iter()
-                .map(|mut selector| {
-                    let mut selector_bytes = vec![0u8; selector.len().div_ceil(8)];
-                    reader.read_exact(&mut selector_bytes)?;
-                    for (bits, byte) in selector.chunks_mut(8).zip(selector_bytes) {
-                        crate::helpers::unpack(byte, bits);
-                    }
-                    Ok(selector)
-                })
-                .collect::<io::Result<_>>()?;
-            let (cs, _) = cs.compress_selectors(selectors.clone());
-            (cs, selectors)
-        } else {
-            // we still need to replace selectors with fixed Expressions in `cs`
-            let fake_selectors = vec![vec![false]; cs.num_selectors];
-            let (cs, _) = cs.directly_convert_selectors_to_fixed(fake_selectors);
-            (cs, vec![])
-        };
-
-        Ok(Self::from_parts(
-            domain,
-            fixed_commitments,
-            permutation,
-            cs,
-            selectors,
-            compress_selectors,
-        ))
-    }
-
-    /// Writes a verifying key to a vector of bytes using [`Self::write`].
-    pub fn to_bytes(&self, format: SerdeFormat) -> Vec<u8> {
-        let mut bytes = Vec::<u8>::with_capacity(self.bytes_length());
-        Self::write(self, &mut bytes, format).expect("Writing to vector should not fail");
-        bytes
-    }
-
-    /// Reads a verification key from a slice of bytes using [`Self::read`].
-    pub fn from_bytes<ConcreteCircuit: Circuit<C::Scalar>>(
-        mut bytes: &[u8],
-        format: SerdeFormat,
-        #[cfg(feature = "circuit-params")] params: ConcreteCircuit::Params,
-    ) -> io::Result<Self> {
-        Self::read::<_, ConcreteCircuit>(
-            &mut bytes,
-            format,
-            #[cfg(feature = "circuit-params")]
-            params,
-        )
-    }
-}
-
-impl<C: CurveAffine> VerifyingKey<C> {
-    fn bytes_length(&self) -> usize {
-        8 + (self.fixed_commitments.len() * C::default().to_bytes().as_ref().len())
-            + self.permutation.bytes_length()
-            + self.selectors.len()
-                * (self
-                    .selectors
-                    .first()
-                    .map(|selector| selector.len().div_ceil(8))
-                    .unwrap_or(0))
-    }
-
-    fn from_parts(
-        domain: EvaluationDomain<C::Scalar>,
-        fixed_commitments: Vec<C>,
-        permutation: permutation::VerifyingKey<C>,
-        cs: ConstraintSystem<C::Scalar>,
-        selectors: Vec<Vec<bool>>,
-        compress_selectors: bool,
-    ) -> Self
-    where
-        C::Scalar: FromUniformBytes<64>,
-    {
-        // Compute cached values.
+    /// Rebuilds the GPU verifying key from a canonical halo2-axiom
+    /// [`VerifyingKey`]. PURE HOST: a `ConstraintSystem` field-copy, a
+    /// reconstructed `EvaluationDomain::new(j, k)`, and a `Vec<C>` clone of the
+    /// permutation/fixed commitments — no device traffic, no kernel launch.
+    pub fn from_host(vk: &VerifyingKey<C>) -> Self {
+        let cs = ConstraintSystem::from(vk.cs());
         let cs_degree = cs.degree();
-
-        let mut vk = Self {
+        let hdomain = vk.get_domain();
+        let domain =
+            EvaluationDomain::new(hdomain.get_quotient_poly_degree() as u32 + 1, hdomain.k());
+        let permutation = permutation::VerifyingKey {
+            commitments: vk.permutation().commitments().clone(),
+        };
+        GpuVerifyingKey {
             domain,
-            fixed_commitments,
+            fixed_commitments: vk.fixed_commitments().clone(),
             permutation,
             cs,
             cs_degree,
-            // Temporary, this is not pinned.
-            transcript_repr: C::Scalar::ZERO,
-            selectors,
-            compress_selectors,
-        };
-
-        let mut hasher = Blake2bParams::new()
-            .hash_length(64)
-            .personal(b"Halo2-Verify-Key")
-            .to_state();
-
-        let s = format!("{:?}", vk.pinned());
-
-        hasher.update(&(s.len() as u64).to_le_bytes());
-        hasher.update(s.as_bytes());
-
-        // Hash in final Blake2bState
-        vk.transcript_repr = C::Scalar::from_uniform_bytes(hasher.finalize().as_array());
-
-        vk
+            transcript_repr: vk.transcript_repr(),
+        }
     }
 
-    /// Hashes a verification key into a transcript.
+    /// Hashes the (canonical) verifying-key representative into a transcript.
     pub fn hash_into<E: EncodedChallenge<C>, T: Transcript<C, E>>(
         &self,
         transcript: &mut T,
     ) -> io::Result<()> {
         transcript.common_scalar(self.transcript_repr)?;
-
         Ok(())
     }
-
-    /// Obtains a pinned representation of this verification key that contains
-    /// the minimal information necessary to reconstruct the verification key.
-    pub fn pinned(&self) -> PinnedVerificationKey<'_, C> {
-        PinnedVerificationKey {
-            base_modulus: C::Base::MODULUS,
-            scalar_modulus: C::Scalar::MODULUS,
-            domain: self.domain.pinned(),
-            fixed_commitments: &self.fixed_commitments,
-            permutation: &self.permutation,
-            cs: self.cs.pinned(),
-        }
-    }
-
-    /// Returns commitments of fixed polynomials
-    pub fn fixed_commitments(&self) -> &Vec<C> {
-        &self.fixed_commitments
-    }
-
-    /// Returns `VerifyingKey` of permutation
-    pub fn permutation(&self) -> &permutation::VerifyingKey<C> {
-        &self.permutation
-    }
-
-    /// Returns `ConstraintSystem`
-    pub fn cs(&self) -> &ConstraintSystem<C::Scalar> {
-        &self.cs
-    }
-
-    /// Returns representative of this `VerifyingKey` in transcripts
-    pub fn transcript_repr(&self) -> C::Scalar {
-        self.transcript_repr
-    }
 }
 
-/// Minimal representation of a verification key that can be used to identify
-/// its active contents.
-// Load-bearing: fields are read via the auto-derived `Debug` whose output is
-// hashed into `vk.transcript_repr` via Blake2b at the `vk.pinned()` call site
-// in `keygen_vk_custom`. Removing fields would change the transcript
-// representation, breaking proof/verifier compatibility.
-#[allow(dead_code)]
+/// GPU-side proving key. Wraps the canonical halo2-axiom [`ProvingKey`]
+/// (`inner`: serde source-of-truth + host-fallback polys + vk metadata) and
+/// holds the GPU-crate composing forks (`cs`/`domain`/`ev`) rebuilt from it,
+/// plus the lazy device mirrors of the pk polynomials.
 #[derive(Debug)]
-pub struct PinnedVerificationKey<'a, C: CurveAffine> {
-    base_modulus: &'static str,
-    scalar_modulus: &'static str,
-    domain: PinnedEvaluationDomain<'a, C::Scalar>,
-    cs: PinnedConstraintSystem<'a, C::Scalar>,
-    fixed_commitments: &'a Vec<C>,
-    permutation: &'a permutation::VerifyingKey<C>,
-}
-/// This is a proving key which allows for the creation of proofs for a
-/// particular circuit.
-#[derive(Debug)]
-pub struct ProvingKey<C: CurveAffine> {
-    vk: VerifyingKey<C>,
-    l0: Polynomial<C::Scalar, Coeff>,
-    l_last: Polynomial<C::Scalar, Coeff>,
-    l_active_row: Polynomial<C::Scalar, Coeff>,
-    fixed_values: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
-    fixed_polys: Vec<Polynomial<C::Scalar, Coeff>>,
-    permutation: permutation::ProvingKey<C>,
+pub struct GpuProvingKey<C: CurveAffine> {
+    /// Canonical halo2-axiom proving key: serialization, host-fallback polys
+    /// (`l0`/`fixed_values`/`fixed_polys`/`permutation`), and vk metadata
+    /// (`fixed_commitments`/`transcript_repr`/selectors).
+    inner: ProvingKey<C>,
+    /// GPU `ConstraintSystem`, rebuilt from `inner.get_vk().cs()`. Holds the
+    /// GPU `lookup`/`permutation` Arguments whose inherent `commit_permuted`/
+    /// `commit` methods the prover calls.
+    cs: ConstraintSystem<C::Scalar>,
+    /// GPU evaluation domain, reconstructed via `EvaluationDomain::new(j, k)`.
+    domain: EvaluationDomain<C::Scalar>,
+    /// GPU quotient evaluator, `Evaluator::new(&self.cs)`.
     ev: Evaluator<C>,
-    /// Device-resident Coeff mirror of `fixed_polys`. Lazy-populated on
-    /// first `fixed_polys_device()` access. Empty after `Clone`, by
-    /// design — matches `ParamsKZG`'s `OnceCell` invalidation contract.
-    /// `ProverQuery::poly` reads through this mirror to keep PK
-    /// polynomials device-resident through the multiopen pipeline.
+    /// Cached `transcript_repr` of the canonical vk, copied at `from_host`.
+    /// Lets `hash_into` write the vk representative without re-borrowing the
+    /// canonical vk (whose `get_vk()` accessor is `FromUniformBytes`-bounded),
+    /// so the prover's `create_proof` keeps its original (looser) scalar bound.
+    transcript_repr: C::Scalar,
+    /// Device-resident Coeff mirror of `inner.fixed_polys()`. Lazy; empty after
+    /// `Clone`, matching `ParamsKZG`'s `OnceCell` invalidation contract.
     fixed_polys_device: OnceCell<Vec<Polynomial<C::Scalar, Coeff, crate::poly::Device>>>,
-    /// Device-resident Lagrange mirror of `fixed_values`. Consumed by
-    /// `ColumnPool::try_init_device`
-    /// so the per-prove pool can skip re-uploading the fixed columns.
-    /// Empty after `Clone`.
+    /// Device-resident Lagrange mirror of `inner.fixed_values()`. Lazy.
     fixed_values_device: OnceCell<Vec<Polynomial<C::Scalar, LagrangeCoeff, crate::poly::Device>>>,
-    /// Device-resident Coeff mirror of `permutation.polys`.
-    /// Lazy-populated; empty after `Clone`. Mirrors the lifecycle of
-    /// `fixed_polys_device`.
+    /// Device-resident Coeff mirror of `inner.permutation().polys()`. Lazy.
     permutation_polys_device: OnceCell<Vec<Polynomial<C::Scalar, Coeff, crate::poly::Device>>>,
-    /// Device-resident Coeff mirror of `l0`. Lazy-populated on first
-    /// `l0_device()` access; empty after `Clone`. Borrowed by
-    /// `evaluate_h_device` so the per-prove cosetFFT consumes the L-poly
-    /// device pointer directly instead of paying an H2D each call.
+    /// Device-resident Coeff mirror of `inner.l0()`. Lazy.
     l0_device: OnceCell<Polynomial<C::Scalar, Coeff, crate::poly::Device>>,
-    /// Device-resident Coeff mirror of `l_last`. Same lifecycle as
-    /// `l0_device`.
+    /// Device-resident Coeff mirror of `inner.l_last()`. Lazy.
     l_last_device: OnceCell<Polynomial<C::Scalar, Coeff, crate::poly::Device>>,
-    /// Device-resident Coeff mirror of `l_active_row`. Same lifecycle as
-    /// `l0_device`.
+    /// Device-resident Coeff mirror of `inner.l_active_row()`. Lazy.
     l_active_row_device: OnceCell<Polynomial<C::Scalar, Coeff, crate::poly::Device>>,
+    /// Device-resident Lagrange mirror of `inner.permutation().permutations()`
+    /// (the σ-columns). Distinct from `permutation_polys_device` (Coeff form);
+    /// consumed by `permutation::Argument::commit`'s `permutation_product_device`.
+    /// Lazy; empty after `Clone`.
+    permutation_lagrange_device:
+        OnceCell<Vec<Polynomial<C::Scalar, LagrangeCoeff, crate::poly::Device>>>,
 }
 
-impl<C: CurveAffine> Clone for ProvingKey<C> {
-    /// Cloning a ProvingKey clones the host polys but EMPTIES the Device
-    /// `OnceCell` mirrors. A clone regenerates its device mirrors lazily
-    /// on first use — matches `ParamsKZG`'s OnceCell pattern at
-    /// `poly/kzg/commitment.rs:39-42, 461-476, 491-507`. This avoids
-    /// action-at-a-distance Device-pointer aliasing under partial-PK
-    /// serialization (e.g. `pk.to_bytes()` round-trips that re-construct
-    /// host polys).
+impl<C: CurveAffine> Clone for GpuProvingKey<C> {
+    /// Cloning clones the canonical `inner` and the rebuilt GPU composing types
+    /// but EMPTIES the device `OnceCell` mirrors — a clone regenerates them
+    /// lazily on first use (matches `ParamsKZG`'s OnceCell pattern). `inner`'s
+    /// own device mirrors are likewise empty after its `Clone`.
     fn clone(&self) -> Self {
         Self {
-            vk: self.vk.clone(),
-            l0: self.l0.clone(),
-            l_last: self.l_last.clone(),
-            l_active_row: self.l_active_row.clone(),
-            fixed_values: self.fixed_values.clone(),
-            fixed_polys: self.fixed_polys.clone(),
-            permutation: self.permutation.clone(),
+            inner: self.inner.clone(),
+            cs: self.cs.clone(),
+            domain: self.domain.clone(),
             ev: self.ev.clone(),
+            transcript_repr: self.transcript_repr,
             fixed_polys_device: OnceCell::new(),
             fixed_values_device: OnceCell::new(),
             permutation_polys_device: OnceCell::new(),
             l0_device: OnceCell::new(),
             l_last_device: OnceCell::new(),
             l_active_row_device: OnceCell::new(),
+            permutation_lagrange_device: OnceCell::new(),
         }
     }
 }
 
-impl<C: CurveAffine> ProvingKey<C>
+impl<C: CurveAffine> GpuProvingKey<C>
 where
     C::Scalar: FromUniformBytes<64>,
 {
-    /// Get the underlying [`VerifyingKey`].
-    pub fn get_vk(&self) -> &VerifyingKey<C> {
-        &self.vk
+    /// Wraps a canonical halo2-axiom [`ProvingKey`] for GPU proving.
+    ///
+    /// PURE HOST rebuild — performs ZERO device traffic and ZERO kernel
+    /// launches: a `ConstraintSystem` field-copy from `inner.get_vk().cs()`
+    /// (the equivalence-critical `Expression`/`Argument` map), a reconstructed
+    /// `EvaluationDomain::new(j, k)`, and `Evaluator::new(&cs)`. Device mirrors
+    /// start empty and populate lazily at first prove with the existing VRAM
+    /// gate + host fallback — same H2D count and trigger points as before.
+    pub fn from_host(inner: ProvingKey<C>) -> Self {
+        let cs = ConstraintSystem::from(inner.get_vk().cs());
+        let hdomain = inner.get_vk().get_domain();
+        let domain =
+            EvaluationDomain::new(hdomain.get_quotient_poly_degree() as u32 + 1, hdomain.k());
+        let ev = Evaluator::new(&cs);
+        let transcript_repr = inner.get_vk().transcript_repr();
+        GpuProvingKey {
+            inner,
+            cs,
+            domain,
+            ev,
+            transcript_repr,
+            fixed_polys_device: OnceCell::new(),
+            fixed_values_device: OnceCell::new(),
+            permutation_polys_device: OnceCell::new(),
+            l0_device: OnceCell::new(),
+            l_last_device: OnceCell::new(),
+            l_active_row_device: OnceCell::new(),
+            permutation_lagrange_device: OnceCell::new(),
+        }
     }
 
-    /// Gets the total number of bytes in the serialization of `self`
-    fn bytes_length(&self) -> usize {
-        let scalar_len = C::Scalar::default().to_repr().as_ref().len();
-        self.vk.bytes_length()
-            + 12
-            + scalar_len * (self.l0.len() + self.l_last.len() + self.l_active_row.len())
-            + polynomial_slice_byte_length(&self.fixed_values)
-            + polynomial_slice_byte_length(&self.fixed_polys)
-            + self.permutation.bytes_length()
+    /// Get the underlying canonical [`VerifyingKey`].
+    pub fn get_vk(&self) -> &VerifyingKey<C> {
+        self.inner.get_vk()
     }
 }
 
-impl<C: CurveAffine> ProvingKey<C> {
-    /// Lazy device mirror of `fixed_polys` (Coeff form). Returns `None`
-    /// if VRAM-gated out or H2D fails — the host-arm fallback in
-    /// `shplonk::prover` then handles the upload per-rotation-set.
-    ///
-    /// Gates eagerly on `query_device_free_bytes_for_chunking()` before
-    /// any H2D. On error the cell is left empty so the caller can fall
-    /// back transparently.
+impl<C: CurveAffine> GpuProvingKey<C> {
+    /// Hashes the canonical verifying-key representative into a transcript.
+    /// Reads the cached `transcript_repr` scalar and writes it via the GPU
+    /// transcript trait (the transcript trait is a GPU fork, so we cannot
+    /// delegate to the canonical vk's own `hash_into`). Kept off the
+    /// `FromUniformBytes`-bounded block so `create_proof` keeps its scalar bound.
+    pub fn hash_into<E: EncodedChallenge<C>, T: Transcript<C, E>>(
+        &self,
+        transcript: &mut T,
+    ) -> io::Result<()> {
+        transcript.common_scalar(self.transcript_repr)?;
+        Ok(())
+    }
+
+    /// Hashes the permutation σ-poly evaluations at `x` into the transcript.
+    /// (Was `permutation::ProvingKey::evaluate`; reads `inner`'s host polys.)
+    pub(in crate::plonk) fn evaluate_permutation<
+        E: EncodedChallenge<C>,
+        T: TranscriptWrite<C, E>,
+    >(
+        &self,
+        x: ChallengeX<C>,
+        transcript: &mut T,
+    ) -> Result<(), Error> {
+        crate::perf_section!("permutation_pk.evaluate");
+        for eval in self
+            .inner
+            .permutation()
+            .polys()
+            .iter()
+            .map(|poly| crate::arithmetic::eval_polynomial(poly, *x))
+        {
+            transcript.write_scalar(eval)?;
+        }
+        Ok(())
+    }
+
+    /// Lazy device mirror of `inner.fixed_polys()` (Coeff form). Returns `None`
+    /// if VRAM-gated out or H2D fails — the host-arm fallback then handles the
+    /// upload per-rotation-set.
     pub(crate) fn fixed_polys_device(
         &self,
     ) -> Option<&[Polynomial<C::Scalar, Coeff, crate::poly::Device>]> {
@@ -422,17 +255,15 @@ impl<C: CurveAffine> ProvingKey<C> {
             return Some(v.as_slice());
         }
         try_init_pk_device_mirror::<C, Coeff>(
-            &self.fixed_polys,
+            self.inner.fixed_polys(),
             "pk.fixed_polys_device.init",
             &self.fixed_polys_device,
         )
         .map(|v| v.as_slice())
     }
 
-    /// Lazy device mirror of `fixed_values` (Lagrange form). Returns `None`
-    /// if VRAM-gated out. Borrowed by
-    /// `ColumnPool::try_init_device`
-    /// to drop the per-prove fixed-col H2D.
+    /// Lazy device mirror of `inner.fixed_values()` (Lagrange form). Returns
+    /// `None` if VRAM-gated out.
     pub(crate) fn fixed_values_device(
         &self,
     ) -> Option<&[Polynomial<C::Scalar, LagrangeCoeff, crate::poly::Device>]> {
@@ -440,15 +271,14 @@ impl<C: CurveAffine> ProvingKey<C> {
             return Some(v.as_slice());
         }
         try_init_pk_device_mirror::<C, LagrangeCoeff>(
-            &self.fixed_values,
+            self.inner.fixed_values(),
             "pk.fixed_values_device.init",
             &self.fixed_values_device,
         )
         .map(|v| v.as_slice())
     }
 
-    /// Lazy device mirror of `permutation.polys` (Coeff form). Returns
-    /// `None` if VRAM-gated out. Same F-1 path as `fixed_polys_device`.
+    /// Lazy device mirror of `inner.permutation().polys()` (Coeff form).
     pub(crate) fn permutation_polys_device(
         &self,
     ) -> Option<&[Polynomial<C::Scalar, Coeff, crate::poly::Device>]> {
@@ -456,24 +286,43 @@ impl<C: CurveAffine> ProvingKey<C> {
             return Some(v.as_slice());
         }
         try_init_pk_device_mirror::<C, Coeff>(
-            self.permutation.polys(),
+            self.inner.permutation().polys(),
             "pk.permutation_polys_device.init",
             &self.permutation_polys_device,
         )
         .map(|v| v.as_slice())
     }
 
-    /// Lazy device mirror of `l0`. Returns `None` if VRAM-gated out.
-    /// Borrowed by `evaluate_h_device` so the per-prove cosetFFT consumes
-    /// the L-poly device pointer instead of paying an H2D per call.
+    /// Lazy device mirror of `inner.permutation().permutations()` (Lagrange
+    /// σ-columns). Distinct from `permutation_polys_device` (the Coeff mirror);
+    /// consumed by `permutation::Argument::commit`.
+    pub(crate) fn permutation_lagrange_device(
+        &self,
+    ) -> Option<&[Polynomial<C::Scalar, LagrangeCoeff, crate::poly::Device>]> {
+        if let Some(v) = self.permutation_lagrange_device.get() {
+            return Some(v.as_slice());
+        }
+        try_init_pk_device_mirror::<C, LagrangeCoeff>(
+            self.inner.permutation().permutations(),
+            "pk.permutation.permutations_device.init",
+            &self.permutation_lagrange_device,
+        )
+        .map(|v| v.as_slice())
+    }
+
+    /// Lazy device mirror of `inner.l0()`. Returns `None` if VRAM-gated out.
     pub(crate) fn l0_device(&self) -> Option<&Polynomial<C::Scalar, Coeff, crate::poly::Device>> {
         if let Some(v) = self.l0_device.get() {
             return Some(v);
         }
-        try_init_pk_device_mirror_one::<C, Coeff>(&self.l0, "pk.l0_device.init", &self.l0_device)
+        try_init_pk_device_mirror_one::<C, Coeff>(
+            self.inner.l0(),
+            "pk.l0_device.init",
+            &self.l0_device,
+        )
     }
 
-    /// Lazy device mirror of `l_last`. Same contract as `l0_device`.
+    /// Lazy device mirror of `inner.l_last()`. Same contract as `l0_device`.
     pub(crate) fn l_last_device(
         &self,
     ) -> Option<&Polynomial<C::Scalar, Coeff, crate::poly::Device>> {
@@ -481,13 +330,13 @@ impl<C: CurveAffine> ProvingKey<C> {
             return Some(v);
         }
         try_init_pk_device_mirror_one::<C, Coeff>(
-            &self.l_last,
+            self.inner.l_last(),
             "pk.l_last_device.init",
             &self.l_last_device,
         )
     }
 
-    /// Lazy device mirror of `l_active_row`. Same contract as `l0_device`.
+    /// Lazy device mirror of `inner.l_active_row()`. Same contract as `l0_device`.
     pub(crate) fn l_active_row_device(
         &self,
     ) -> Option<&Polynomial<C::Scalar, Coeff, crate::poly::Device>> {
@@ -495,17 +344,78 @@ impl<C: CurveAffine> ProvingKey<C> {
             return Some(v);
         }
         try_init_pk_device_mirror_one::<C, Coeff>(
-            &self.l_active_row,
+            self.inner.l_active_row(),
             "pk.l_active_row_device.init",
             &self.l_active_row_device,
         )
     }
 }
 
-/// Helper for the three PK device-mirror lazy initializers. Centralizes
-/// the VRAM gate + per-poly H2D loop + `perf_h2d!` byte-trace so the three
-/// accessor methods on `ProvingKey` stay symmetric and the audit trail
-/// surfaces consistently across mirrors.
+// Serialization delegates entirely to the canonical halo2-axiom `ProvingKey`,
+// so the bytes are CPU/GPU-identical by construction. The serde domain is
+// therefore halo2-axiom's (`halo2_axiom::SerdeFormat` + `halo2_axiom::helpers`
+// serde traits + a `halo2_axiom::plonk::Circuit` for cs reconstruction on read);
+// reading reproduces today's lazy behavior — device mirrors start empty.
+impl<C> GpuProvingKey<C>
+where
+    // The gpu serde traits are blanket-impl'd over `CurveAffine + SerdeObject`,
+    // which also satisfies halo2-axiom's identical blanket impls — so the
+    // delegated `inner.write`/`inner.read` calls (bounded on halo2-axiom's
+    // serde traits) resolve. halo2-axiom's `helpers` module is private and not
+    // nameable here, hence bounding on the gpu-side traits.
+    C: SerdeCurveAffine,
+    C::Scalar: SerdePrimeField + FromUniformBytes<64>,
+{
+    /// Writes the proving key to a buffer (canonical halo2-axiom serialization).
+    pub fn write<W: io::Write>(
+        &self,
+        writer: &mut W,
+        format: halo2_axiom::SerdeFormat,
+    ) -> io::Result<()> {
+        self.inner.write(writer, format)
+    }
+
+    /// Reads a canonical halo2-axiom [`ProvingKey`] and wraps it via
+    /// [`GpuProvingKey::from_host`]; the device mirrors start empty (lazy),
+    /// reproducing today's behavior.
+    pub fn read<R: io::Read, ConcreteCircuit: halo2_axiom::plonk::Circuit<C::Scalar>>(
+        reader: &mut R,
+        format: halo2_axiom::SerdeFormat,
+        #[cfg(feature = "circuit-params")] params: ConcreteCircuit::Params,
+    ) -> io::Result<Self> {
+        let inner = ProvingKey::<C>::read::<R, ConcreteCircuit>(
+            reader,
+            format,
+            #[cfg(feature = "circuit-params")]
+            params,
+        )?;
+        Ok(Self::from_host(inner))
+    }
+
+    /// Writes the proving key to a vector of bytes using [`Self::write`].
+    pub fn to_bytes(&self, format: halo2_axiom::SerdeFormat) -> Vec<u8> {
+        self.inner.to_bytes(format)
+    }
+
+    /// Reads a proving key from a slice of bytes using [`Self::read`].
+    pub fn from_bytes<ConcreteCircuit: halo2_axiom::plonk::Circuit<C::Scalar>>(
+        bytes: &[u8],
+        format: halo2_axiom::SerdeFormat,
+        #[cfg(feature = "circuit-params")] params: ConcreteCircuit::Params,
+    ) -> io::Result<Self> {
+        let inner = ProvingKey::<C>::from_bytes::<ConcreteCircuit>(
+            bytes,
+            format,
+            #[cfg(feature = "circuit-params")]
+            params,
+        )?;
+        Ok(Self::from_host(inner))
+    }
+}
+
+/// Helper for the PK device-mirror lazy initializers. Centralizes the VRAM
+/// gate, the per-poly H2D loop, and the `perf_h2d!` byte-trace so the accessor
+/// methods stay symmetric and the audit trail surfaces consistently across mirrors.
 fn try_init_pk_device_mirror<'pk, C: CurveAffine, B>(
     host: &[Polynomial<C::Scalar, B, crate::poly::Host>],
     perf_tag: &'static str,
@@ -597,108 +507,6 @@ where
     );
     let _ = cell.set(mirror);
     cell.get()
-}
-
-impl<C: SerdeCurveAffine> ProvingKey<C>
-where
-    C::Scalar: SerdePrimeField + FromUniformBytes<64>,
-{
-    /// Writes a proving key to a buffer.
-    ///
-    /// Writes a curve element according to `format`:
-    /// - `Processed`: Writes a compressed curve element with coordinates in standard form.
-    ///   Writes a field element in standard form, with endianness specified by the
-    ///   `PrimeField` implementation.
-    /// - Otherwise: Writes an uncompressed curve element with coordinates in Montgomery form
-    ///   Writes a field element into raw bytes in its internal Montgomery representation,
-    ///   WITHOUT performing the expensive Montgomery reduction.
-    ///
-    /// Does so by first writing the verifying key and then serializing the rest of the data (in the form of field polynomials)
-    pub fn write<W: io::Write>(&self, writer: &mut W, format: SerdeFormat) -> io::Result<()> {
-        self.vk.write(writer, format)?;
-        self.l0.write_poly(writer, format);
-        self.l_last.write_poly(writer, format);
-        self.l_active_row.write_poly(writer, format);
-        write_polynomial_slice(&self.fixed_values, writer, format);
-        write_polynomial_slice(&self.fixed_polys, writer, format);
-        self.permutation.write(writer, format);
-        Ok(())
-    }
-
-    /// Reads a proving key from a buffer.
-    /// Does so by reading verification key first, and then deserializing the rest of the file into the remaining proving key data.
-    ///
-    /// Reads a curve element from the buffer and parses it according to the `format`:
-    /// - `Processed`: Reads a compressed curve element and decompresses it.
-    ///   Reads a field element in standard form, with endianness specified by the
-    ///   `PrimeField` implementation, and checks that the element is less than the modulus.
-    /// - `RawBytes`: Reads an uncompressed curve element with coordinates in Montgomery form.
-    ///   Checks that field elements are less than modulus, and then checks that the point is on the curve.
-    /// - `RawBytesUnchecked`: Reads an uncompressed curve element with coordinates in Montgomery form;
-    ///   does not perform any checks
-    pub fn read<R: io::Read, ConcreteCircuit: Circuit<C::Scalar>>(
-        reader: &mut R,
-        format: SerdeFormat,
-        #[cfg(feature = "circuit-params")] params: ConcreteCircuit::Params,
-    ) -> io::Result<Self> {
-        let vk = VerifyingKey::<C>::read::<R, ConcreteCircuit>(
-            reader,
-            format,
-            #[cfg(feature = "circuit-params")]
-            params,
-        )?;
-        let l0 = Polynomial::read_poly(reader, format);
-        let l_last = Polynomial::read_poly(reader, format);
-        let l_active_row = Polynomial::read_poly(reader, format);
-        let fixed_values = read_polynomial_vec(reader, format);
-        let fixed_polys = read_polynomial_vec(reader, format);
-        let permutation = permutation::ProvingKey::read(reader, format);
-        let ev = Evaluator::new(vk.cs());
-        Ok(Self {
-            vk,
-            l0,
-            l_last,
-            l_active_row,
-            fixed_values,
-            fixed_polys,
-            permutation,
-            ev,
-            fixed_polys_device: OnceCell::new(),
-            fixed_values_device: OnceCell::new(),
-            permutation_polys_device: OnceCell::new(),
-            l0_device: OnceCell::new(),
-            l_last_device: OnceCell::new(),
-            l_active_row_device: OnceCell::new(),
-        })
-    }
-
-    /// Writes a proving key to a vector of bytes using [`Self::write`].
-    pub fn to_bytes(&self, format: SerdeFormat) -> Vec<u8> {
-        let mut bytes = Vec::<u8>::with_capacity(self.bytes_length());
-        Self::write(self, &mut bytes, format).expect("Writing to vector should not fail");
-        bytes
-    }
-
-    /// Reads a proving key from a slice of bytes using [`Self::read`].
-    pub fn from_bytes<ConcreteCircuit: Circuit<C::Scalar>>(
-        mut bytes: &[u8],
-        format: SerdeFormat,
-        #[cfg(feature = "circuit-params")] params: ConcreteCircuit::Params,
-    ) -> io::Result<Self> {
-        Self::read::<_, ConcreteCircuit>(
-            &mut bytes,
-            format,
-            #[cfg(feature = "circuit-params")]
-            params,
-        )
-    }
-}
-
-impl<C: CurveAffine> VerifyingKey<C> {
-    /// Get the underlying [`EvaluationDomain`].
-    pub fn get_domain(&self) -> &EvaluationDomain<C::Scalar> {
-        &self.domain
-    }
 }
 
 #[derive(Clone, Copy, Debug)]

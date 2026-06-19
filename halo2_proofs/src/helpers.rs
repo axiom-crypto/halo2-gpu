@@ -1,4 +1,3 @@
-use crate::poly::{PolyIo, Polynomial};
 use ff::PrimeField;
 use halo2curves::{serde::SerdeObject, CurveAffine};
 
@@ -92,56 +91,8 @@ pub trait SerdePrimeField: PrimeField + SerdeObject {
     }
 }
 impl<F: PrimeField + SerdeObject> SerdePrimeField for F {}
-
-/// Convert a slice of `bool` into a `u8`.
-///
-/// Panics if the slice has length greater than 8.
-pub fn pack(bits: &[bool]) -> u8 {
-    let mut value = 0u8;
-    assert!(bits.len() <= 8);
-    for (bit_index, bit) in bits.iter().enumerate() {
-        value |= (*bit as u8) << bit_index;
-    }
-    value
-}
-
-/// Writes the first `bits.len()` bits of a `u8` into `bits`.
-pub fn unpack(byte: u8, bits: &mut [bool]) {
-    for (bit_index, bit) in bits.iter_mut().enumerate() {
-        *bit = (byte >> bit_index) & 1 == 1;
-    }
-}
-
-/// Reads a vector of polynomials from buffer
-pub(crate) fn read_polynomial_vec<R: io::Read, F: SerdePrimeField, B>(
-    reader: &mut R,
-    format: SerdeFormat,
-) -> Vec<Polynomial<F, B>> {
-    let mut len = [0u8; 4];
-    reader.read_exact(&mut len).unwrap();
-    let len = u32::from_be_bytes(len);
-
-    (0..len)
-        .map(|_| Polynomial::<F, B>::read_poly(reader, format))
-        .collect()
-}
-
-/// Writes a slice of polynomials to buffer
-pub(crate) fn write_polynomial_slice<W: io::Write, F: SerdePrimeField, B>(
-    slice: &[Polynomial<F, B>],
-    writer: &mut W,
-    format: SerdeFormat,
-) {
-    writer
-        .write_all(&(slice.len() as u32).to_be_bytes())
-        .unwrap();
-    for poly in slice.iter() {
-        poly.write_poly(writer, format);
-    }
-}
-
-/// Gets the total number of bytes of a slice of polynomials, assuming all polynomials are the same length
-pub(crate) fn polynomial_slice_byte_length<F: PrimeField, B>(slice: &[Polynomial<F, B>]) -> usize {
-    let field_len = F::default().to_repr().as_ref().len();
-    4 + slice.len() * (4 + field_len * slice.first().map(|poly| poly.len()).unwrap_or(0))
-}
+// NOTE: the polynomial-slice serde helpers (`pack`/`unpack`/`read_polynomial_vec`/
+// `write_polynomial_slice`/`polynomial_slice_byte_length`) plus the `PolyIo` trait
+// were removed: pk/vk serialization is now the canonical halo2-axiom path
+// (`GpuProvingKey::write` delegates to `inner`), so these gpu-side helpers had no
+// remaining callers.

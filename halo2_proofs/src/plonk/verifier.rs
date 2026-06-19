@@ -4,7 +4,7 @@ use std::iter;
 
 use super::{
     vanishing, ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX, ChallengeY, Error,
-    VerifyingKey,
+    GpuVerifyingKey, VerifyingKey,
 };
 use crate::arithmetic::compute_inner_product;
 use crate::poly::commitment::{CommitmentScheme, Verifier};
@@ -33,6 +33,14 @@ pub fn verify_proof<
 where
     Scheme::Scalar: WithSmallOrderMulGroup<3> + FromUniformBytes<64>,
 {
+    // The verifier operates on the GPU-crate forks (`cs`/`domain`/`permutation`)
+    // whose inherent methods (`read_product_commitments`/`evaluate`/`queries`)
+    // attach to GPU types. Rebuild them from the canonical halo2-axiom vk (pure
+    // host: cs field-copy + reconstructed domain + commitments clone), then
+    // shadow `vk` so the body below operates on the GPU verifying key.
+    let gpu_vk = GpuVerifyingKey::<Scheme::Curve>::from_host(vk);
+    let vk = &gpu_vk;
+
     for instances in instances.iter() {
         if instances.len() != vk.cs.num_instance_columns {
             return Err(Error::InvalidInstances);

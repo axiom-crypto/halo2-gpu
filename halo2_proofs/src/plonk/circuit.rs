@@ -2489,3 +2489,266 @@ impl<'a, F: Field> VirtualCells<'a, F> {
         Expression::Challenge(challenge)
     }
 }
+
+// ---------------------------------------------------------------------------
+// `GpuProvingKey::from_host` / `GpuVerifyingKey::from_host` rebuild support.
+//
+// Conversions from the canonical halo2-axiom constraint-system types into the
+// GPU-crate forks. The two families are structurally identical (verified: same
+// 18 `ConstraintSystem` fields, same 10-variant `Expression` enum); these are
+// mechanical field copies plus a recursive `Expression` map. This is the
+// equivalence-critical path — a bug here would silently desync the rebuilt GPU
+// `cs`/`Evaluator`/`Arguments` from what keygen produced.
+//
+// Notes:
+// - The query `index: Option<usize>` is NOT readable from halo2-axiom (private,
+//   no accessor) and is NOT consumed by the GPU prover/evaluator (`GraphEvaluator`
+//   keys off `column_index` + `rotation`; the prover's final queries iterate the
+//   top-level `*_queries` lists). It is set to `None`, exactly as a freshly
+//   `configure`d expression carries before `query_cells`.
+// - `Gate::{constraint_names, queried_selectors, queried_cells}` are dev-tooling
+//   metadata never read post-keygen and have no halo2-axiom accessor; rebuilt empty.
+// - `general_column_annotations` is dev-tooling metadata keyed by a forked
+//   `metadata::Column`; never read post-keygen; rebuilt empty.
+// - `lookup::Argument` cannot be named from this crate (halo2-axiom's `lookup`
+//   module is private), so it is rebuilt inline below from its public accessors.
+// ---------------------------------------------------------------------------
+
+impl<F: Field> From<&halo2_axiom::plonk::Expression<F>> for Expression<F> {
+    fn from(e: &halo2_axiom::plonk::Expression<F>) -> Self {
+        use halo2_axiom::plonk::Expression as HExpr;
+        match e {
+            HExpr::Constant(f) => Expression::Constant(*f),
+            HExpr::Selector(s) => Expression::Selector(Selector(s.index(), s.is_simple())),
+            HExpr::Fixed(q) => Expression::Fixed(FixedQuery {
+                index: None,
+                column_index: q.column_index(),
+                rotation: q.rotation(),
+            }),
+            HExpr::Advice(q) => Expression::Advice(AdviceQuery {
+                index: None,
+                column_index: q.column_index(),
+                rotation: q.rotation(),
+                phase: sealed::Phase(q.phase()),
+            }),
+            HExpr::Instance(q) => Expression::Instance(InstanceQuery {
+                index: None,
+                column_index: q.column_index(),
+                rotation: q.rotation(),
+            }),
+            HExpr::Challenge(c) => Expression::Challenge(Challenge {
+                index: c.index(),
+                phase: sealed::Phase(c.phase()),
+            }),
+            HExpr::Negated(a) => Expression::Negated(Box::new(Expression::from(a.as_ref()))),
+            HExpr::Sum(a, b) => Expression::Sum(
+                Box::new(Expression::from(a.as_ref())),
+                Box::new(Expression::from(b.as_ref())),
+            ),
+            HExpr::Product(a, b) => Expression::Product(
+                Box::new(Expression::from(a.as_ref())),
+                Box::new(Expression::from(b.as_ref())),
+            ),
+            HExpr::Scaled(a, f) => Expression::Scaled(Box::new(Expression::from(a.as_ref())), *f),
+        }
+    }
+}
+
+impl From<&halo2_axiom::plonk::Column<halo2_axiom::plonk::Fixed>> for Column<Fixed> {
+    fn from(c: &halo2_axiom::plonk::Column<halo2_axiom::plonk::Fixed>) -> Self {
+        Column {
+            index: c.index(),
+            column_type: Fixed,
+        }
+    }
+}
+
+impl From<&halo2_axiom::plonk::Column<halo2_axiom::plonk::Instance>> for Column<Instance> {
+    fn from(c: &halo2_axiom::plonk::Column<halo2_axiom::plonk::Instance>) -> Self {
+        Column {
+            index: c.index(),
+            column_type: Instance,
+        }
+    }
+}
+
+impl From<&halo2_axiom::plonk::Column<halo2_axiom::plonk::Advice>> for Column<Advice> {
+    fn from(c: &halo2_axiom::plonk::Column<halo2_axiom::plonk::Advice>) -> Self {
+        Column {
+            index: c.index(),
+            column_type: Advice {
+                phase: sealed::Phase(c.column_type().phase()),
+            },
+        }
+    }
+}
+
+impl From<&halo2_axiom::plonk::Column<halo2_axiom::plonk::Any>> for Column<Any> {
+    fn from(c: &halo2_axiom::plonk::Column<halo2_axiom::plonk::Any>) -> Self {
+        let column_type = match c.column_type() {
+            halo2_axiom::plonk::Any::Advice(a) => Any::Advice(Advice {
+                phase: sealed::Phase(a.phase()),
+            }),
+            halo2_axiom::plonk::Any::Fixed => Any::Fixed,
+            halo2_axiom::plonk::Any::Instance => Any::Instance,
+        };
+        Column {
+            index: c.index(),
+            column_type,
+        }
+    }
+}
+
+impl<F: Field> From<&halo2_axiom::plonk::Gate<F>> for Gate<F> {
+    fn from(g: &halo2_axiom::plonk::Gate<F>) -> Self {
+        Gate {
+            name: g.name().to_string(),
+            constraint_names: Vec::new(),
+            polys: g.polynomials().iter().map(Expression::from).collect(),
+            queried_selectors: Vec::new(),
+            queried_cells: Vec::new(),
+        }
+    }
+}
+
+impl<F: Field> From<&halo2_axiom::plonk::ConstraintSystem<F>> for ConstraintSystem<F> {
+    fn from(cs: &halo2_axiom::plonk::ConstraintSystem<F>) -> Self {
+        let mut out = ConstraintSystem {
+            num_fixed_columns: cs.num_fixed_columns(),
+            num_advice_columns: cs.num_advice_columns(),
+            num_instance_columns: cs.num_instance_columns(),
+            num_selectors: cs.num_selectors(),
+            num_challenges: cs.num_challenges(),
+            advice_column_phase: cs
+                .advice_column_phase()
+                .into_iter()
+                .map(sealed::Phase)
+                .collect(),
+            challenge_phase: cs
+                .challenge_phase()
+                .into_iter()
+                .map(sealed::Phase)
+                .collect(),
+            selector_map: cs.selector_map().iter().map(Column::from).collect(),
+            gates: cs.gates().iter().map(Gate::from).collect(),
+            advice_queries: cs
+                .advice_queries()
+                .iter()
+                .map(|(c, r)| (Column::from(c), *r))
+                .collect(),
+            num_advice_queries: cs.num_advice_queries().clone(),
+            instance_queries: cs
+                .instance_queries()
+                .iter()
+                .map(|(c, r)| (Column::from(c), *r))
+                .collect(),
+            fixed_queries: cs
+                .fixed_queries()
+                .iter()
+                .map(|(c, r)| (Column::from(c), *r))
+                .collect(),
+            permutation: permutation::Argument::from(cs.permutation()),
+            // `lookup::Argument` is not nameable from this crate (halo2-axiom's
+            // `lookup` module is private); rebuild it inline from public accessors.
+            lookups: cs
+                .lookups()
+                .iter()
+                .map(|la| lookup::Argument {
+                    name: la.name().to_string(),
+                    input_expressions: la
+                        .input_expressions()
+                        .iter()
+                        .map(Expression::from)
+                        .collect(),
+                    table_expressions: la
+                        .table_expressions()
+                        .iter()
+                        .map(Expression::from)
+                        .collect(),
+                })
+                .collect(),
+            // Dev-tooling metadata keyed by a forked `metadata::Column`; never
+            // read post-keygen. Rebuilt empty (behaviorally exact for prove/verify).
+            general_column_annotations: HashMap::new(),
+            constants: cs.constants().iter().map(Column::from).collect(),
+            minimum_degree: cs.minimum_degree(),
+        };
+        // Backfill the per-query `index` into each gate/lookup `Expression`.
+        // The GraphEvaluator-based prover keys on `column_index`+`rotation` (so
+        // it never reads `index`), but the verifier evaluates gate/lookup polys
+        // through `query.index`, and keygen's cs has these set — so reconstruct
+        // them here by position in the (order-preserving) query lists, making the
+        // rebuilt cs equivalence-EXACT to what keygen produced.
+        let fq = out.fixed_queries.clone();
+        let aq = out.advice_queries.clone();
+        let iq = out.instance_queries.clone();
+        for gate in &mut out.gates {
+            for poly in &mut gate.polys {
+                assign_expr_query_indices(poly, &fq, &aq, &iq);
+            }
+        }
+        for lookup in &mut out.lookups {
+            for e in lookup
+                .input_expressions
+                .iter_mut()
+                .chain(lookup.table_expressions.iter_mut())
+            {
+                assign_expr_query_indices(e, &fq, &aq, &iq);
+            }
+        }
+        out
+    }
+}
+
+/// Reconstructs the per-query `index` (`Option<usize>`) inside an `Expression`
+/// during the `from_host` cs rebuild: the index is the position of the query's
+/// `(column, rotation)` in the cs's order-preserving query list — exactly what
+/// `ConstraintSystem::query_*_index` assigns at keygen time.
+fn assign_expr_query_indices<F: Field>(
+    expr: &mut Expression<F>,
+    fixed_queries: &[(Column<Fixed>, Rotation)],
+    advice_queries: &[(Column<Advice>, Rotation)],
+    instance_queries: &[(Column<Instance>, Rotation)],
+) {
+    match expr {
+        Expression::Fixed(q) => {
+            q.index = Some(
+                fixed_queries
+                    .iter()
+                    .position(|(c, r)| c.index == q.column_index && *r == q.rotation)
+                    .expect("fixed query must exist in cs.fixed_queries"),
+            );
+        }
+        Expression::Advice(q) => {
+            q.index = Some(
+                advice_queries
+                    .iter()
+                    .position(|(c, r)| {
+                        c.index == q.column_index
+                            && c.column_type.phase == q.phase
+                            && *r == q.rotation
+                    })
+                    .expect("advice query must exist in cs.advice_queries"),
+            );
+        }
+        Expression::Instance(q) => {
+            q.index = Some(
+                instance_queries
+                    .iter()
+                    .position(|(c, r)| c.index == q.column_index && *r == q.rotation)
+                    .expect("instance query must exist in cs.instance_queries"),
+            );
+        }
+        Expression::Negated(a) => {
+            assign_expr_query_indices(a, fixed_queries, advice_queries, instance_queries)
+        }
+        Expression::Sum(a, b) | Expression::Product(a, b) => {
+            assign_expr_query_indices(a, fixed_queries, advice_queries, instance_queries);
+            assign_expr_query_indices(b, fixed_queries, advice_queries, instance_queries);
+        }
+        Expression::Scaled(a, _) => {
+            assign_expr_query_indices(a, fixed_queries, advice_queries, instance_queries)
+        }
+        Expression::Constant(_) | Expression::Selector(_) | Expression::Challenge(_) => {}
+    }
+}

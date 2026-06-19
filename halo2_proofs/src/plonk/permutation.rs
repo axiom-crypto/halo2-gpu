@@ -1,24 +1,13 @@
 //! Implementation of permutation argument.
 
 use super::circuit::{Any, Column};
-use crate::{
-    arithmetic::CurveAffine,
-    helpers::{
-        polynomial_slice_byte_length, read_polynomial_vec, write_polynomial_slice,
-        SerdeCurveAffine, SerdePrimeField,
-    },
-    poly::{Coeff, LagrangeCoeff, Polynomial},
-    SerdeFormat,
-};
-use once_cell::sync::OnceCell;
+use crate::arithmetic::CurveAffine;
 
 pub(crate) mod keygen;
 pub(crate) mod prover;
 pub(crate) mod verifier;
 
 pub use keygen::Assembly;
-
-use std::io;
 
 /// A permutation argument.
 #[derive(Debug, Clone)]
@@ -82,6 +71,17 @@ impl Argument {
     }
 }
 
+/// Rebuilds the GPU-crate permutation `Argument` from the canonical
+/// halo2-axiom one (consumed by `GpuProvingKey`/`GpuVerifyingKey::from_host`).
+/// `permutation` is a `pub mod` in halo2-axiom, so the type is nameable here.
+impl From<&halo2_axiom::plonk::permutation::Argument> for Argument {
+    fn from(a: &halo2_axiom::plonk::permutation::Argument) -> Self {
+        Argument {
+            columns: a.get_columns().iter().map(Column::from).collect(),
+        }
+    }
+}
+
 /// The verifying key for a single permutation argument.
 #[derive(Debug, Clone)]
 pub struct VerifyingKey<C: CurveAffine> {
@@ -92,112 +92,5 @@ impl<C: CurveAffine> VerifyingKey<C> {
     /// Returns commitments of sigma polynomials
     pub fn commitments(&self) -> &Vec<C> {
         &self.commitments
-    }
-
-    pub(crate) fn write<W: io::Write>(&self, writer: &mut W, format: SerdeFormat) -> io::Result<()>
-    where
-        C: SerdeCurveAffine,
-    {
-        for commitment in &self.commitments {
-            commitment.write(writer, format)?;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn read<R: io::Read>(
-        reader: &mut R,
-        argument: &Argument,
-        format: SerdeFormat,
-    ) -> io::Result<Self>
-    where
-        C: SerdeCurveAffine,
-    {
-        let commitments = (0..argument.columns.len())
-            .map(|_| C::read(reader, format))
-            .collect::<io::Result<Vec<_>>>()?;
-        Ok(VerifyingKey { commitments })
-    }
-
-    pub(crate) fn bytes_length(&self) -> usize {
-        self.commitments.len() * C::default().to_bytes().as_ref().len()
-    }
-}
-
-/// The proving key for a single permutation argument.
-#[derive(Debug)]
-pub(crate) struct ProvingKey<C: CurveAffine> {
-    pub(super) permutations: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
-    pub(super) polys: Vec<Polynomial<C::Scalar, Coeff>>,
-    /// Lazy device mirror of `permutations` (the Lagrange σ-columns
-    /// referenced per-column by `permutation_product_device`).
-    /// Populated on first `permutations_device()` call; empty after Clone.
-    /// Mirrors the lifecycle of `pk.fixed_values_device` /
-    /// `pk.permutation_polys_device` in the top-level `plonk::ProvingKey`.
-    permutations_device: OnceCell<Vec<Polynomial<C::Scalar, LagrangeCoeff, crate::poly::Device>>>,
-}
-
-impl<C: CurveAffine> Clone for ProvingKey<C> {
-    /// Empties the device `OnceCell` mirror, matching the `ParamsKZG` /
-    /// top-level `ProvingKey` clone contract. A clone regenerates its
-    /// device mirror lazily on first use.
-    fn clone(&self) -> Self {
-        Self {
-            permutations: self.permutations.clone(),
-            polys: self.polys.clone(),
-            permutations_device: OnceCell::new(),
-        }
-    }
-}
-
-impl<C: SerdeCurveAffine> ProvingKey<C>
-where
-    C::Scalar: SerdePrimeField,
-{
-    /// Reads proving key for a single permutation argument from buffer using `Polynomial::read`.
-    pub(super) fn read<R: io::Read>(reader: &mut R, format: SerdeFormat) -> Self {
-        let permutations = read_polynomial_vec(reader, format);
-        let polys = read_polynomial_vec(reader, format);
-        ProvingKey {
-            permutations,
-            polys,
-            permutations_device: OnceCell::new(),
-        }
-    }
-
-    /// Writes proving key for a single permutation argument to buffer using `Polynomial::write`.
-    pub(super) fn write<W: io::Write>(&self, writer: &mut W, format: SerdeFormat) {
-        write_polynomial_slice(&self.permutations, writer, format);
-        write_polynomial_slice(&self.polys, writer, format);
-    }
-}
-
-impl<C: CurveAffine> ProvingKey<C> {
-    /// Gets the total number of bytes in the serialization of `self`
-    pub(super) fn bytes_length(&self) -> usize {
-        polynomial_slice_byte_length(&self.permutations) + polynomial_slice_byte_length(&self.polys)
-    }
-
-    /// Read-only accessor for the Coeff form sigma polys. Used by
-    /// `plonk::ProvingKey::permutation_polys_device` to build the PK
-    /// Device-resident mirror.
-    pub(crate) fn polys(&self) -> &[Polynomial<C::Scalar, Coeff>] {
-        &self.polys
-    }
-
-    /// Lazy device mirror of `permutations` (Lagrange σ-columns). Returns
-    /// `None` if VRAM-gated out. Used by `permutation::Argument::commit` to
-    /// feed device σ pointers into `permutation_product_device`.
-    pub(crate) fn permutations_device(
-        &self,
-    ) -> Option<&[Polynomial<C::Scalar, LagrangeCoeff, crate::poly::Device>]> {
-        if let Some(v) = self.permutations_device.get() {
-            return Some(v.as_slice());
-        }
-        super::try_init_pk_device_mirror::<C, LagrangeCoeff>(
-            &self.permutations,
-            "pk.permutation.permutations_device.init",
-            &self.permutations_device,
-        )
-        .map(|v| v.as_slice())
     }
 }

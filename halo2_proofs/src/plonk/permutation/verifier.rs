@@ -40,7 +40,7 @@ impl Argument {
         T: TranscriptRead<C, E>,
     >(
         &self,
-        vk: &plonk::VerifyingKey<C>,
+        vk: &plonk::GpuVerifyingKey<C>,
         transcript: &mut T,
     ) -> Result<Committed<C>, Error> {
         let chunk_len = vk.cs_degree - 2;
@@ -106,7 +106,7 @@ impl<C: CurveAffine> Evaluated<C> {
     #[allow(clippy::too_many_arguments)]
     pub(in crate::plonk) fn expressions<'a>(
         &'a self,
-        vk: &'a plonk::VerifyingKey<C>,
+        vk: &'a plonk::GpuVerifyingKey<C>,
         p: &'a Argument,
         common: &'a CommonEvaluated<C>,
         advice_evals: &'a [C::Scalar],
@@ -207,7 +207,7 @@ impl<C: CurveAffine> Evaluated<C> {
 
     pub(in crate::plonk) fn queries<'r, M: MSM<C> + 'r>(
         &'r self,
-        vk: &'r plonk::VerifyingKey<C>,
+        vk: &'r plonk::GpuVerifyingKey<C>,
         x: ChallengeX<C>,
     ) -> impl Iterator<Item = VerifierQuery<'r, C, M>> + Clone {
         let blinding_factors = vk.cs.blinding_factors();

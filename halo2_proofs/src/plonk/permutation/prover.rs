@@ -10,9 +10,9 @@ use rand_core::RngCore;
 use std::iter::{self, ExactSizeIterator};
 
 use super::super::{circuit::Any, ChallengeBeta, ChallengeGamma, ChallengeX};
-use super::{Argument, ProvingKey};
+use super::Argument;
 use crate::{
-    arithmetic::{eval_polynomial, CurveAffine},
+    arithmetic::CurveAffine,
     cuda::funcs::{grand_product_device, permutation_product_device},
     cuda::utils::{FFITraitObject, HALO2_GPU_CTX},
     cuda::HaloGpuError,
@@ -66,8 +66,7 @@ impl Argument {
     pub(in crate::plonk) fn commit<'params, C: CurveAffine, P: Params<'params, C>, R: RngCore>(
         &self,
         params: &P,
-        pk: &plonk::ProvingKey<C>,
-        pkey: &ProvingKey<C>,
+        pk: &plonk::GpuProvingKey<C>,
         advice_device: &[Polynomial<C::Scalar, LagrangeCoeff, Device>],
         fixed_device: &[Polynomial<C::Scalar, LagrangeCoeff, Device>],
         instance_device: &[Polynomial<C::Scalar, LagrangeCoeff, Device>],
@@ -76,15 +75,15 @@ impl Argument {
         mut rng: R,
     ) -> Result<(Committed<C>, Vec<C>), Error> {
         crate::perf_section!("permutation_commit");
-        let domain = &pk.vk.domain;
+        let domain = &pk.domain;
 
-        // Lagrange σ-columns staged once into a device-resident PK mirror.
-        // Required for the device-input FFI; the host-arm permutation::ProvingKey
-        // sigma vector is the single source of truth that backs it.
-        let permutations_device = pkey.permutations_device().ok_or(Error::HaloGpu(
+        // Lagrange σ-columns staged once into a device-resident PK mirror (the
+        // distinct Lagrange mirror, moved onto `GpuProvingKey`). The host-arm
+        // permutation σ vector (`inner.permutation().permutations()`) backs it.
+        let permutations_device = pk.permutation_lagrange_device().ok_or(Error::HaloGpu(
             HaloGpuError::InsufficientGpuMemory {
                 context: "permutation::Argument::commit: permutations_device unavailable",
-                magnitude: pkey.permutations.len() as u64,
+                magnitude: pk.inner.permutation().permutations().len() as u64,
                 free_bytes: 0,
             },
         ))?;
@@ -93,9 +92,9 @@ impl Argument {
         // We need to multiply by z(X) and (1 - (l_last(X) + l_blind(X))). This
         // will never underflow because of the requirement of at least a degree
         // 3 circuit for the permutation argument.
-        assert!(pk.vk.cs_degree >= 3);
-        let chunk_len = pk.vk.cs_degree - 2;
-        let blinding_factors = pk.vk.cs.blinding_factors();
+        assert!(pk.cs.degree() >= 3);
+        let chunk_len = pk.cs.degree() - 2;
+        let blinding_factors = pk.cs.blinding_factors();
 
         // Each column gets its own delta power.
         let mut deltaomega = C::Scalar::ONE;
@@ -109,7 +108,10 @@ impl Argument {
         info!("domain.k() = {}", domain.k());
         info!("domain.extended_k() = {}", domain.extended_k());
         info!("columns.len() = {}", self.columns.len());
-        info!("pkey.permutations.len() = {}", pkey.permutations.len());
+        info!(
+            "pkey.permutations.len() = {}",
+            pk.inner.permutation().permutations().len()
+        );
         info!("chunk_len = {}", chunk_len);
 
         let n = params.n() as usize;
@@ -313,36 +315,19 @@ impl<C: CurveAffine> Committed<C> {
     }
 }
 
-impl<C: CurveAffine> super::ProvingKey<C> {
-    // Permutation-poly opening is performed inline by the multiopen
-    // caller in `plonk::prover::create_proof`, which iterates the
-    // `permutation_polys_for_query` slice directly and routes through
-    // the PK device mirror when populated.
-
-    pub(in crate::plonk) fn evaluate<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
-        &self,
-        x: ChallengeX<C>,
-        transcript: &mut T,
-    ) -> Result<(), Error> {
-        crate::perf_section!("permutation_pk.evaluate");
-        // Hash permutation evals
-        for eval in self.polys.iter().map(|poly| eval_polynomial(poly, *x)) {
-            transcript.write_scalar(eval)?;
-        }
-
-        Ok(())
-    }
-}
+// NOTE: permutation σ-poly evaluation (previously `permutation::ProvingKey::evaluate`)
+// now lives on `GpuProvingKey::evaluate_permutation`, since the gpu
+// `permutation::ProvingKey` was deleted in favor of the canonical halo2-axiom pk.
 
 impl<C: CurveAffine> Constructed<C> {
     pub(in crate::plonk) fn evaluate<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
         self,
-        pk: &plonk::ProvingKey<C>,
+        pk: &plonk::GpuProvingKey<C>,
         x: ChallengeX<C>,
         transcript: &mut T,
     ) -> Result<Evaluated<C>, Error> {
-        let domain = &pk.vk.domain;
-        let blinding_factors = pk.vk.cs.blinding_factors();
+        let domain = &pk.domain;
+        let blinding_factors = pk.cs.blinding_factors();
 
         {
             let mut sets = self.sets.iter();
@@ -385,13 +370,12 @@ impl<C: CurveAffine> Constructed<C> {
 impl<C: CurveAffine> Evaluated<C> {
     pub(in crate::plonk) fn open<'a>(
         &'a self,
-        pk: &'a plonk::ProvingKey<C>,
+        pk: &'a plonk::GpuProvingKey<C>,
         x: ChallengeX<C>,
     ) -> impl Iterator<Item = ProverQuery<'a, C>> + Clone {
-        let blinding_factors = pk.vk.cs.blinding_factors();
-        let x_next = pk.vk.domain.rotate_omega(*x, Rotation::next());
+        let blinding_factors = pk.cs.blinding_factors();
+        let x_next = pk.domain.rotate_omega(*x, Rotation::next());
         let x_last = pk
-            .vk
             .domain
             .rotate_omega(*x, Rotation(-((blinding_factors + 1) as i32)));
 

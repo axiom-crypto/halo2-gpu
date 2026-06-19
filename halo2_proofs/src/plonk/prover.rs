@@ -17,7 +17,7 @@ use super::{
         Instance, Selector,
     },
     lookup, permutation, vanishing, ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX,
-    ChallengeY, Error, ProvingKey,
+    ChallengeY, Error, GpuProvingKey,
 };
 use crate::{
     arithmetic::CurveAffine,
@@ -57,7 +57,7 @@ pub fn create_proof<
     ConcreteCircuit: Circuit<Scheme::Scalar>,
 >(
     params: &'params Scheme::ParamsProver,
-    pk: &ProvingKey<Scheme::Curve>,
+    pk: &GpuProvingKey<Scheme::Curve>,
     circuits: &[ConcreteCircuit],
     instances: &[&'a [&'a [Scheme::Scalar]]],
     mut rng: R,
@@ -78,15 +78,15 @@ where
     assert_eq!(circuits.len(), instances.len());
     assert!(!circuits.is_empty());
 
-    let num_instance = pk.vk.cs.num_instance_columns;
+    let num_instance = pk.cs.num_instance_columns;
     for instance in instances.iter() {
         if instance.len() != num_instance {
             return Err(Error::InvalidInstances);
         }
     }
-    pk.vk.hash_into(transcript)?;
+    pk.hash_into(transcript)?;
 
-    let domain = &pk.vk.domain;
+    let domain = &pk.domain;
     #[cfg(feature = "profile")]
     info!("extended_k: {}", domain.extended_k());
     let mut meta = ConstraintSystem::default();
@@ -96,8 +96,8 @@ where
     let config = ConcreteCircuit::configure(&mut meta);
 
     // Selector optimizations cannot be applied here; use the ConstraintSystem
-    // from the verification key.
-    let meta = &pk.vk.cs;
+    // from the (rebuilt GPU) proving key.
+    let meta = &pk.cs;
 
     #[derive(Default)]
     struct InstanceSingle<C: CurveAffine> {
@@ -509,7 +509,7 @@ where
             let mut instance = Vec::with_capacity(instances.len());
 
             let unusable_rows_start = params.n() as usize - (meta.blinding_factors() + 1);
-            let phases = pk.vk.cs.phases().collect::<Vec<_>>();
+            let phases = pk.cs.phases().collect::<Vec<_>>();
             let num_phases = phases.len();
             // WARNING: this will currently not work if `circuits` has more than 1 circuit
             // because the original API squeezes the challenges for a phase after running all circuits
@@ -611,7 +611,7 @@ where
     let (lookups, beta, gamma) = {
         crate::perf_section!("phase2");
 
-        info!("{} lookups (A', S') ifft/msm", pk.vk.cs.lookups.len());
+        info!("{} lookups (A', S') ifft/msm", pk.cs.lookups.len());
         // Single-stream sequential commit: a previous worker-thread + channel
         // pipeline pretended the MSMs could overlap across GPUs, but with one
         // stream they can't, so the channel hops were pure overhead.
@@ -629,9 +629,9 @@ where
             .zip(advice.iter())
             .map(|(instance, advice)| -> Result<_, Error> {
                 let mut pool = ColumnPool::<Scheme::Scalar>::new(params.n() as usize);
-                if !pk.vk.cs.lookups.is_empty() {
+                if !pk.cs.lookups.is_empty() {
                     let fixed_slices: Vec<&[Scheme::Scalar]> =
-                        pk.fixed_values.iter().map(|p| p.values()).collect();
+                        pk.inner.fixed_values().iter().map(|p| p.values()).collect();
                     let pk_fixed_mirror = pk.fixed_values_device();
                     if let Err(e) = pool.try_init_device(
                         pk_fixed_mirror,
@@ -643,8 +643,7 @@ where
                     }
                 }
                 let pool_ref = pool.is_initialized().then_some(&pool);
-                pk.vk
-                    .cs
+                pk.cs
                     .lookups
                     .iter()
                     .map(
@@ -655,7 +654,7 @@ where
                                 domain,
                                 theta,
                                 &advice.advice_values,
-                                &pk.fixed_values,
+                                pk.inner.fixed_values(),
                                 &instance.instance_values,
                                 &challenges,
                                 pool_ref,
@@ -687,14 +686,13 @@ where
                     let fixed_values_device = pk.fixed_values_device().ok_or(Error::HaloGpu(
                         crate::cuda::HaloGpuError::InsufficientGpuMemory {
                             context: "plonk::prover: pk.fixed_values_device() unavailable",
-                            magnitude: pk.fixed_values.len() as u64,
+                            magnitude: pk.inner.fixed_values().len() as u64,
                             free_bytes: 0,
                         },
                     ))?;
-                    let (committed, commitments) = pk.vk.cs.permutation.commit(
+                    let (committed, commitments) = pk.cs.permutation.commit(
                         params,
                         pk,
-                        &pk.permutation,
                         &advice.advice_values,
                         fixed_values_device,
                         &instance.instance_values,
@@ -745,14 +743,13 @@ where
 
     info!("num_advice: {}", advice[0].advice_polys.len());
     info!("instance: {}", instance[0].instance_polys.len());
-    info!("fixed: {}", pk.fixed_polys.len());
+    info!("fixed: {}", pk.inner.fixed_polys().len());
     info!("lookup: {}", lookups[0].len());
     info!("permutation: {}", permutations[0].sets.len());
     info!("cals: {:?}", pk.ev.custom_gates.calculations.len());
     info!(
         "num_of_gates: {}",
-        pk.vk
-            .cs
+        pk.cs
             .gates
             .iter()
             .map(|gate| gate.polynomials().len())
@@ -889,8 +886,8 @@ where
 
             let batch_size = meta.fixed_queries.len();
             info!("fixed batch size: {}", batch_size);
-            info!("    pk.fixed_polys.len: {}", pk.fixed_polys.len());
-            if batch_size > 0 && !pk.fixed_polys.is_empty() {
+            info!("    pk.fixed_polys.len: {}", pk.inner.fixed_polys().len());
+            if batch_size > 0 && !pk.inner.fixed_polys().is_empty() {
                 let queries_idx: Vec<_> = meta
                     .fixed_queries
                     .iter()
@@ -914,7 +911,7 @@ where
 
         let vanishing = vanishing.evaluate(x, xn, domain, transcript)?;
 
-        pk.permutation.evaluate(x, transcript)?;
+        pk.evaluate_permutation(x, transcript)?;
 
         let permutations: Vec<permutation::prover::Evaluated<Scheme::Curve>> = permutations
             .into_iter()
@@ -988,53 +985,55 @@ where
                 "VRAM fallback fired: PK permutation_polys device mirror absent; ProverQuery routes through host slice"
             );
         }
-        let permutation_host_polys = pk.permutation.polys();
-        let instances =
-            instance
-                .iter()
-                .zip(advice.iter())
-                .zip(permutations.iter())
-                .zip(lookups.iter())
-                .flat_map(|(((instance, advice), permutation), lookups)| {
-                    iter::empty()
-                        .chain(
-                            P::QUERY_INSTANCE
-                                .then_some(pk.vk.cs.instance_queries.iter().map(
-                                    move |&(column, at)| ProverQuery {
-                                        point: domain.rotate_omega(*x, at),
-                                        poly: (&instance.instance_polys[column.index()]).into(),
-                                    },
-                                ))
-                                .into_iter()
-                                .flatten(),
-                        )
-                        .chain(pk.vk.cs.advice_queries.iter().map(move |&(column, at)| {
-                            ProverQuery {
+        let permutation_host_polys = pk.inner.permutation().polys();
+        let instances = instance
+            .iter()
+            .zip(advice.iter())
+            .zip(permutations.iter())
+            .zip(lookups.iter())
+            .flat_map(|(((instance, advice), permutation), lookups)| {
+                iter::empty()
+                    .chain(
+                        P::QUERY_INSTANCE
+                            .then_some(pk.cs.instance_queries.iter().map(move |&(column, at)| {
+                                ProverQuery {
+                                    point: domain.rotate_omega(*x, at),
+                                    poly: (&instance.instance_polys[column.index()]).into(),
+                                }
+                            }))
+                            .into_iter()
+                            .flatten(),
+                    )
+                    .chain(
+                        pk.cs
+                            .advice_queries
+                            .iter()
+                            .map(move |&(column, at)| ProverQuery {
                                 point: domain.rotate_omega(*x, at),
                                 poly: (&advice.advice_polys[column.index()]).into(),
-                            }
-                        }))
-                        .chain(permutation.open(pk, x))
-                        .chain(lookups.iter().flat_map(move |p| p.open(pk, x)))
-                })
-                .chain(pk.vk.cs.fixed_queries.iter().map(|&(column, at)| {
-                    let poly = match fixed_polys_device_opt {
-                        Some(d) => crate::poly::PolyRef::Device(&d[column.index()]),
-                        None => crate::poly::PolyRef::Host(&pk.fixed_polys[column.index()]),
-                    };
-                    ProverQuery {
-                        point: domain.rotate_omega(*x, at),
-                        poly,
-                    }
-                }))
-                .chain((0..permutation_host_polys.len()).map(|idx| {
-                    let poly = match permutation_polys_device_opt {
-                        Some(d) => crate::poly::PolyRef::Device(&d[idx]),
-                        None => crate::poly::PolyRef::Host(&permutation_host_polys[idx]),
-                    };
-                    ProverQuery { point: *x, poly }
-                }))
-                .chain(vanishing.open(x));
+                            }),
+                    )
+                    .chain(permutation.open(pk, x))
+                    .chain(lookups.iter().flat_map(move |p| p.open(pk, x)))
+            })
+            .chain(pk.cs.fixed_queries.iter().map(|&(column, at)| {
+                let poly = match fixed_polys_device_opt {
+                    Some(d) => crate::poly::PolyRef::Device(&d[column.index()]),
+                    None => crate::poly::PolyRef::Host(&pk.inner.fixed_polys()[column.index()]),
+                };
+                ProverQuery {
+                    point: domain.rotate_omega(*x, at),
+                    poly,
+                }
+            }))
+            .chain((0..permutation_host_polys.len()).map(|idx| {
+                let poly = match permutation_polys_device_opt {
+                    Some(d) => crate::poly::PolyRef::Device(&d[idx]),
+                    None => crate::poly::PolyRef::Host(&permutation_host_polys[idx]),
+                };
+                ProverQuery { point: *x, poly }
+            }))
+            .chain(vanishing.open(x));
 
         let prover = P::new(params);
         #[cfg(feature = "profile")]

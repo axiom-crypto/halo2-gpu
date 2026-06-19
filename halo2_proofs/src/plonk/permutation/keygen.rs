@@ -1,20 +1,14 @@
-use ff::{Field, PrimeField};
-use group::Curve;
-
 use rayon::prelude::*;
 
-use super::{Argument, ProvingKey, VerifyingKey};
-use crate::{
-    arithmetic::CurveAffine,
-    cpu::arithmetic::parallelize,
-    plonk::{Any, Column, Error},
-    poly::{
-        commitment::{Blind, Params},
-        EvaluationDomain,
-    },
-};
+use super::Argument;
+use crate::plonk::{Any, Column, Error};
 
 /// Struct that accumulates all the necessary data in order to construct the permutation argument.
+///
+/// The permutation proving/verifying keys are now produced by halo2-axiom's keygen
+/// (the canonical pk/vk), so the GPU crate keeps only the copy-constraint assembly
+/// used by `dev::MockProver`; the former `build_pk`/`build_vk` helpers were removed
+/// along with the GPU `permutation::ProvingKey`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Assembly {
     /// Columns that participate on the copy permutation argument.
@@ -105,24 +99,6 @@ impl Assembly {
         Ok(())
     }
 
-    pub(crate) fn build_vk<'params, C: CurveAffine, P: Params<'params, C>>(
-        self,
-        params: &P,
-        domain: &EvaluationDomain<C::Scalar>,
-        p: &Argument,
-    ) -> VerifyingKey<C> {
-        build_vk(params, domain, p, |i, j| self.mapping[i][j])
-    }
-
-    pub(crate) fn build_pk<'params, C: CurveAffine, P: Params<'params, C>>(
-        self,
-        params: &P,
-        domain: &EvaluationDomain<C::Scalar>,
-        p: &Argument,
-    ) -> Result<ProvingKey<C>, crate::plonk::Error> {
-        build_pk(params, domain, p, |i, j| self.mapping[i][j])
-    }
-
     /// Returns columns that participate in the permutation argument.
     pub fn columns(&self) -> &[Column<Any>] {
         &self.columns
@@ -134,125 +110,4 @@ impl Assembly {
     ) -> impl Iterator<Item = impl IndexedParallelIterator<Item = (usize, usize)> + '_> {
         self.mapping.iter().map(|c| c.par_iter().copied())
     }
-}
-
-pub(crate) fn build_pk<'params, C: CurveAffine, P: Params<'params, C>>(
-    params: &P,
-    domain: &EvaluationDomain<C::Scalar>,
-    p: &Argument,
-    mapping: impl Fn(usize, usize) -> (usize, usize) + Sync,
-) -> Result<ProvingKey<C>, crate::plonk::Error> {
-    // Compute [omega^0, omega^1, ..., omega^{params.n - 1}]
-    let mut omega_powers = vec![C::Scalar::ZERO; params.n() as usize];
-    {
-        let omega = domain.get_omega();
-        parallelize(&mut omega_powers, |o, start| {
-            let mut cur = omega.pow_vartime([start as u64]);
-            for v in o.iter_mut() {
-                *v = cur;
-                cur *= &omega;
-            }
-        })
-    }
-
-    // Compute [omega_powers * \delta^0, omega_powers * \delta^1, ..., omega_powers * \delta^m]
-    let mut deltaomega = vec![omega_powers; p.columns.len()];
-    {
-        parallelize(&mut deltaomega, |o, start| {
-            let mut cur = C::Scalar::DELTA.pow_vartime([start as u64]);
-            for omega_powers in o.iter_mut() {
-                for v in omega_powers {
-                    *v *= &cur;
-                }
-                cur *= &C::Scalar::DELTA;
-            }
-        });
-    }
-
-    // Compute permutation polynomials, convert to coset form.
-    let mut permutations = vec![domain.empty_lagrange(); p.columns.len()];
-    {
-        parallelize(&mut permutations, |o, start| {
-            for (x, permutation_poly) in o.iter_mut().enumerate() {
-                let i = start + x;
-                for (j, p) in permutation_poly.iter_mut().enumerate() {
-                    let (permuted_i, permuted_j) = mapping(i, j);
-                    *p = deltaomega[permuted_i][permuted_j];
-                }
-            }
-        });
-    }
-
-    // GPU
-    // note: Do not use parallelize() and GPU fft() at the same time.
-    //       This may cause an out of GPU memory error.
-    let polys = domain.lagrange_to_coeff_many(&permutations)?;
-
-    Ok(ProvingKey {
-        permutations,
-        polys,
-        permutations_device: once_cell::sync::OnceCell::new(),
-    })
-}
-
-pub(crate) fn build_vk<'params, C: CurveAffine, P: Params<'params, C>>(
-    params: &P,
-    domain: &EvaluationDomain<C::Scalar>,
-    p: &Argument,
-    mapping: impl Fn(usize, usize) -> (usize, usize) + Sync,
-) -> VerifyingKey<C> {
-    // Compute [omega^0, omega^1, ..., omega^{params.n - 1}]
-    let mut omega_powers = vec![C::Scalar::ZERO; params.n() as usize];
-    {
-        let omega = domain.get_omega();
-        parallelize(&mut omega_powers, |o, start| {
-            let mut cur = omega.pow_vartime([start as u64]);
-            for v in o.iter_mut() {
-                *v = cur;
-                cur *= &omega;
-            }
-        })
-    }
-
-    // Compute [omega_powers * \delta^0, omega_powers * \delta^1, ..., omega_powers * \delta^m]
-    let mut deltaomega = vec![omega_powers; p.columns.len()];
-    {
-        parallelize(&mut deltaomega, |o, start| {
-            let mut cur = C::Scalar::DELTA.pow_vartime([start as u64]);
-            for omega_powers in o.iter_mut() {
-                for v in omega_powers {
-                    *v *= &cur;
-                }
-                cur *= &<C::Scalar as PrimeField>::DELTA;
-            }
-        });
-    }
-
-    // Computes the permutation polynomial based on the permutation
-    // description in the assembly.
-    let mut permutations = vec![domain.empty_lagrange(); p.columns.len()];
-    {
-        parallelize(&mut permutations, |o, start| {
-            for (x, permutation_poly) in o.iter_mut().enumerate() {
-                let i = start + x;
-                for (j, p) in permutation_poly.iter_mut().enumerate() {
-                    let (permuted_i, permuted_j) = mapping(i, j);
-                    *p = deltaomega[permuted_i][permuted_j];
-                }
-            }
-        });
-    }
-
-    // Pre-compute commitments for the URS.
-    let mut commitments = Vec::with_capacity(p.columns.len());
-    for permutation in &permutations {
-        // Compute commitment to permutation polynomial
-        commitments.push(
-            params
-                .commit_lagrange(permutation, Blind::default())
-                .to_affine(),
-        );
-    }
-
-    VerifyingKey { commitments }
 }
