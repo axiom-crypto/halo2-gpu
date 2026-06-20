@@ -1,4 +1,4 @@
-use super::{lookup, permutation, GpuError};
+use super::{lookup, permutation};
 use crate::dev::metadata;
 use crate::poly::Rotation;
 use core::cmp::max;
@@ -1243,7 +1243,13 @@ impl<F: Field> Mul<F> for GpuExpression<F> {
 
 /// A "virtual cell" is a PLONK cell that has been queried at a particular relative offset
 /// within a custom gate.
+///
+/// `column`/`rotation` are populated for structural parity with the canonical
+/// `VirtualCell` (via the `From` bridge), but the GPU quotient evaluator drives
+/// off `GpuGate::polys`, not the queried-cell debug tracking — hence
+/// `#[allow(dead_code)]`.
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct GpuVirtualCell {
     pub(crate) column: GpuColumn<GpuAny>,
     pub(crate) rotation: Rotation,
@@ -1384,8 +1390,12 @@ pub struct GpuGate<F: Field> {
     pub(crate) constraint_names: Vec<String>,
     pub(crate) polys: Vec<GpuExpression<F>>,
     /// We track queried selectors separately from other cells, so that we can use them to
-    /// trigger debug checks on gates.
+    /// trigger debug checks on gates. Kept for structural parity with the
+    /// canonical `Gate` (populated by the `From` bridge); the GPU evaluator does
+    /// not read them, hence `#[allow(dead_code)]`.
+    #[allow(dead_code)]
     pub(crate) queried_selectors: Vec<GpuSelector>,
+    #[allow(dead_code)]
     pub(crate) queried_cells: Vec<GpuVirtualCell>,
 }
 
@@ -1405,10 +1415,12 @@ impl<F: Field> GpuGate<F> {
         &self.polys
     }
 
+    #[allow(dead_code)]
     pub(crate) fn queried_selectors(&self) -> &[GpuSelector] {
         &self.queried_selectors
     }
 
+    #[allow(dead_code)]
     pub(crate) fn queried_cells(&self) -> &[GpuVirtualCell] {
         &self.queried_cells
     }
