@@ -3,21 +3,12 @@ use halo2curves::{serde::SerdeObject, CurveAffine};
 
 use std::io;
 
-/// This enum specifies how various types are serialized and deserialized.
-#[derive(Clone, Copy, Debug)]
-pub enum SerdeFormat {
-    /// Curve elements are serialized in compressed form.
-    /// Field elements are serialized in standard form, with endianness specified by the
-    /// `PrimeField` implementation.
-    Processed,
-    /// Curve elements are serialized in uncompressed form. Field elements are serialized
-    /// in their internal Montgomery representation.
-    /// When deserializing, checks are performed to ensure curve elements indeed lie on the curve and field elements
-    /// are less than modulus.
-    RawBytes,
-    /// Serialization is the same as `RawBytes`, but no checks are performed.
-    RawBytesUnchecked,
-}
+// The serde format is the CANONICAL halo2-axiom `SerdeFormat`, re-exported so
+// consumers that call canonical `ProvingKey`/`VerifyingKey` read/write (e.g.
+// `snark-verifier-sdk`) pass the same type the canonical key methods expect.
+// The GPU crate's own serde (`ParamsKZG`, the `Serde*` traits below) matches on
+// the same three variants, so this is a drop-in for the former fork enum.
+pub use halo2_axiom::SerdeFormat;
 
 // Keep this trait for compatibility with IPA serialization
 pub(crate) trait CurveRead: CurveAffine {
