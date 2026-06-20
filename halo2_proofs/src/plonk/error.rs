@@ -71,6 +71,31 @@ impl From<HaloGpuError> for Error {
     }
 }
 
+/// Converts a canonical halo2-axiom synthesis error into the GPU crate's `Error`.
+/// The GPU keygen drives the canonical `Circuit::synthesize` (whose `Assignment`
+/// methods return `halo2_axiom::plonk::Error`); this bridge lets the keygen
+/// entry points propagate those via `?` while returning the GPU `Error`.
+impl From<halo2_axiom::plonk::Error> for Error {
+    fn from(e: halo2_axiom::plonk::Error) -> Self {
+        use halo2_axiom::plonk::Error as Canonical;
+        match e {
+            Canonical::NotEnoughRowsAvailable { current_k } => {
+                Error::NotEnoughRowsAvailable { current_k }
+            }
+            Canonical::BoundsFailure => Error::BoundsFailure,
+            Canonical::InvalidInstances => Error::InvalidInstances,
+            Canonical::ConstraintSystemFailure => Error::ConstraintSystemFailure,
+            Canonical::InstanceTooLarge => Error::InstanceTooLarge,
+            Canonical::NotEnoughColumnsForConstants => Error::NotEnoughColumnsForConstants,
+            Canonical::Opening => Error::Opening,
+            // `Synthesis`, `Transcript`, `ColumnNotInPermutation`, and `TableError`
+            // (whose payload types differ across the crate boundary) surface as a
+            // generic synthesis failure on the keygen path.
+            _ => Error::Synthesis,
+        }
+    }
+}
+
 impl Error {
     /// Constructs an `Error::NotEnoughRowsAvailable`.
     pub(crate) fn not_enough_rows_available(current_k: u32) -> Self {
