@@ -16,7 +16,7 @@ use crate::{
     cuda::funcs::{grand_product_device, permutation_product_device},
     cuda::utils::{FFITraitObject, HALO2_GPU_CTX},
     cuda::HaloGpuError,
-    plonk::{self, Error},
+    plonk::{self, GpuError},
     poly::{
         commitment::{Blind, Params},
         Coeff, Device, DevicePolyExt, LagrangeCoeff, PolyEvalAt, Polynomial, ProverQuery, Rotation,
@@ -73,14 +73,14 @@ impl Argument {
         beta: ChallengeBeta<C>,
         gamma: ChallengeGamma<C>,
         mut rng: R,
-    ) -> Result<(Committed<C>, Vec<C>), Error> {
+    ) -> Result<(Committed<C>, Vec<C>), GpuError> {
         crate::perf_section!("permutation_commit");
         let domain = &pk.domain;
 
         // Lagrange σ-columns staged once into a device-resident PK mirror (the
         // distinct Lagrange mirror, moved onto `GpuProvingKey`). The host-arm
         // permutation σ vector (`inner.permutation().permutations()`) backs it.
-        let permutations_device = pk.permutation_lagrange_device().ok_or(Error::HaloGpu(
+        let permutations_device = pk.permutation_lagrange_device().ok_or(GpuError::HaloGpu(
             HaloGpuError::InsufficientGpuMemory {
                 context: "permutation::Argument::commit: permutations_device unavailable",
                 magnitude: pk.inner.permutation().permutations().len() as u64,
@@ -325,7 +325,7 @@ impl<C: CurveAffine> Constructed<C> {
         pk: &plonk::GpuProvingKey<'_, C>,
         x: ChallengeX<C>,
         transcript: &mut T,
-    ) -> Result<Evaluated<C>, Error> {
+    ) -> Result<Evaluated<C>, GpuError> {
         let domain = &pk.domain;
         let blinding_factors = pk.cs.blinding_factors();
 

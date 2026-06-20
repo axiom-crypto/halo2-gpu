@@ -165,7 +165,7 @@ pub(crate) fn evaluate_h_inner<C: CurveAffine>(
     theta: C::ScalarExt,
     lookups: &[Vec<lookup::prover::Committed<C>>],
     permutations: &[permutation::prover::Committed<C>],
-) -> Result<crate::poly::Polynomial<C::ScalarExt, ExtendedLagrangeCoeff>, crate::plonk::Error>
+) -> Result<crate::poly::Polynomial<C::ScalarExt, ExtendedLagrangeCoeff>, crate::plonk::GpuError>
 where
     C::ScalarExt: WithSmallOrderMulGroup<3>,
 {
@@ -186,7 +186,7 @@ where
         .map(
             |_i| -> Result<
                 crate::poly::Polynomial<C::ScalarExt, LagrangeCoeff>,
-                crate::plonk::Error,
+                crate::plonk::GpuError,
             > {
                 // Pure-CPU per-part cosetFFT, one logical group at a time.
                 // Outputs are host-resident so every downstream consumer

@@ -1,5 +1,5 @@
 use super::super::{
-    circuit::GpuExpression, ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX, Error,
+    circuit::GpuExpression, ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX, GpuError,
     GpuProvingKey,
 };
 use super::Argument;
@@ -90,7 +90,7 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
         instance_values_device: &'a [Polynomial<C::Scalar, LagrangeCoeff, Device>],
         challenges: &'a [C::Scalar],
         column_pool: Option<&ColumnPool<C::Scalar>>,
-    ) -> Result<(Permuted<C>, C, C), Error>
+    ) -> Result<(Permuted<C>, C, C), GpuError>
     where
         F: Hash,
         C: CurveAffine<ScalarExt = F>,
@@ -317,7 +317,7 @@ impl<C: CurveAffine> Permuted<C> {
         beta: ChallengeBeta<C>,
         gamma: ChallengeGamma<C>,
         mut rng: R,
-    ) -> Result<(Committed<C>, C), Error> {
+    ) -> Result<(Committed<C>, C), GpuError> {
         crate::perf_section!("lookup_commit_product");
         let blinding_factors = pk.cs.blinding_factors();
         // Goal is to compute the products of fractions
@@ -470,7 +470,7 @@ impl<C: CurveAffine> CommittedUnpacked<C> {
         pk: &GpuProvingKey<'_, C>,
         x: ChallengeX<C>,
         transcript: &mut T,
-    ) -> Result<Evaluated<C>, Error> {
+    ) -> Result<Evaluated<C>, GpuError> {
         let domain = &pk.domain;
         let x_inv = domain.rotate_omega(*x, Rotation::prev());
         let x_next = domain.rotate_omega(*x, Rotation::next());
@@ -659,7 +659,7 @@ fn permute_expression_pair<'params, C: CurveAffine, P: Params<'params, C>>(
     domain: &EvaluationDomain<C::Scalar>,
     input_expression: &Polynomial<C::Scalar, LagrangeCoeff>,
     table_expression: &Polynomial<C::Scalar, LagrangeCoeff>,
-) -> Result<ExpressionPair<C::Scalar>, Error>
+) -> Result<ExpressionPair<C::Scalar>, GpuError>
 where
     C::Scalar: Hash,
 {
@@ -850,7 +850,7 @@ fn permute_expression_pair_seq<C: CurveAffine>(
                     None
                 } else {
                     // Return error if input_value not found
-                    panic!("{:?}", Error::ConstraintSystemFailure);
+                    panic!("{:?}", GpuError::ConstraintSystemFailure);
                 }
                 // If input value is repeated
             } else {
@@ -905,7 +905,7 @@ mod tests {
     fn permute_expression_pair_par_scroll<C: CurveAffine>(
         permuted_input_expression: &mut [C::Scalar],
         table_expression: &Polynomial<C::Scalar, LagrangeCoeff>,
-    ) -> Result<Vec<C::Scalar>, Error> {
+    ) -> Result<Vec<C::Scalar>, GpuError> {
         let usable_rows = permuted_input_expression.len();
 
         // Sort input lookup expression values
@@ -995,7 +995,7 @@ mod tests {
                     }
                     if not_found {
                         // Return error if input_value not found
-                        Some(Err(Error::ConstraintSystemFailure))
+                        Some(Err(GpuError::ConstraintSystemFailure))
                     } else {
                         None
                     }

@@ -11,7 +11,7 @@ use super::{Any, Column};
 
 /// This is an error that could occur during proving or circuit synthesis.
 #[derive(Debug)]
-pub enum Error {
+pub enum GpuError {
     /// This is an error that can occur during synthesis of the circuit, for
     /// example, when the witness is not present.
     Synthesis,
@@ -52,22 +52,22 @@ pub enum Error {
     HaloGpu(HaloGpuError),
 }
 
-impl From<io::Error> for Error {
+impl From<io::Error> for GpuError {
     fn from(error: io::Error) -> Self {
         // The only place we can get io::Error from is the transcript.
-        Error::Transcript(error)
+        GpuError::Transcript(error)
     }
 }
 
-impl From<CudaError> for Error {
+impl From<CudaError> for GpuError {
     fn from(err: CudaError) -> Self {
-        Error::Cuda(err)
+        GpuError::Cuda(err)
     }
 }
 
-impl From<HaloGpuError> for Error {
+impl From<HaloGpuError> for GpuError {
     fn from(err: HaloGpuError) -> Self {
-        Error::HaloGpu(err)
+        GpuError::HaloGpu(err)
     }
 }
 
@@ -75,73 +75,73 @@ impl From<HaloGpuError> for Error {
 /// The GPU keygen drives the canonical `Circuit::synthesize` (whose `Assignment`
 /// methods return `halo2_axiom::plonk::Error`); this bridge lets the keygen
 /// entry points propagate those via `?` while returning the GPU `Error`.
-impl From<halo2_axiom::plonk::Error> for Error {
+impl From<halo2_axiom::plonk::Error> for GpuError {
     fn from(e: halo2_axiom::plonk::Error) -> Self {
         use halo2_axiom::plonk::Error as Canonical;
         match e {
             Canonical::NotEnoughRowsAvailable { current_k } => {
-                Error::NotEnoughRowsAvailable { current_k }
+                GpuError::NotEnoughRowsAvailable { current_k }
             }
-            Canonical::BoundsFailure => Error::BoundsFailure,
-            Canonical::InvalidInstances => Error::InvalidInstances,
-            Canonical::ConstraintSystemFailure => Error::ConstraintSystemFailure,
-            Canonical::InstanceTooLarge => Error::InstanceTooLarge,
-            Canonical::NotEnoughColumnsForConstants => Error::NotEnoughColumnsForConstants,
-            Canonical::Opening => Error::Opening,
+            Canonical::BoundsFailure => GpuError::BoundsFailure,
+            Canonical::InvalidInstances => GpuError::InvalidInstances,
+            Canonical::ConstraintSystemFailure => GpuError::ConstraintSystemFailure,
+            Canonical::InstanceTooLarge => GpuError::InstanceTooLarge,
+            Canonical::NotEnoughColumnsForConstants => GpuError::NotEnoughColumnsForConstants,
+            Canonical::Opening => GpuError::Opening,
             // `Synthesis`, `Transcript`, `ColumnNotInPermutation`, and `TableError`
             // (whose payload types differ across the crate boundary) surface as a
             // generic synthesis failure on the keygen path.
-            _ => Error::Synthesis,
+            _ => GpuError::Synthesis,
         }
     }
 }
 
-impl Error {
+impl GpuError {
     /// Constructs an `Error::NotEnoughRowsAvailable`.
     pub(crate) fn not_enough_rows_available(current_k: u32) -> Self {
-        Error::NotEnoughRowsAvailable { current_k }
+        GpuError::NotEnoughRowsAvailable { current_k }
     }
 }
 
-impl fmt::Display for Error {
+impl fmt::Display for GpuError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Synthesis => write!(f, "General synthesis error"),
-            Error::InvalidInstances => write!(f, "Provided instances do not match the circuit"),
-            Error::ConstraintSystemFailure => write!(f, "The constraint system is not satisfied"),
-            Error::BoundsFailure => write!(f, "An out-of-bounds index was passed to the backend"),
-            Error::Opening => write!(f, "Multi-opening proof was invalid"),
-            Error::Transcript(e) => write!(f, "Transcript error: {}", e),
-            Error::NotEnoughRowsAvailable { current_k } => write!(
+            GpuError::Synthesis => write!(f, "General synthesis error"),
+            GpuError::InvalidInstances => write!(f, "Provided instances do not match the circuit"),
+            GpuError::ConstraintSystemFailure => write!(f, "The constraint system is not satisfied"),
+            GpuError::BoundsFailure => write!(f, "An out-of-bounds index was passed to the backend"),
+            GpuError::Opening => write!(f, "Multi-opening proof was invalid"),
+            GpuError::Transcript(e) => write!(f, "Transcript error: {}", e),
+            GpuError::NotEnoughRowsAvailable { current_k } => write!(
                 f,
                 "k = {} is too small for the given circuit. Try using a larger value of k",
                 current_k,
             ),
-            Error::InstanceTooLarge => write!(f, "Instance vectors are larger than the circuit"),
-            Error::NotEnoughColumnsForConstants => {
+            GpuError::InstanceTooLarge => write!(f, "Instance vectors are larger than the circuit"),
+            GpuError::NotEnoughColumnsForConstants => {
                 write!(
                     f,
                     "Too few fixed columns are enabled for global constants usage"
                 )
             }
-            Error::ColumnNotInPermutation(column) => write!(
+            GpuError::ColumnNotInPermutation(column) => write!(
                 f,
                 "Column {:?} must be included in the permutation. Help: try applying `meta.enable_equalty` on the column",
                 column
             ),
-            Error::TableError(error) => write!(f, "{}", error),
-            Error::Cuda(e) => write!(f, "CUDA error: {}", e),
-            Error::HaloGpu(e) => write!(f, "halo2-gpu error: {}", e),
+            GpuError::TableError(error) => write!(f, "{}", error),
+            GpuError::Cuda(e) => write!(f, "CUDA error: {}", e),
+            GpuError::HaloGpu(e) => write!(f, "halo2-gpu error: {}", e),
         }
     }
 }
 
-impl error::Error for Error {
+impl error::Error for GpuError {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
-            Error::Transcript(e) => Some(e),
-            Error::Cuda(e) => Some(e),
-            Error::HaloGpu(e) => Some(e),
+            GpuError::Transcript(e) => Some(e),
+            GpuError::Cuda(e) => Some(e),
+            GpuError::HaloGpu(e) => Some(e),
             _ => None,
         }
     }

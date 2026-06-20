@@ -1,4 +1,4 @@
-use super::{lookup, permutation, Error};
+use super::{lookup, permutation, GpuError};
 use crate::dev::metadata;
 use crate::poly::Rotation;
 use core::cmp::max;

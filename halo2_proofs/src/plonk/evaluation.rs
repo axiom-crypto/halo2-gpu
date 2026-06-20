@@ -1066,7 +1066,7 @@ pub(in crate::plonk) fn evaluate_h_device<C: CurveAffine>(
     theta: C::ScalarExt,
     lookups: &[Vec<lookup::prover::Committed<C>>],
     permutations: &[permutation::prover::Committed<C>],
-) -> Result<crate::poly::MaybeDevice<C::ScalarExt, ExtendedLagrangeCoeff>, crate::plonk::Error>
+) -> Result<crate::poly::MaybeDevice<C::ScalarExt, ExtendedLagrangeCoeff>, crate::plonk::GpuError>
 where
     C::ScalarExt: WithSmallOrderMulGroup<3>,
 {
@@ -1124,7 +1124,7 @@ pub(crate) fn evaluate_h_inner<C: CurveAffine>(
     theta: C::ScalarExt,
     lookups: &[Vec<lookup::prover::Committed<C>>],
     permutations: &[permutation::prover::Committed<C>],
-) -> Result<crate::poly::MaybeDevice<C::ScalarExt, ExtendedLagrangeCoeff>, crate::plonk::Error>
+) -> Result<crate::poly::MaybeDevice<C::ScalarExt, ExtendedLagrangeCoeff>, crate::plonk::GpuError>
 where
     C::ScalarExt: WithSmallOrderMulGroup<3>,
 {
@@ -1156,7 +1156,7 @@ where
         .map(
             |_i| -> Result<
                 crate::poly::MaybeDevice<C::ScalarExt, LagrangeCoeff>,
-                crate::plonk::Error,
+                crate::plonk::GpuError,
             > {
                 let c2e_part_many_time = info_span!(
                     "halo2_section",
@@ -2427,7 +2427,7 @@ mod tests {
 
         use crate::{
             circuit::{Layouter, SimpleFloorPlanner, Value},
-            plonk::{Advice, Circuit, Column, Error, Fixed, TableColumn},
+            plonk::{Advice, Circuit, Column, GpuError, Fixed, TableColumn},
         };
         #[derive(Clone, Debug)]
         struct TestCircuitConfig {
@@ -2517,7 +2517,7 @@ mod tests {
                 &self,
                 config: Self::Config,
                 mut layouter: impl Layouter<F>,
-            ) -> Result<(), Error> {
+            ) -> Result<(), GpuError> {
                 layouter.assign_table(
                     || "table for uint8",
                     |mut table| {

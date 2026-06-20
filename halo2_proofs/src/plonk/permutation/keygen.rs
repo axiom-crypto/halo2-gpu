@@ -8,7 +8,7 @@ use rayon::prelude::*;
 // frontend re-exports; `Error` is the GPU crate's own error enum.
 use crate::arithmetic::CurveAffine;
 use crate::cpu::arithmetic::parallelize;
-use crate::plonk::{Any, Column, Error};
+use crate::plonk::{Any, Column, GpuError};
 use crate::poly::{
     commitment::{Blind, Params},
     EvaluationDomain, LagrangeCoeff, Polynomial,
@@ -65,23 +65,23 @@ impl Assembly {
         left_row: usize,
         right_column: Column<Any>,
         right_row: usize,
-    ) -> Result<(), Error> {
+    ) -> Result<(), GpuError> {
         let left_column = self
             .columns
             .iter()
             .position(|c| c == &left_column)
-            .ok_or(Error::ColumnNotInPermutation(left_column))?;
+            .ok_or(GpuError::ColumnNotInPermutation(left_column))?;
         let right_column = self
             .columns
             .iter()
             .position(|c| c == &right_column)
-            .ok_or(Error::ColumnNotInPermutation(right_column))?;
+            .ok_or(GpuError::ColumnNotInPermutation(right_column))?;
 
         // Check bounds
         if left_row >= self.mapping[left_column].len()
             || right_row >= self.mapping[right_column].len()
         {
-            return Err(Error::BoundsFailure);
+            return Err(GpuError::BoundsFailure);
         }
 
         // See book/src/design/permutation.md for a description of this algorithm.
@@ -139,7 +139,7 @@ impl Assembly {
         params: &P,
         domain: &EvaluationDomain<C::Scalar>,
         p: &Argument,
-    ) -> Result<halo2_axiom::plonk::permutation::ProvingKey<C>, Error> {
+    ) -> Result<halo2_axiom::plonk::permutation::ProvingKey<C>, GpuError> {
         build_pk(params, domain, p, |i, j| self.mapping[i][j])
     }
 
@@ -160,7 +160,7 @@ pub(crate) fn build_pk<'params, C: CurveAffine, P: Params<'params, C>>(
     domain: &EvaluationDomain<C::Scalar>,
     p: &Argument,
     mapping: impl Fn(usize, usize) -> (usize, usize) + Sync,
-) -> Result<halo2_axiom::plonk::permutation::ProvingKey<C>, Error> {
+) -> Result<halo2_axiom::plonk::permutation::ProvingKey<C>, GpuError> {
     let permutations = permutation_lagrange_polys::<C, P>(params, domain, p, mapping);
     // GPU iFFT. NOTE: do not interleave parallelize() with GPU fft() — risks GPU OOM.
     let polys = domain.lagrange_to_coeff_many(&permutations)?;

@@ -10,7 +10,7 @@
 
 use ff::WithSmallOrderMulGroup;
 
-use crate::plonk::Error;
+use crate::plonk::GpuError;
 use crate::poly::{Coeff, EvaluationDomain, LagrangeCoeff, Polynomial};
 
 #[cfg(feature = "vram-fallback")]
@@ -27,7 +27,7 @@ use crate::poly::{Device, DevicePolyExt, ExtendedLagrangeCoeff, Host, MaybeDevic
 pub(crate) fn lagrange_to_coeff_many_host<F: WithSmallOrderMulGroup<3>>(
     domain: &EvaluationDomain<F>,
     in_many: &[Polynomial<F, LagrangeCoeff>],
-) -> Result<Vec<Polynomial<F, Coeff>>, Error> {
+) -> Result<Vec<Polynomial<F, Coeff>>, GpuError> {
     crate::perf_section!("lagrange_to_coeff_many");
     log::info!("using lagrange_to_coeff_many: vec_num[{}]", in_many.len());
     if in_many.is_empty() {
@@ -53,7 +53,7 @@ pub(crate) fn lagrange_to_coeff_many_host<F: WithSmallOrderMulGroup<3>>(
 pub(crate) fn extended_from_lagrange_vec_not_all_device<F: WithSmallOrderMulGroup<3>>(
     domain: &EvaluationDomain<F>,
     values: Vec<MaybeDevice<F, LagrangeCoeff>>,
-) -> Result<MaybeDevice<F, ExtendedLagrangeCoeff>, Error> {
+) -> Result<MaybeDevice<F, ExtendedLagrangeCoeff>, GpuError> {
     tracing::warn!(
         target: "halo2_vram_fallback",
         site = "extended_from_lagrange_vec_device.not_all_device",
@@ -79,7 +79,7 @@ pub(crate) fn extended_from_lagrange_vec_vram_tight<F: WithSmallOrderMulGroup<3>
     values: Vec<MaybeDevice<F, LagrangeCoeff>>,
     free_bytes: usize,
     extended_bytes: usize,
-) -> Result<MaybeDevice<F, ExtendedLagrangeCoeff>, Error> {
+) -> Result<MaybeDevice<F, ExtendedLagrangeCoeff>, GpuError> {
     tracing::warn!(
         target: "halo2_vram_fallback",
         site = "extended_from_lagrange_vec_device.vram_tight",
@@ -108,7 +108,7 @@ pub(crate) fn lagrange_to_coeff_many_device_inputs_host_arm<F: WithSmallOrderMul
     in_many: &[Polynomial<F, LagrangeCoeff, Device>],
     free_bytes: usize,
     total_bytes: usize,
-) -> Result<Vec<Polynomial<F, Coeff, Device>>, Error> {
+) -> Result<Vec<Polynomial<F, Coeff, Device>>, GpuError> {
     tracing::warn!(
         target: "halo2_vram_fallback",
         site = "lagrange_to_coeff_many_device_inputs.vram_tight",
@@ -126,8 +126,8 @@ pub(crate) fn lagrange_to_coeff_many_device_inputs_host_arm<F: WithSmallOrderMul
                 .values()
                 .to_device_on(&HALO2_GPU_CTX)
                 .map_err(HaloGpuError::from)
-                .map_err(Error::from)?;
-            Ok::<Polynomial<F, Coeff, Device>, Error>(Polynomial::from_device(d_buf))
+                .map_err(GpuError::from)?;
+            Ok::<Polynomial<F, Coeff, Device>, GpuError>(Polynomial::from_device(d_buf))
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(device_outs)
@@ -141,7 +141,7 @@ pub(crate) fn lagrange_to_coeff_device_host_arm<F: WithSmallOrderMulGroup<3>>(
     a: Polynomial<F, LagrangeCoeff>,
     free_bytes: usize,
     n_bytes: usize,
-) -> Result<Polynomial<F, Coeff, Device>, Error> {
+) -> Result<Polynomial<F, Coeff, Device>, GpuError> {
     tracing::warn!(
         target: "halo2_vram_fallback",
         site = "lagrange_to_coeff_device.vram_tight",
@@ -154,7 +154,7 @@ pub(crate) fn lagrange_to_coeff_device_host_arm<F: WithSmallOrderMulGroup<3>>(
         .values()
         .to_device_on(&HALO2_GPU_CTX)
         .map_err(HaloGpuError::from)
-        .map_err(Error::from)?;
+        .map_err(GpuError::from)?;
     Ok(Polynomial::<F, Coeff, Device>::from_device(d_buf))
 }
 
@@ -166,7 +166,7 @@ pub(crate) fn lagrange_to_coeff_device_input_host_arm<F: WithSmallOrderMulGroup<
     a: Polynomial<F, LagrangeCoeff, Device>,
     free_bytes: usize,
     n_bytes: usize,
-) -> Result<Polynomial<F, Coeff, Device>, Error> {
+) -> Result<Polynomial<F, Coeff, Device>, GpuError> {
     tracing::warn!(
         target: "halo2_vram_fallback",
         site = "lagrange_to_coeff_device_input.vram_tight",
@@ -180,7 +180,7 @@ pub(crate) fn lagrange_to_coeff_device_input_host_arm<F: WithSmallOrderMulGroup<
         .values()
         .to_device_on(&HALO2_GPU_CTX)
         .map_err(HaloGpuError::from)
-        .map_err(Error::from)?;
+        .map_err(GpuError::from)?;
     Ok(Polynomial::<F, Coeff, Device>::from_device(d_buf))
 }
 
@@ -192,7 +192,7 @@ pub(crate) fn lagrange_to_coeff_many_device_host_arm<F: WithSmallOrderMulGroup<3
     in_many: &[Polynomial<F, LagrangeCoeff>],
     free_bytes: usize,
     total_bytes: usize,
-) -> Result<Vec<Polynomial<F, Coeff, Device>>, Error> {
+) -> Result<Vec<Polynomial<F, Coeff, Device>>, GpuError> {
     tracing::warn!(
         target: "halo2_vram_fallback",
         site = "lagrange_to_coeff_many_device.vram_tight",
@@ -209,8 +209,8 @@ pub(crate) fn lagrange_to_coeff_many_device_host_arm<F: WithSmallOrderMulGroup<3
                 .values()
                 .to_device_on(&HALO2_GPU_CTX)
                 .map_err(HaloGpuError::from)
-                .map_err(Error::from)?;
-            Ok::<Polynomial<F, Coeff, Device>, Error>(Polynomial::from_device(d_buf))
+                .map_err(GpuError::from)?;
+            Ok::<Polynomial<F, Coeff, Device>, GpuError>(Polynomial::from_device(d_buf))
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(device_outs)

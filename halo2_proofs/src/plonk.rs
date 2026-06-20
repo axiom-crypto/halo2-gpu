@@ -56,7 +56,7 @@ pub use halo2_axiom::plonk::{ProvingKey, VerifyingKey};
 // via the `From` bridge.
 pub use halo2_axiom::plonk::{
     Advice, AdviceQuery, Any, Assigned, Assignment, Challenge, Circuit, Column, ColumnType,
-    Constraint, ConstraintSystem, Constraints, Expression, Fixed, FirstPhase, FixedQuery,
+    Constraint, ConstraintSystem, Constraints, Error, Expression, Fixed, FirstPhase, FixedQuery,
     FloorPlanner, Gate, Instance, InstanceQuery, Phase, SecondPhase, Selector, TableColumn,
     ThirdPhase, VirtualCell, VirtualCells,
 };
@@ -280,7 +280,7 @@ impl<'a, C: CurveAffine> GpuProvingKey<'a, C> {
         &self,
         x: ChallengeX<C>,
         transcript: &mut T,
-    ) -> Result<(), Error> {
+    ) -> Result<(), GpuError> {
         crate::perf_section!("permutation_pk.evaluate");
         for eval in self
             .inner

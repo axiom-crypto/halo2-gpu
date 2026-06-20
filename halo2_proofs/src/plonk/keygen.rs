@@ -27,7 +27,7 @@ use std::ops::Range;
 use group::ff::{Field, FromUniformBytes};
 use group::Curve;
 
-use super::{permutation, Circuit, Error, ProvingKey, VerifyingKey};
+use super::{permutation, Circuit, GpuError, ProvingKey, VerifyingKey};
 use crate::arithmetic::CurveAffine;
 use crate::circuit::Value;
 use crate::cpu::arithmetic::parallelize;
@@ -137,14 +137,14 @@ impl<F: Field> Assignment<F> for Assembly<F> {
 
     fn assign_fixed(&mut self, column: Column<Fixed>, row: usize, to: Assigned<F>) {
         if !self.usable_rows.contains(&row) {
-            panic!("Assign Fixed {:?}", Error::not_enough_rows_available(self.k));
+            panic!("Assign Fixed {:?}", GpuError::not_enough_rows_available(self.k));
         }
 
         *self
             .fixed
             .get_mut(column.index())
             .and_then(|v| v.get_mut(row))
-            .unwrap_or_else(|| panic!("{:?}", Error::BoundsFailure)) = to;
+            .unwrap_or_else(|| panic!("{:?}", GpuError::BoundsFailure)) = to;
     }
 
     fn copy(
@@ -155,7 +155,7 @@ impl<F: Field> Assignment<F> for Assembly<F> {
         right_row: usize,
     ) {
         if !self.usable_rows.contains(&left_row) || !self.usable_rows.contains(&right_row) {
-            panic!("{:?}", Error::not_enough_rows_available(self.k));
+            panic!("{:?}", GpuError::not_enough_rows_available(self.k));
         }
 
         self.permutation
@@ -217,7 +217,7 @@ impl<F: Field> Assignment<F> for Assembly<F> {
 pub fn keygen_vk<'params, C, P, ConcreteCircuit>(
     params: &P,
     circuit: &ConcreteCircuit,
-) -> Result<VerifyingKey<C>, Error>
+) -> Result<VerifyingKey<C>, GpuError>
 where
     C: CurveAffine,
     P: Params<'params, C> + Sync,
@@ -235,7 +235,7 @@ pub fn keygen_vk_custom<'params, C, P, ConcreteCircuit>(
     params: &P,
     circuit: &ConcreteCircuit,
     compress_selectors: bool,
-) -> Result<VerifyingKey<C>, Error>
+) -> Result<VerifyingKey<C>, GpuError>
 where
     C: CurveAffine,
     P: Params<'params, C> + Sync,
@@ -252,7 +252,7 @@ where
     let degree = cs.degree();
 
     if (params.n() as usize) < cs.minimum_rows() {
-        return Err(Error::not_enough_rows_available(params.k()));
+        return Err(GpuError::not_enough_rows_available(params.k()));
     }
 
     let mut assembly: Assembly<C::Scalar> = Assembly {
@@ -309,7 +309,7 @@ pub fn keygen_pk<'params, C, P, ConcreteCircuit>(
     params: &P,
     vk: VerifyingKey<C>,
     circuit: &ConcreteCircuit,
-) -> Result<ProvingKey<C>, Error>
+) -> Result<ProvingKey<C>, GpuError>
 where
     C: CurveAffine,
     C::Scalar: FromUniformBytes<64>,
@@ -326,7 +326,7 @@ pub fn keygen_pk2<'params, C, P, ConcreteCircuit>(
     params: &P,
     circuit: &ConcreteCircuit,
     compress_selectors: bool,
-) -> Result<ProvingKey<C>, Error>
+) -> Result<ProvingKey<C>, GpuError>
 where
     C: CurveAffine,
     C::Scalar: FromUniformBytes<64>,
@@ -344,7 +344,7 @@ fn keygen_pk_impl<'params, C, P, ConcreteCircuit>(
     vk: Option<VerifyingKey<C>>,
     circuit: &ConcreteCircuit,
     compress_selectors: bool,
-) -> Result<ProvingKey<C>, Error>
+) -> Result<ProvingKey<C>, GpuError>
 where
     C: CurveAffine,
     C::Scalar: FromUniformBytes<64>,
@@ -359,7 +359,7 @@ where
     let degree = cs.degree();
 
     if (params.n() as usize) < cs.minimum_rows() {
-        return Err(Error::not_enough_rows_available(params.k()));
+        return Err(GpuError::not_enough_rows_available(params.k()));
     }
 
     let mut assembly: Assembly<C::Scalar> = Assembly {

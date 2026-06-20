@@ -15,7 +15,7 @@ use super::{
     // `GpuConstraintSystem`); the per-phase witness loop tracks it internally.
     circuit::sealed::{self},
     lookup, permutation, vanishing, ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX,
-    ChallengeY, Error, GpuProvingKey, ProvingKey,
+    ChallengeY, GpuError, GpuProvingKey, ProvingKey,
 };
 use crate::{
     arithmetic::CurveAffine,
@@ -69,7 +69,7 @@ pub fn create_proof<
     instances: &[&'a [&'a [Scheme::Scalar]]],
     mut rng: R,
     mut transcript: &'a mut T,
-) -> Result<(), Error>
+) -> Result<(), GpuError>
 where
     // `FromUniformBytes<64>` is required to build the GPU proving-key view from
     // the canonical key (`GpuProvingKey::from_host_ref` → `ProvingKey::get_vk`,
@@ -101,7 +101,7 @@ where
     let num_instance = pk.cs.num_instance_columns;
     for instance in instances.iter() {
         if instance.len() != num_instance {
-            return Err(Error::InvalidInstances);
+            return Err(GpuError::InvalidInstances);
         }
     }
     pk.hash_into(transcript)?;
@@ -242,7 +242,7 @@ where
             debug_assert!(
                 self.usable_rows.contains(&row),
                 "{:?}",
-                Error::not_enough_rows_available(self.params.k())
+                GpuError::not_enough_rows_available(self.params.k())
             );
 
             // 3-4% witness-gen speedup vs `get_mut` + bounds checks.
@@ -315,7 +315,7 @@ where
                         debug_assert_eq!(poly.len(), self.params.n() as usize);
                         debug_assert!(
                             values.len() <= self.unusable_rows_start,
-                            "Error: InstanceTooLarge"
+                            "GpuError: InstanceTooLarge"
                         );
                         poly.values_mut()
                             .par_iter_mut()
@@ -450,7 +450,7 @@ where
             Vec<Polynomial<C::Scalar, Coeff, Device>>,
             Vec<C>,
         ),
-        Error,
+        GpuError,
     >
     where
         Scheme: CommitmentScheme<Curve = C, Scalar = C::ScalarExt>,
@@ -516,7 +516,7 @@ where
             crate::perf_section!("new_gpu_thread.instance_to_device");
             instance_values
                 .iter()
-                .map(|p| -> Result<_, Error> {
+                .map(|p| -> Result<_, GpuError> {
                     let d_buf = p
                         .values()
                         .to_device_on(&HALO2_GPU_CTX)
@@ -678,7 +678,7 @@ where
         let lookups: Vec<Vec<lookup::prover::Permuted<Scheme::Curve>>> = instance
             .iter()
             .zip(advice.iter())
-            .map(|(instance, advice)| -> Result<_, Error> {
+            .map(|(instance, advice)| -> Result<_, GpuError> {
                 let mut pool = ColumnPool::<Scheme::Scalar>::new(params.n() as usize);
                 if !pk.cs.lookups.is_empty() {
                     let fixed_slices: Vec<&[Scheme::Scalar]> =
@@ -698,7 +698,7 @@ where
                     .lookups
                     .iter()
                     .map(
-                        |lookup| -> Result<lookup::prover::Permuted<Scheme::Curve>, Error> {
+                        |lookup| -> Result<lookup::prover::Permuted<Scheme::Curve>, GpuError> {
                             let (permuted, input_c, table_c) = lookup.commit_permuted(
                                 pk,
                                 params,
@@ -715,9 +715,9 @@ where
                             Ok(permuted)
                         },
                     )
-                    .collect::<Result<Vec<_>, Error>>()
+                    .collect::<Result<Vec<_>, GpuError>>()
             })
-            .collect::<Result<Vec<_>, Error>>()?;
+            .collect::<Result<Vec<_>, GpuError>>()?;
 
         let beta: ChallengeBeta<_> = transcript.squeeze_challenge_scalar();
         let gamma: ChallengeGamma<_> = transcript.squeeze_challenge_scalar();
@@ -733,8 +733,8 @@ where
             instance
                 .iter()
                 .zip(advice.iter())
-                .map(|(instance, advice)| -> Result<_, Error> {
-                    let fixed_values_device = pk.fixed_values_device().ok_or(Error::HaloGpu(
+                .map(|(instance, advice)| -> Result<_, GpuError> {
+                    let fixed_values_device = pk.fixed_values_device().ok_or(GpuError::HaloGpu(
                         crate::cuda::HaloGpuError::InsufficientGpuMemory {
                             context: "plonk::prover: pk.fixed_values_device() unavailable",
                             magnitude: pk.inner.fixed_values().len() as u64,
@@ -763,11 +763,11 @@ where
             crate::perf_section!("phase3b");
             lookups
                 .into_iter()
-                .map(|lookups| -> Result<Vec<_>, Error> {
+                .map(|lookups| -> Result<Vec<_>, GpuError> {
                     lookups
                         .into_iter()
                         .map(
-                            |lookup| -> Result<lookup::prover::Committed<Scheme::Curve>, Error> {
+                            |lookup| -> Result<lookup::prover::Committed<Scheme::Curve>, GpuError> {
                                 let (committed, commitment) =
                                     lookup.commit_product(pk, params, beta, gamma, &mut rng)?;
                                 transcript.write_point(commitment)?;
@@ -1000,7 +1000,7 @@ where
                         .collect::<Result<Vec<_>, _>>()
                 },
             )
-            .collect::<Result<Vec<_>, Error>>()?;
+            .collect::<Result<Vec<_>, GpuError>>()?;
         #[cfg(feature = "profile")]
         end_timer!(unpack_timer);
 
@@ -1091,7 +1091,7 @@ where
         let multiopen_timer = start_timer!(|| "phase5 multiopen");
         let multiopen_res = prover
             .create_proof(rng, transcript, instances)
-            .map_err(|_| Error::ConstraintSystemFailure);
+            .map_err(|_| GpuError::ConstraintSystemFailure);
         #[cfg(feature = "profile")]
         end_timer!(multiopen_timer);
 
