@@ -41,11 +41,25 @@ use std::io;
 
 // The canonical proving/verifying key structs are the halo2-axiom CPU types:
 // one source-of-truth struct family, byte-identical serialization for CPU and
-// GPU by construction. The GPU crate keeps its own forked composing types
-// (`ConstraintSystem`/`EvaluationDomain`/`Evaluator`/`Expression`/`lookup` and
-// `permutation::Argument`), which the GPU prover/verifier operate on after a
-// cheap host-only rebuild (`GpuProvingKey`/`GpuVerifyingKey::from_host`).
+// GPU by construction. The GPU crate keeps its own forked composing types,
+// renamed `Gpu*` (`GpuConstraintSystem`/`GpuExpression`/`GpuGate`/`GpuColumn`/…,
+// exported by `pub use circuit::*` above), which the GPU prover/verifier operate
+// on after a cheap host-only rebuild (`GpuProvingKey`/`GpuVerifyingKey::from_host`)
+// via the `From<&canonical ConstraintSystem> for GpuConstraintSystem` bridge.
 pub use halo2_axiom::plonk::{ProvingKey, VerifyingKey};
+
+// Canonical frontend (the ESCALATE re-export). Consumers (`halo2-base`,
+// `snark-verifier`, `openvm`) and the GPU crate's own keygen/prover synthesis
+// resolve these names to the canonical halo2-axiom types, so `impl Circuit` and
+// `configure(&mut ConstraintSystem)` are canonical end-to-end. The `Gpu*` forks
+// (re-exported above) remain the backend's working types, rebuilt from canonical
+// via the `From` bridge.
+pub use halo2_axiom::plonk::{
+    Advice, AdviceQuery, Any, Assignment, Challenge, Circuit, Column, ColumnType, Constraint,
+    ConstraintSystem, Constraints, Expression, Fixed, FirstPhase, FixedQuery, FloorPlanner, Gate,
+    Instance, InstanceQuery, Phase, SecondPhase, Selector, TableColumn, ThirdPhase, VirtualCell,
+    VirtualCells,
+};
 
 /// GPU-side verifying key. NOT serialized — the canonical, serialized
 /// verifying key is [`VerifyingKey`] (halo2-axiom). `GpuVerifyingKey` holds the
