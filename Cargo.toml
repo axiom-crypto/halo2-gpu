@@ -32,9 +32,3 @@ codegen-units = 1
 
 [patch."https://github.com/axiom-crypto/halo2-gpu.git"]
 halo2-axiom-gpu = { path = "halo2_proofs" }
-
-# Local validation: consume the Milestone-A additive accessors on
-# `feat/proving-key-accessors` (the halo2 checkout). The final pin is the
-# maintainer's call at merge (mirrors the Polynomial unification flow).
-[patch."https://github.com/axiom-crypto/halo2"]
-halo2-axiom = { path = "/home/grigorii/dev/halo2/halo2/halo2_proofs" }

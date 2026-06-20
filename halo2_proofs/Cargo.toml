@@ -51,7 +51,9 @@ yastl = "0.1.2"
 lazy_static = "1.4.0"
 git-version = "0.3.5"
 itertools = "0.11"
-halo2-axiom = { git = "https://github.com/axiom-crypto/halo2", branch = "main" }
+# TEMPORARY: track the pushed unified-pk accessors branch until the halo2 PR
+# merges to main, then revert this back to `branch = "main"`.
+halo2-axiom = { git = "https://github.com/axiom-crypto/halo2", branch = "feat/proving-key-accessors" }
 
 [build-dependencies]
 openvm-cuda-builder = { git = "https://github.com/openvm-org/stark-backend.git", branch = "develop-v2", default-features = false }
