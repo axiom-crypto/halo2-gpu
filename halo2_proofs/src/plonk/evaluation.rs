@@ -1,4 +1,4 @@
-use super::{ConstraintSystem, Expression};
+use super::{GpuConstraintSystem, GpuExpression};
 
 use crate::cpu::arithmetic::parallelize;
 use crate::cuda::error::CudaStatus;
@@ -9,7 +9,7 @@ use crate::cuda::utils::{
     HALO2_GPU_CTX,
 };
 use crate::cuda::HaloGpuError;
-use crate::plonk::{lookup, permutation, Any, Gate, GpuProvingKey};
+use crate::plonk::{lookup, permutation, GpuAny, GpuGate, GpuProvingKey};
 use crate::poly::{
     Basis, Coeff, Device, DevicePolyExt, EvaluationDomain, ExtendedLagrangeCoeff, LagrangeCoeff,
     Polynomial, Rotation,
@@ -394,7 +394,7 @@ pub struct CalculationInfo {
 
 impl<C: CurveAffine> Evaluator<C> {
     pub fn new_inner(
-        gates: &[Gate<C::ScalarExt>],
+        gates: &[GpuGate<C::ScalarExt>],
         lookups: &[lookup::Argument<C::ScalarExt>],
     ) -> Self {
         let mut ev = Evaluator::default();
@@ -418,7 +418,7 @@ impl<C: CurveAffine> Evaluator<C> {
         for lookup in lookups.iter() {
             let mut graph = GraphEvaluator::default();
 
-            let mut evaluate_lc = |expressions: &Vec<Expression<_>>| {
+            let mut evaluate_lc = |expressions: &Vec<GpuExpression<_>>| {
                 let parts = expressions
                     .iter()
                     .map(|expr| graph.add_expression(expr))
@@ -451,7 +451,7 @@ impl<C: CurveAffine> Evaluator<C> {
     }
 
     /// Creates a new evaluation structure
-    pub fn new(cs: &ConstraintSystem<C::ScalarExt>) -> Self {
+    pub fn new(cs: &GpuConstraintSystem<C::ScalarExt>) -> Self {
         Self::new_inner(cs.gates(), cs.lookups())
     }
 
@@ -525,36 +525,36 @@ impl<C: CurveAffine> GraphEvaluator<C> {
     }
 
     /// Generates an optimized evaluation for the expression
-    pub(crate) fn add_expression(&mut self, expr: &Expression<C::ScalarExt>) -> ValueSource {
+    pub(crate) fn add_expression(&mut self, expr: &GpuExpression<C::ScalarExt>) -> ValueSource {
         match expr {
-            Expression::Constant(scalar) => self.add_constant(scalar),
-            Expression::Selector(_selector) => unreachable!(),
-            Expression::Fixed(query) => {
+            GpuExpression::Constant(scalar) => self.add_constant(scalar),
+            GpuExpression::Selector(_selector) => unreachable!(),
+            GpuExpression::Fixed(query) => {
                 let rot_idx = self.add_rotation(&query.rotation);
                 self.add_calculation(Calculation::Store(ValueSource::Fixed(
                     query.column_index,
                     rot_idx,
                 )))
             }
-            Expression::Advice(query) => {
+            GpuExpression::Advice(query) => {
                 let rot_idx = self.add_rotation(&query.rotation);
                 self.add_calculation(Calculation::Store(ValueSource::Advice(
                     query.column_index,
                     rot_idx,
                 )))
             }
-            Expression::Instance(query) => {
+            GpuExpression::Instance(query) => {
                 let rot_idx = self.add_rotation(&query.rotation);
                 self.add_calculation(Calculation::Store(ValueSource::Instance(
                     query.column_index,
                     rot_idx,
                 )))
             }
-            Expression::Challenge(challenge) => self.add_calculation(Calculation::Store(
+            GpuExpression::Challenge(challenge) => self.add_calculation(Calculation::Store(
                 ValueSource::Challenge(challenge.index()),
             )),
-            Expression::Negated(a) => match **a {
-                Expression::Constant(scalar) => self.add_constant(&-scalar),
+            GpuExpression::Negated(a) => match **a {
+                GpuExpression::Constant(scalar) => self.add_constant(&-scalar),
                 _ => {
                     let result_a = self.add_expression(a);
                     match result_a {
@@ -563,10 +563,10 @@ impl<C: CurveAffine> GraphEvaluator<C> {
                     }
                 }
             },
-            Expression::Sum(a, b) => {
+            GpuExpression::Sum(a, b) => {
                 // Undo subtraction stored as a + (-b) in expressions
                 match &**b {
-                    Expression::Negated(b_int) => {
+                    GpuExpression::Negated(b_int) => {
                         let result_a = self.add_expression(a);
                         let result_b = self.add_expression(b_int);
                         if result_a == ValueSource::Constant(0) {
@@ -592,7 +592,7 @@ impl<C: CurveAffine> GraphEvaluator<C> {
                     }
                 }
             }
-            Expression::Product(a, b) => {
+            GpuExpression::Product(a, b) => {
                 let result_a = self.add_expression(a);
                 let result_b = self.add_expression(b);
                 if result_a == ValueSource::Constant(0) || result_b == ValueSource::Constant(0) {
@@ -613,7 +613,7 @@ impl<C: CurveAffine> GraphEvaluator<C> {
                     self.add_calculation(Calculation::Mul(result_b, result_a))
                 }
             }
-            Expression::Scaled(a, f) => {
+            GpuExpression::Scaled(a, f) => {
                 if *f == C::ScalarExt::ZERO {
                     ValueSource::Constant(0)
                 } else if *f == C::ScalarExt::ONE {
@@ -638,7 +638,7 @@ impl<C: CurveAffine> GraphEvaluator<C> {
     /// - `Calculation::Horner(Constant(0), parts, Y())` provides
     ///   shape; `Y()` is unused (`encode_vp` only serialises `parts`);
     ///   `Constant(0)` is unused (the kernel inits `val = 0`).
-    pub(crate) fn for_compress(expressions: &[Expression<C::ScalarExt>]) -> Self {
+    pub(crate) fn for_compress(expressions: &[GpuExpression<C::ScalarExt>]) -> Self {
         let mut graph = GraphEvaluator::<C>::default();
         let parts: Vec<ValueSource> = expressions
             .iter()
@@ -875,7 +875,7 @@ impl<C: CurveAffine> GraphEvaluator<C> {
 
 /// Simple evaluation of an expression
 pub fn evaluate<F: Field, B: Basis>(
-    expression: &Expression<F>,
+    expression: &GpuExpression<F>,
     size: usize,
     rot_scale: i32,
     fixed: &[Polynomial<F, B>],
@@ -1279,9 +1279,9 @@ where
                             .columns
                             .iter()
                             .map(|column| match column.column_type() {
-                                Any::Advice(_) => advice[column.index()].device_buf().as_raw_ptr(),
-                                Any::Fixed => fixed[column.index()].device_buf().as_raw_ptr(),
-                                Any::Instance => instance[column.index()].device_buf().as_raw_ptr(),
+                                GpuAny::Advice(_) => advice[column.index()].device_buf().as_raw_ptr(),
+                                GpuAny::Fixed => fixed[column.index()].device_buf().as_raw_ptr(),
+                                GpuAny::Instance => instance[column.index()].device_buf().as_raw_ptr(),
                             })
                             .collect();
 
@@ -1602,7 +1602,7 @@ extern "C" {
 // of `permute_expression_pair`.
 #[allow(clippy::too_many_arguments)]
 pub fn compress_expressions_device<C: CurveAffine>(
-    expressions: &[Expression<C::ScalarExt>],
+    expressions: &[GpuExpression<C::ScalarExt>],
     theta: C::ScalarExt,
     size: usize,
     rot_scale: i32,

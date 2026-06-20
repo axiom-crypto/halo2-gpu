@@ -1,7 +1,11 @@
 use rayon::prelude::*;
 
-use super::Argument;
+// Keygen consumes the CANONICAL constraint system, so the permutation argument
+// (and its columns) are the canonical halo2-axiom types — not the GPU fork
+// `permutation::Argument`. `Any`/`Column` likewise resolve to the canonical
+// frontend re-exports; `Error` is the GPU crate's own error enum.
 use crate::plonk::{Any, Column, Error};
+use halo2_axiom::plonk::permutation::Argument;
 
 /// Struct that accumulates all the necessary data in order to construct the permutation argument.
 ///
@@ -23,22 +27,27 @@ pub struct Assembly {
 
 impl Assembly {
     pub(crate) fn new(n: usize, p: &Argument) -> Self {
+        // Canonical permutation argument: `columns` field is private upstream, so
+        // pull the (owned) column list via the public `get_columns()` accessor.
+        let perm_columns = p.get_columns();
+        let num_columns = perm_columns.len();
+
         // Initialize the copy vector to keep track of copy constraints in all
         // the permutation arguments.
-        let mut columns = vec![];
-        for i in 0..p.columns.len() {
+        let mut mapping = vec![];
+        for i in 0..num_columns {
             // Computes [(i, 0), (i, 1), ..., (i, n - 1)]
-            columns.push((0..n).map(|j| (i, j)).collect());
+            mapping.push((0..n).map(|j| (i, j)).collect());
         }
 
         // Before any equality constraints are applied, every cell in the permutation is
         // in a 1-cycle; therefore mapping and aux are identical, because every cell is
         // its own distinguished element.
         Assembly {
-            columns: p.columns.clone(),
-            mapping: columns.clone(),
-            aux: columns,
-            sizes: vec![vec![1usize; n]; p.columns.len()],
+            columns: perm_columns,
+            aux: mapping.clone(),
+            mapping,
+            sizes: vec![vec![1usize; n]; num_columns],
         }
     }
 

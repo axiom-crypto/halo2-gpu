@@ -1,4 +1,4 @@
-use super::circuit::Expression;
+use super::circuit::GpuExpression;
 use ff::Field;
 use std::fmt::{self, Debug};
 
@@ -8,8 +8,8 @@ pub(crate) mod verifier;
 #[derive(Clone)]
 pub struct Argument<F: Field> {
     pub name: String,
-    pub input_expressions: Vec<Expression<F>>,
-    pub table_expressions: Vec<Expression<F>>,
+    pub input_expressions: Vec<GpuExpression<F>>,
+    pub table_expressions: Vec<GpuExpression<F>>,
 }
 
 impl<F: Field> Debug for Argument<F> {
@@ -25,7 +25,7 @@ impl<F: Field> Argument<F> {
     /// Constructs a new lookup argument.
     ///
     /// `table_map` is a sequence of `(input, table)` tuples.
-    pub fn new<S: AsRef<str>>(name: S, table_map: Vec<(Expression<F>, Expression<F>)>) -> Self {
+    pub fn new<S: AsRef<str>>(name: S, table_map: Vec<(GpuExpression<F>, GpuExpression<F>)>) -> Self {
         let (input_expressions, table_expressions) = table_map.into_iter().unzip();
         Argument {
             name: name.as_ref().to_string(),
@@ -83,12 +83,12 @@ impl<F: Field> Argument<F> {
     }
 
     /// Returns input of this argument
-    pub fn input_expressions(&self) -> &Vec<Expression<F>> {
+    pub fn input_expressions(&self) -> &Vec<GpuExpression<F>> {
         &self.input_expressions
     }
 
     /// Returns table of this argument
-    pub fn table_expressions(&self) -> &Vec<Expression<F>> {
+    pub fn table_expressions(&self) -> &Vec<GpuExpression<F>> {
         &self.table_expressions
     }
 

@@ -1,6 +1,6 @@
 //! Implementation of permutation argument.
 
-use super::circuit::{Any, Column};
+use super::circuit::{GpuAny, GpuColumn};
 use crate::arithmetic::CurveAffine;
 
 pub(crate) mod keygen;
@@ -13,7 +13,7 @@ pub use keygen::Assembly;
 #[derive(Debug, Clone)]
 pub struct Argument {
     /// A sequence of columns involved in the argument.
-    pub columns: Vec<Column<Any>>,
+    pub columns: Vec<GpuColumn<GpuAny>>,
 }
 
 impl Argument {
@@ -59,14 +59,14 @@ impl Argument {
         3
     }
 
-    pub(crate) fn add_column(&mut self, column: Column<Any>) {
+    pub(crate) fn add_column(&mut self, column: GpuColumn<GpuAny>) {
         if !self.columns.contains(&column) {
             self.columns.push(column);
         }
     }
 
     /// Returns columns that participate on the permutation argument.
-    pub fn get_columns(&self) -> Vec<Column<Any>> {
+    pub fn get_columns(&self) -> Vec<GpuColumn<GpuAny>> {
         self.columns.clone()
     }
 }
@@ -77,7 +77,7 @@ impl Argument {
 impl From<&halo2_axiom::plonk::permutation::Argument> for Argument {
     fn from(a: &halo2_axiom::plonk::permutation::Argument) -> Self {
         Argument {
-            columns: a.get_columns().iter().map(Column::from).collect(),
+            columns: a.get_columns().iter().map(GpuColumn::from).collect(),
         }
     }
 }

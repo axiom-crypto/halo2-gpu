@@ -1,5 +1,5 @@
 use super::super::{
-    circuit::Expression, ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX, Error,
+    circuit::GpuExpression, ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX, Error,
     GpuProvingKey,
 };
 use super::Argument;
@@ -101,7 +101,7 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
         // or its lazy upload failed VRAM gating). Materialises the
         // device-resident advice / instance columns on the host on demand;
         // the device-arm common path does not enter this closure.
-        let compress_expressions_host = |expressions: &[Expression<C::Scalar>]| {
+        let compress_expressions_host = |expressions: &[GpuExpression<C::Scalar>]| {
             let advice_values_host: Vec<Polynomial<C::Scalar, LagrangeCoeff>> =
                 advice_values_device.iter().map(|p| p.to_host()).collect();
             let instance_values_host: Vec<Polynomial<C::Scalar, LagrangeCoeff>> =
@@ -129,7 +129,7 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
         // pool is available. Falls back to the CPU closure on pool miss
         // (the caller may pass `None` when VRAM gating failed at pool
         // init).
-        let compress_expressions = |expressions: &[Expression<C::Scalar>]| {
+        let compress_expressions = |expressions: &[GpuExpression<C::Scalar>]| {
             if let Some(pool) = column_pool {
                 if pool.is_initialized() {
                     match compress_expressions_device::<C>(
@@ -570,8 +570,8 @@ impl<C: CurveAffine> Evaluated<C> {
 fn run_compress_permute_device<C: CurveAffine>(
     pool: &ColumnPool<C::Scalar>,
     theta: C::Scalar,
-    input_expressions: &[Expression<C::Scalar>],
-    table_expressions: &[Expression<C::Scalar>],
+    input_expressions: &[GpuExpression<C::Scalar>],
+    table_expressions: &[GpuExpression<C::Scalar>],
     n: usize,
     usable_rows: usize,
     challenges: &[C::Scalar],

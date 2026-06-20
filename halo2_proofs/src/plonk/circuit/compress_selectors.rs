@@ -1,4 +1,4 @@
-use super::Expression;
+use super::GpuExpression;
 use ff::Field;
 
 /// This describes a selector and where it is activated.
@@ -28,7 +28,7 @@ pub struct SelectorAssignment<F> {
     pub combination_index: usize,
 
     /// The expression we wish to substitute with
-    pub expression: Expression<F>,
+    pub expression: GpuExpression<F>,
 }
 
 /// This function takes a vector that defines each selector as well as a closure
@@ -54,7 +54,7 @@ pub fn process<F: Field, E>(
     mut allocate_fixed_column: E,
 ) -> (Vec<Vec<F>>, Vec<SelectorAssignment<F>>)
 where
-    E: FnMut() -> Expression<F>,
+    E: FnMut() -> GpuExpression<F>,
 {
     if selectors.is_empty() {
         // There is nothing to optimize.
@@ -195,7 +195,7 @@ where
             let mut root = F::ONE;
             for _ in 0..combination_len {
                 if root != assigned_root {
-                    expression = expression * (Expression::Constant(root) - query.clone());
+                    expression = expression * (GpuExpression::Constant(root) - query.clone());
                 }
                 root += F::ONE;
             }

@@ -1,10 +1,6 @@
-use super::{lookup, permutation, Assigned, Error};
-use crate::circuit::layouter::SyncDeps;
+use super::{lookup, permutation, Error};
 use crate::dev::metadata;
-use crate::{
-    circuit::{Layouter, Region, Value},
-    poly::Rotation,
-};
+use crate::poly::Rotation;
 use core::cmp::max;
 use core::ops::{Add, Mul};
 use ff::Field;
@@ -466,10 +462,11 @@ impl TryFrom<GpuColumn<GpuAny>> for GpuColumn<GpuInstance> {
 pub struct GpuSelector(pub(crate) usize, bool);
 
 impl GpuSelector {
-    /// Enable this selector at the given offset within the given region.
-    pub fn enable<F: Field>(&self, region: &mut Region<F>, offset: usize) -> Result<(), Error> {
-        region.enable_selector(|| "", self, offset)
-    }
+    // `enable(region)` removed: enabling a selector during synthesis is a
+    // canonical-frontend operation (`halo2_axiom::plonk::Selector::enable`,
+    // backed by the canonical `Region::enable_selector`). `GpuSelector` is the
+    // backend fork rebuilt from the canonical cs and only ever read (index /
+    // is_simple); it never drives synthesis, so it needs no `enable`.
 
     /// Is this selector "simple"? Simple selectors can only be multiplied
     /// by expressions that contain no other simple selectors.
@@ -1972,33 +1969,11 @@ impl<F: Field> GpuConstraintSystem<F> {
         }
     }
 
-    /// Annotate a Lookup column.
-    pub fn annotate_lookup_column<A, AR>(&mut self, column: GpuTableColumn, annotation: A)
-    where
-        A: Fn() -> AR,
-        AR: Into<String>,
-    {
-        // We don't care if the table has already an annotation. If it's the case we keep the new one.
-        self.general_column_annotations.insert(
-            metadata::Column::from((GpuAny::Fixed, column.inner().index)),
-            annotation().into(),
-        );
-    }
-
-    /// Annotate an GpuInstance column.
-    pub fn annotate_lookup_any_column<A, AR, T>(&mut self, column: T, annotation: A)
-    where
-        A: Fn() -> AR,
-        AR: Into<String>,
-        T: Into<GpuColumn<GpuAny>>,
-    {
-        let col_any = column.into();
-        // We don't care if the table has already an annotation. If it's the case we keep the new one.
-        self.general_column_annotations.insert(
-            metadata::Column::from((col_any.column_type, col_any.index)),
-            annotation().into(),
-        );
-    }
+    // `annotate_lookup_column` / `annotate_lookup_any_column` removed: they
+    // populated `general_column_annotations` (dev-tooling metadata keyed by the
+    // forked `metadata::Column`) which is never read post-keygen and is rebuilt
+    // empty in `from_host`. The canonical synthesis frontend owns annotation;
+    // the GPU backend cs has no live caller for these.
 
     /// Allocate a new fixed column
     pub fn fixed_column(&mut self) -> GpuColumn<GpuFixed> {

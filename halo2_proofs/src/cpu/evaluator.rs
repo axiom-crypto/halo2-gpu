@@ -6,7 +6,7 @@ use crate::multicore;
 use super::arithmetic::quotient_lookups_cpu;
 use crate::cpu::arithmetic::parallelize;
 use crate::plonk::evaluation::{get_rotation_idx, Evaluator, EvaluatorVkView};
-use crate::plonk::{lookup, permutation, Any};
+use crate::plonk::{lookup, permutation, GpuAny};
 use crate::{
     arithmetic::{best_fft, CurveAffine},
     poly::{
@@ -286,9 +286,9 @@ where
                             .columns
                             .iter()
                             .map(|column| match column.column_type() {
-                                Any::Advice(_) => advice[column.index()].values(),
-                                Any::Fixed => fixed[column.index()].values(),
-                                Any::Instance => instance[column.index()].values(),
+                                GpuAny::Advice(_) => advice[column.index()].values(),
+                                GpuAny::Fixed => fixed[column.index()].values(),
+                                GpuAny::Instance => instance[column.index()].values(),
                             })
                             .collect();
 

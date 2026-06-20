@@ -2,7 +2,7 @@
 //! various forms, including computing commitments to them and provably opening
 //! the committed polynomials at arbitrary points.
 
-use crate::plonk::Assigned;
+use crate::plonk::GpuAssigned;
 
 use std::mem;
 
@@ -368,7 +368,7 @@ pub(crate) fn batch_invert_assigned_device<F: Field, PR>(
     assigned: impl AsRef<[PR]>,
 ) -> Result<Vec<Polynomial<F, LagrangeCoeff, Device>>, HaloGpuError>
 where
-    PR: AsRef<[Assigned<F>]> + Send + Sync,
+    PR: AsRef<[GpuAssigned<F>]> + Send + Sync,
 {
     let assigned = assigned.as_ref();
     if assigned.is_empty() {
@@ -440,7 +440,7 @@ mod tests {
                 .map(|j| {
                     let num = Fr::from(1_u64);
                     let denom = Fr::from(j as u64);
-                    Assigned::from((num, denom))
+                    GpuAssigned::from((num, denom))
                 })
                 .collect::<Vec<_>>();
             let poly = Polynomial::<_, LagrangeCoeff>::new(assigned);
@@ -536,7 +536,7 @@ mod tests {
                 .map(|j| {
                     let num = Fr::from(1_u64);
                     let denom = Fr::from(j as u64 + 1);
-                    Assigned::from((num, denom))
+                    GpuAssigned::from((num, denom))
                 })
                 .collect::<Vec<_>>();
             let poly = Polynomial::<_, LagrangeCoeff>::new(assigned);
@@ -581,11 +581,11 @@ mod tests {
             let n: usize = 1usize << log_n;
             // Every 3rd element is Zero / Trivial / Rational, with a salt that
             // shifts the pattern so consecutive columns sample different orders.
-            let column: Vec<Assigned<Fr>> = (0..n)
+            let column: Vec<GpuAssigned<Fr>> = (0..n)
                 .map(|j| match (j + 7) % 3 {
-                    0 => Assigned::Zero,
-                    1 => Assigned::Trivial(Fr::random(OsRng)),
-                    _ => Assigned::Rational(Fr::random(OsRng), Fr::random(OsRng)),
+                    0 => GpuAssigned::Zero,
+                    1 => GpuAssigned::Trivial(Fr::random(OsRng)),
+                    _ => GpuAssigned::Rational(Fr::random(OsRng), Fr::random(OsRng)),
                 })
                 .collect();
 
@@ -649,24 +649,24 @@ mod tests {
             let n: usize = 1usize << log_n;
             let n_cols: usize = 3;
 
-            let columns: Vec<Vec<Assigned<Fr>>> = (0..n_cols)
+            let columns: Vec<Vec<GpuAssigned<Fr>>> = (0..n_cols)
                 .map(|col_idx| {
                     (0..n)
                         .map(|j| match (col_idx + j) % 3 {
-                            0 => Assigned::Zero,
-                            1 => Assigned::Trivial(Fr::random(OsRng)),
+                            0 => GpuAssigned::Zero,
+                            1 => GpuAssigned::Trivial(Fr::random(OsRng)),
                             _ => {
                                 let num = Fr::random(OsRng);
                                 let denom = Fr::random(OsRng);
-                                Assigned::from((num, denom))
+                                GpuAssigned::from((num, denom))
                             }
                         })
                         .collect()
                 })
                 .collect();
 
-            let host_input: Vec<Vec<Assigned<Fr>>> = columns.clone();
-            let device_input: Vec<Vec<Assigned<Fr>>> = columns;
+            let host_input: Vec<Vec<GpuAssigned<Fr>>> = columns.clone();
+            let device_input: Vec<Vec<GpuAssigned<Fr>>> = columns;
 
             let host_polys: Vec<Polynomial<Fr, LagrangeCoeff>> =
                 batch_invert_assigned_gpu(host_input).expect("host-output batch_invert failed");

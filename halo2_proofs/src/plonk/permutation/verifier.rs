@@ -1,7 +1,7 @@
 use ff::{Field, PrimeField};
 use std::iter;
 
-use super::super::{circuit::Any, ChallengeBeta, ChallengeGamma, ChallengeX};
+use super::super::{circuit::GpuAny, ChallengeBeta, ChallengeGamma, ChallengeX};
 use super::{Argument, VerifyingKey};
 use crate::{
     arithmetic::CurveAffine,
@@ -165,13 +165,13 @@ impl<C: CurveAffine> Evaluated<C> {
                         for (eval, permutation_eval) in columns
                             .iter()
                             .map(|&column| match column.column_type() {
-                                Any::Advice(_) => {
+                                GpuAny::Advice(_) => {
                                     advice_evals[vk.cs.get_any_query_index(column, Rotation::cur())]
                                 }
-                                Any::Fixed => {
+                                GpuAny::Fixed => {
                                     fixed_evals[vk.cs.get_any_query_index(column, Rotation::cur())]
                                 }
-                                Any::Instance => {
+                                GpuAny::Instance => {
                                     instance_evals
                                         [vk.cs.get_any_query_index(column, Rotation::cur())]
                                 }
@@ -186,13 +186,13 @@ impl<C: CurveAffine> Evaluated<C> {
                             * &(<C::Scalar as PrimeField>::DELTA
                                 .pow_vartime([(chunk_index * chunk_len) as u64]));
                         for eval in columns.iter().map(|&column| match column.column_type() {
-                            Any::Advice(_) => {
+                            GpuAny::Advice(_) => {
                                 advice_evals[vk.cs.get_any_query_index(column, Rotation::cur())]
                             }
-                            Any::Fixed => {
+                            GpuAny::Fixed => {
                                 fixed_evals[vk.cs.get_any_query_index(column, Rotation::cur())]
                             }
-                            Any::Instance => {
+                            GpuAny::Instance => {
                                 instance_evals[vk.cs.get_any_query_index(column, Rotation::cur())]
                             }
                         }) {

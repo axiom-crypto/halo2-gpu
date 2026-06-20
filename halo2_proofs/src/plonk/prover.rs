@@ -11,11 +11,9 @@ use std::ops::RangeTo;
 use std::{collections::HashMap, iter};
 
 use super::{
-    circuit::{
-        sealed::{self},
-        Advice, Any, Assignment, Challenge, Circuit, Column, ConstraintSystem, Fixed, FloorPlanner,
-        Instance, Selector,
-    },
+    // The fork backend `sealed::Phase` matches `pk.cs.phases()` (a
+    // `GpuConstraintSystem`); the per-phase witness loop tracks it internally.
+    circuit::sealed::{self},
     lookup, permutation, vanishing, ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX,
     ChallengeY, Error, GpuProvingKey, ProvingKey,
 };
@@ -23,7 +21,16 @@ use crate::{
     arithmetic::CurveAffine,
     circuit::Value,
     cuda::funcs::batch_eval_polynomial_d2h,
-    plonk::{evaluation, Assigned},
+    // Canonical synthesis frontend: `WitnessCollection` implements the canonical
+    // `Assignment` trait and `configure`/`synthesize` run against the canonical
+    // `Circuit`/`ConstraintSystem`. `Assigned` here is the canonical synthesis
+    // value; it is converted to the device-repr `GpuAssigned` at the
+    // `batch_invert_assigned_device` boundary. The fork backend cs is reached
+    // only via `pk.cs` (a `GpuConstraintSystem`) after synthesis completes.
+    plonk::{
+        evaluation, Advice, Any, Assigned, Assignment, Challenge, Circuit, Column, ConstraintSystem,
+        Fixed, FloorPlanner, GpuAssigned, Instance, Selector,
+    },
     poly::{
         commitment::{Blind, CommitmentScheme, Params, Prover},
         Coeff, EvaluationDomain, LagrangeCoeff, Polynomial, ProverQuery,
@@ -108,6 +115,12 @@ where
     #[cfg(not(feature = "circuit-params"))]
     let config = ConcreteCircuit::configure(&mut meta);
 
+    // Capture the canonical global-constant columns from the freshly-configured
+    // (canonical) cs BEFORE shadowing `meta` with the fork `pk.cs`: the canonical
+    // `FloorPlanner::synthesize` takes canonical `Vec<Column<Fixed>>`. Selector
+    // compression (which `pk.cs` carries but this fresh cs does not) never alters
+    // the constant columns, so they match `pk.cs`'s by construction.
+    let constants = meta.constants().clone();
     // Selector optimizations cannot be applied here; use the ConstraintSystem
     // from the (rebuilt GPU) proving key.
     let meta = &pk.cs;
@@ -179,7 +192,12 @@ where
 
         fn exit_region(&mut self) {}
 
-        fn enable_selector<A, AR>(&mut self, _: A, _: &Selector, _: usize) -> Result<(), Error>
+        fn enable_selector<A, AR>(
+            &mut self,
+            _: A,
+            _: &Selector,
+            _: usize,
+        ) -> Result<(), halo2_axiom::plonk::Error>
         where
             A: FnOnce() -> AR,
             AR: Into<String>,
@@ -194,16 +212,25 @@ where
         {
         }
 
-        fn query_instance(&self, column: Column<Instance>, row: usize) -> Result<Value<F>, Error> {
+        fn query_instance(
+            &self,
+            column: Column<Instance>,
+            row: usize,
+        ) -> Result<Value<F>, halo2_axiom::plonk::Error> {
             if !self.usable_rows.contains(&row) {
-                return Err(Error::not_enough_rows_available(self.params.k()));
+                // Canonical `Error` in the canonical `Assignment` signature; the
+                // `pub(crate)` `not_enough_rows_available` constructor isn't
+                // reachable cross-crate, so build the public variant directly.
+                return Err(halo2_axiom::plonk::Error::NotEnoughRowsAvailable {
+                    current_k: self.params.k(),
+                });
             }
 
             self.instances
                 .get(column.index())
                 .and_then(|column| column.get(row))
                 .map(|v| Value::known(*v))
-                .ok_or(Error::BoundsFailure)
+                .ok_or(halo2_axiom::plonk::Error::BoundsFailure)
         }
 
         fn assign_advice<'v>(
@@ -223,8 +250,12 @@ where
                 self.advice
                     .get_unchecked_mut(column.index() * self.params_n + row)
             };
-            *advice_get_mut = to
-                .assign()
+            // Canonical `Value::assign()` is `pub(crate)` in halo2-axiom; extract
+            // the known `Assigned` via the public `map` closure, preserving the
+            // panic-on-unknown contract (create_proof forbids `Value::unknown()`).
+            let mut assigned = None;
+            to.map(|v| assigned = Some(v));
+            *advice_get_mut = assigned
                 .expect("No Value::unknown() in advice column allowed during create_proof");
             let immutable_raw_ptr = advice_get_mut as *const Assigned<F>;
             Value::known(unsafe { &*immutable_raw_ptr })
@@ -239,7 +270,7 @@ where
             _: Column<Fixed>,
             _: usize,
             _: Value<Assigned<F>>,
-        ) -> Result<(), Error> {
+        ) -> Result<(), halo2_axiom::plonk::Error> {
             Ok(())
         }
 
@@ -326,12 +357,19 @@ where
             #[cfg(feature = "profile")]
             let batch_invert_time = start_timer!(|| "batch invert witness assignment");
             // `Assignment::next_phase` returns `()`, so errors must `expect` rather than `?`.
+            // Synthesis→device boundary: the per-cell advice are canonical
+            // `Assigned` (from the canonical `Assignment` impl); reinterpret each
+            // column into the device-repr `GpuAssigned` for the raw-byte upload
+            // kernel inside `batch_invert_assigned_device`.
             let advice_values = batch_invert_assigned_device(
                 column_indices_for_phase
                     .iter()
                     .map(|column_index| {
-                        &self.advice
+                        self.advice
                             [*column_index * self.params_n..(*column_index + 1) * self.params_n]
+                            .iter()
+                            .map(|a| GpuAssigned::from(*a))
+                            .collect::<Vec<GpuAssigned<C::Scalar>>>()
                     })
                     .collect::<Vec<_>>(),
             )
@@ -580,7 +618,7 @@ where
                         &mut witness,
                         circuit,
                         config.clone(),
-                        meta.constants.clone(),
+                        constants.clone(),
                     )
                     .expect("synthesize failed");
                     if witness.current_phase.to_u8() < num_phases as u8 {

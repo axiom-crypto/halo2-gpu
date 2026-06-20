@@ -1,7 +1,7 @@
 use std::iter;
 
 use super::super::{
-    circuit::Expression, ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX,
+    circuit::GpuExpression, ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX,
 };
 use super::Argument;
 use crate::{
@@ -114,7 +114,7 @@ impl<C: CurveAffine> Evaluated<C> {
                 * &(self.permuted_input_eval + &*beta)
                 * &(self.permuted_table_eval + &*gamma);
 
-            let compress_expressions = |expressions: &[Expression<C::Scalar>]| {
+            let compress_expressions = |expressions: &[GpuExpression<C::Scalar>]| {
                 expressions
                     .iter()
                     .map(|expression| {

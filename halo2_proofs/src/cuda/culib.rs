@@ -12,7 +12,7 @@
 use crate::cuda::error::CudaStatus;
 use crate::cuda::utils::FFITraitObject;
 
-/// Byte layout of one `Assigned<F>` element passed to
+/// Byte layout of one `GpuAssigned<F>` element passed to
 /// [`_halo2_decode_assigned`]: the per-element stride and the byte
 /// offsets of the numerator and denominator field payloads. `#[repr(C)]`
 /// and the field order pin the FFI ABI to the C `assigned_layout_t`
@@ -282,12 +282,12 @@ extern "C" {
         stream: *mut libc::c_void,
     ) -> CudaStatus;
 
-    /// Decode a device-resident `[Assigned<F>]` raw-bytes array into
+    /// Decode a device-resident `[GpuAssigned<F>]` raw-bytes array into
     /// separate per-element numerator and denominator device buffers.
-    /// `d_raw` is the bytes of the host `&[Assigned<F>]` (uploaded via
+    /// `d_raw` is the bytes of the host `&[GpuAssigned<F>]` (uploaded via
     /// `to_device_on`); `stride_bytes` / `num_offset` / `denom_offset`
     /// come from `size_of` / `align_of` on the Rust side (the layout is
-    /// pinned by `#[repr(C, u8)]` on `Assigned<F>`). For each element
+    /// pinned by `#[repr(C, u8)]` on `GpuAssigned<F>`). For each element
     /// `i`, writes `d_nums[i]` = numerator (Zero→0, Trivial(x)→x,
     /// Rational(n,_)→n) and `d_denoms[i]` = denominator (Zero/Trivial→1,
     /// Rational(_,d)→d). `n == 0` is a no-op.

@@ -9,7 +9,7 @@ use openvm_cuda_common::d_buffer::DeviceBuffer;
 use rand_core::RngCore;
 use std::iter::{self, ExactSizeIterator};
 
-use super::super::{circuit::Any, ChallengeBeta, ChallengeGamma, ChallengeX};
+use super::super::{circuit::GpuAny, ChallengeBeta, ChallengeGamma, ChallengeX};
 use super::Argument;
 use crate::{
     arithmetic::CurveAffine,
@@ -50,13 +50,13 @@ fn device_buf_for_column<'a, F: Field>(
     advice: &'a [Polynomial<F, LagrangeCoeff, Device>],
     fixed: &'a [Polynomial<F, LagrangeCoeff, Device>],
     instance: &'a [Polynomial<F, LagrangeCoeff, Device>],
-    column_type: &Any,
+    column_type: &GpuAny,
     index: usize,
 ) -> &'a DeviceBuffer<F> {
     let columns = match column_type {
-        Any::Advice(_) => advice,
-        Any::Fixed => fixed,
-        Any::Instance => instance,
+        GpuAny::Advice(_) => advice,
+        GpuAny::Fixed => fixed,
+        GpuAny::Instance => instance,
     };
     columns[index].device_buf()
 }

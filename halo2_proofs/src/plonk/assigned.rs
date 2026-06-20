@@ -11,7 +11,7 @@ use group::ff::Field;
 /// A denominator of zero maps to an assigned value of zero.
 ///
 /// `#[repr(C, u8)]` pins the in-memory layout so the GPU
-/// `_halo2_decode_assigned` kernel can read raw `Assigned<F>` bytes
+/// `_halo2_decode_assigned` kernel can read raw `GpuAssigned<F>` bytes
 /// directly off device without a host-side enum-decode pass. The layout
 /// is: a `u8` discriminant at offset 0 (Zero=0, Trivial=1, Rational=2)
 /// followed by a `#[repr(C)]` union of per-variant structs starting at
@@ -21,7 +21,7 @@ use group::ff::Field;
 /// against this layout before launching the kernel.
 #[repr(C, u8)]
 #[derive(Clone, Copy, Debug)]
-pub enum Assigned<F> {
+pub enum GpuAssigned<F> {
     /// The field element zero.
     Zero,
     /// A value that does not require inversion to evaluate.
@@ -30,37 +30,56 @@ pub enum Assigned<F> {
     Rational(F, F),
 }
 
-impl<F: Field> From<&Assigned<F>> for Assigned<F> {
-    fn from(val: &Assigned<F>) -> Self {
+impl<F: Field> From<&GpuAssigned<F>> for GpuAssigned<F> {
+    fn from(val: &GpuAssigned<F>) -> Self {
         *val
     }
 }
 
-impl<F: Field> From<&F> for Assigned<F> {
+/// Synthesis→device boundary conversion: the canonical `halo2-axiom`
+/// `Assigned<F>` (produced by the canonical `Assignment` trait the GPU
+/// `WitnessCollection`/keygen `Assembly` implement) is reinterpreted into the
+/// GPU `#[repr(C, u8)]` `GpuAssigned<F>` just before the raw-byte device upload
+/// (`batch_invert_assigned_device`). Canonical `Assigned` is *not* `repr(C,u8)`,
+/// so it cannot feed the `_halo2_decode_assigned` kernel directly — this `From`
+/// is the (host-side, per-cell) bridge. Variant-for-variant; no field math.
+impl<F> From<halo2_axiom::plonk::Assigned<F>> for GpuAssigned<F> {
+    fn from(val: halo2_axiom::plonk::Assigned<F>) -> Self {
+        match val {
+            halo2_axiom::plonk::Assigned::Zero => GpuAssigned::Zero,
+            halo2_axiom::plonk::Assigned::Trivial(num) => GpuAssigned::Trivial(num),
+            halo2_axiom::plonk::Assigned::Rational(num, denom) => {
+                GpuAssigned::Rational(num, denom)
+            }
+        }
+    }
+}
+
+impl<F: Field> From<&F> for GpuAssigned<F> {
     fn from(numerator: &F) -> Self {
-        Assigned::Trivial(*numerator)
+        GpuAssigned::Trivial(*numerator)
     }
 }
 
-impl<F: Field> From<F> for Assigned<F> {
+impl<F: Field> From<F> for GpuAssigned<F> {
     fn from(numerator: F) -> Self {
-        Assigned::Trivial(numerator)
+        GpuAssigned::Trivial(numerator)
     }
 }
 
-impl<F: Field> From<(F, F)> for Assigned<F> {
+impl<F: Field> From<(F, F)> for GpuAssigned<F> {
     fn from((numerator, denominator): (F, F)) -> Self {
-        Assigned::Rational(numerator, denominator)
+        GpuAssigned::Rational(numerator, denominator)
     }
 }
 
-impl<F> AsRef<Assigned<F>> for Assigned<F> {
-    fn as_ref(&self) -> &Assigned<F> {
+impl<F> AsRef<GpuAssigned<F>> for GpuAssigned<F> {
+    fn as_ref(&self) -> &GpuAssigned<F> {
         self
     }
 }
 
-impl<F: Field> PartialEq for Assigned<F> {
+impl<F: Field> PartialEq for GpuAssigned<F> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             // At least one side is directly zero.
@@ -88,10 +107,10 @@ impl<F: Field> PartialEq for Assigned<F> {
     }
 }
 
-impl<F: Field> Eq for Assigned<F> {}
+impl<F: Field> Eq for GpuAssigned<F> {}
 
-impl<F: Field> Neg for Assigned<F> {
-    type Output = Assigned<F>;
+impl<F: Field> Neg for GpuAssigned<F> {
+    type Output = GpuAssigned<F>;
     fn neg(self) -> Self::Output {
         match self {
             Self::Zero => Self::Zero,
@@ -101,16 +120,16 @@ impl<F: Field> Neg for Assigned<F> {
     }
 }
 
-impl<F: Field> Neg for &Assigned<F> {
-    type Output = Assigned<F>;
+impl<F: Field> Neg for &GpuAssigned<F> {
+    type Output = GpuAssigned<F>;
     fn neg(self) -> Self::Output {
         -*self
     }
 }
 
-impl<F: Field> Add for Assigned<F> {
-    type Output = Assigned<F>;
-    fn add(self, rhs: Assigned<F>) -> Assigned<F> {
+impl<F: Field> Add for GpuAssigned<F> {
+    type Output = GpuAssigned<F>;
+    fn add(self, rhs: GpuAssigned<F>) -> GpuAssigned<F> {
         match (self, rhs) {
             // One side is directly zero.
             (Self::Zero, _) => rhs,
@@ -140,110 +159,110 @@ impl<F: Field> Add for Assigned<F> {
     }
 }
 
-impl<F: Field> Add<F> for Assigned<F> {
-    type Output = Assigned<F>;
-    fn add(self, rhs: F) -> Assigned<F> {
+impl<F: Field> Add<F> for GpuAssigned<F> {
+    type Output = GpuAssigned<F>;
+    fn add(self, rhs: F) -> GpuAssigned<F> {
         self + Self::Trivial(rhs)
     }
 }
 
-impl<F: Field> Add<F> for &Assigned<F> {
-    type Output = Assigned<F>;
-    fn add(self, rhs: F) -> Assigned<F> {
+impl<F: Field> Add<F> for &GpuAssigned<F> {
+    type Output = GpuAssigned<F>;
+    fn add(self, rhs: F) -> GpuAssigned<F> {
         *self + rhs
     }
 }
 
-impl<F: Field> Add<&Assigned<F>> for Assigned<F> {
-    type Output = Assigned<F>;
-    fn add(self, rhs: &Self) -> Assigned<F> {
+impl<F: Field> Add<&GpuAssigned<F>> for GpuAssigned<F> {
+    type Output = GpuAssigned<F>;
+    fn add(self, rhs: &Self) -> GpuAssigned<F> {
         self + *rhs
     }
 }
 
-impl<F: Field> Add<Assigned<F>> for &Assigned<F> {
-    type Output = Assigned<F>;
-    fn add(self, rhs: Assigned<F>) -> Assigned<F> {
+impl<F: Field> Add<GpuAssigned<F>> for &GpuAssigned<F> {
+    type Output = GpuAssigned<F>;
+    fn add(self, rhs: GpuAssigned<F>) -> GpuAssigned<F> {
         *self + rhs
     }
 }
 
-impl<F: Field> Add<&Assigned<F>> for &Assigned<F> {
-    type Output = Assigned<F>;
-    fn add(self, rhs: &Assigned<F>) -> Assigned<F> {
+impl<F: Field> Add<&GpuAssigned<F>> for &GpuAssigned<F> {
+    type Output = GpuAssigned<F>;
+    fn add(self, rhs: &GpuAssigned<F>) -> GpuAssigned<F> {
         *self + *rhs
     }
 }
 
-impl<F: Field> AddAssign for Assigned<F> {
+impl<F: Field> AddAssign for GpuAssigned<F> {
     fn add_assign(&mut self, rhs: Self) {
         *self = *self + rhs;
     }
 }
 
-impl<F: Field> AddAssign<&Assigned<F>> for Assigned<F> {
+impl<F: Field> AddAssign<&GpuAssigned<F>> for GpuAssigned<F> {
     fn add_assign(&mut self, rhs: &Self) {
         *self = *self + rhs;
     }
 }
 
-impl<F: Field> Sub for Assigned<F> {
-    type Output = Assigned<F>;
-    fn sub(self, rhs: Assigned<F>) -> Assigned<F> {
+impl<F: Field> Sub for GpuAssigned<F> {
+    type Output = GpuAssigned<F>;
+    fn sub(self, rhs: GpuAssigned<F>) -> GpuAssigned<F> {
         self + (-rhs)
     }
 }
 
-impl<F: Field> Sub<F> for Assigned<F> {
-    type Output = Assigned<F>;
-    fn sub(self, rhs: F) -> Assigned<F> {
+impl<F: Field> Sub<F> for GpuAssigned<F> {
+    type Output = GpuAssigned<F>;
+    fn sub(self, rhs: F) -> GpuAssigned<F> {
         self + (-rhs)
     }
 }
 
-impl<F: Field> Sub<F> for &Assigned<F> {
-    type Output = Assigned<F>;
-    fn sub(self, rhs: F) -> Assigned<F> {
+impl<F: Field> Sub<F> for &GpuAssigned<F> {
+    type Output = GpuAssigned<F>;
+    fn sub(self, rhs: F) -> GpuAssigned<F> {
         *self - rhs
     }
 }
 
-impl<F: Field> Sub<&Assigned<F>> for Assigned<F> {
-    type Output = Assigned<F>;
-    fn sub(self, rhs: &Self) -> Assigned<F> {
+impl<F: Field> Sub<&GpuAssigned<F>> for GpuAssigned<F> {
+    type Output = GpuAssigned<F>;
+    fn sub(self, rhs: &Self) -> GpuAssigned<F> {
         self - *rhs
     }
 }
 
-impl<F: Field> Sub<Assigned<F>> for &Assigned<F> {
-    type Output = Assigned<F>;
-    fn sub(self, rhs: Assigned<F>) -> Assigned<F> {
+impl<F: Field> Sub<GpuAssigned<F>> for &GpuAssigned<F> {
+    type Output = GpuAssigned<F>;
+    fn sub(self, rhs: GpuAssigned<F>) -> GpuAssigned<F> {
         *self - rhs
     }
 }
 
-impl<F: Field> Sub<&Assigned<F>> for &Assigned<F> {
-    type Output = Assigned<F>;
-    fn sub(self, rhs: &Assigned<F>) -> Assigned<F> {
+impl<F: Field> Sub<&GpuAssigned<F>> for &GpuAssigned<F> {
+    type Output = GpuAssigned<F>;
+    fn sub(self, rhs: &GpuAssigned<F>) -> GpuAssigned<F> {
         *self - *rhs
     }
 }
 
-impl<F: Field> SubAssign for Assigned<F> {
+impl<F: Field> SubAssign for GpuAssigned<F> {
     fn sub_assign(&mut self, rhs: Self) {
         *self = *self - rhs;
     }
 }
 
-impl<F: Field> SubAssign<&Assigned<F>> for Assigned<F> {
+impl<F: Field> SubAssign<&GpuAssigned<F>> for GpuAssigned<F> {
     fn sub_assign(&mut self, rhs: &Self) {
         *self = *self - rhs;
     }
 }
 
-impl<F: Field> Mul for Assigned<F> {
-    type Output = Assigned<F>;
-    fn mul(self, rhs: Assigned<F>) -> Assigned<F> {
+impl<F: Field> Mul for GpuAssigned<F> {
+    type Output = GpuAssigned<F>;
+    fn mul(self, rhs: GpuAssigned<F>) -> GpuAssigned<F> {
         match (self, rhs) {
             (Self::Zero, _) | (_, Self::Zero) => Self::Zero,
             (Self::Trivial(lhs), Self::Trivial(rhs)) => Self::Trivial(lhs * rhs),
@@ -262,40 +281,40 @@ impl<F: Field> Mul for Assigned<F> {
     }
 }
 
-impl<F: Field> Mul<F> for Assigned<F> {
-    type Output = Assigned<F>;
-    fn mul(self, rhs: F) -> Assigned<F> {
+impl<F: Field> Mul<F> for GpuAssigned<F> {
+    type Output = GpuAssigned<F>;
+    fn mul(self, rhs: F) -> GpuAssigned<F> {
         self * Self::Trivial(rhs)
     }
 }
 
-impl<F: Field> Mul<F> for &Assigned<F> {
-    type Output = Assigned<F>;
-    fn mul(self, rhs: F) -> Assigned<F> {
+impl<F: Field> Mul<F> for &GpuAssigned<F> {
+    type Output = GpuAssigned<F>;
+    fn mul(self, rhs: F) -> GpuAssigned<F> {
         *self * rhs
     }
 }
 
-impl<F: Field> Mul<&Assigned<F>> for Assigned<F> {
-    type Output = Assigned<F>;
-    fn mul(self, rhs: &Assigned<F>) -> Assigned<F> {
+impl<F: Field> Mul<&GpuAssigned<F>> for GpuAssigned<F> {
+    type Output = GpuAssigned<F>;
+    fn mul(self, rhs: &GpuAssigned<F>) -> GpuAssigned<F> {
         self * *rhs
     }
 }
 
-impl<F: Field> MulAssign for Assigned<F> {
+impl<F: Field> MulAssign for GpuAssigned<F> {
     fn mul_assign(&mut self, rhs: Self) {
         *self = *self * rhs;
     }
 }
 
-impl<F: Field> MulAssign<&Assigned<F>> for Assigned<F> {
+impl<F: Field> MulAssign<&GpuAssigned<F>> for GpuAssigned<F> {
     fn mul_assign(&mut self, rhs: &Self) {
         *self = *self * rhs;
     }
 }
 
-impl<F: Field> Assigned<F> {
+impl<F: Field> GpuAssigned<F> {
     /// Returns the numerator.
     pub fn numerator(&self) -> F {
         match self {
@@ -319,7 +338,7 @@ impl<F: Field> Assigned<F> {
         match self {
             Self::Zero => true,
             Self::Trivial(x) => x.is_zero_vartime(),
-            // Assigned maps x/0 -> 0.
+            // GpuAssigned maps x/0 -> 0.
             Self::Rational(numerator, denominator) => {
                 numerator.is_zero_vartime() || denominator.is_zero_vartime()
             }
@@ -384,7 +403,7 @@ impl<F: Field> Assigned<F> {
     }
 }
 
-/// Byte offsets and per-element stride of `Assigned<F>` under the
+/// Byte offsets and per-element stride of `GpuAssigned<F>` under the
 /// `#[repr(C, u8)]` layout pinned on the enum in this module.
 ///
 /// Layout: tag `u8` at offset 0, then a `#[repr(C)]` union of variant
@@ -397,11 +416,11 @@ impl<F: Field> Assigned<F> {
 pub(crate) const fn assigned_layout_offsets<F: Field>() -> (u32, u32, u32) {
     let num_offset = mem::align_of::<F>() as u32;
     let denom_offset = num_offset + mem::size_of::<F>() as u32;
-    let stride_bytes = mem::size_of::<Assigned<F>>() as u32;
+    let stride_bytes = mem::size_of::<GpuAssigned<F>>() as u32;
     (stride_bytes, num_offset, denom_offset)
 }
 
-/// Self-check on the `Assigned<F>` byte layout the kernel reads.
+/// Self-check on the `GpuAssigned<F>` byte layout the kernel reads.
 ///
 /// `#[repr(C, u8)]` pins the layout per the Rust reference, but a
 /// compiler regression or a generic `F` with unusual alignment could
@@ -412,10 +431,10 @@ pub(crate) const fn assigned_layout_offsets<F: Field>() -> (u32, u32, u32) {
 /// any kernel launch.
 pub(crate) fn verify_assigned_layout<F: Field>() {
     let (stride, num_off, denom_off) = assigned_layout_offsets::<F>();
-    let actual_stride = mem::size_of::<Assigned<F>>() as u32;
+    let actual_stride = mem::size_of::<GpuAssigned<F>>() as u32;
     assert_eq!(
         stride, actual_stride,
-        "Assigned<F> stride mismatch: expected {stride}, got {actual_stride}"
+        "GpuAssigned<F> stride mismatch: expected {stride}, got {actual_stride}"
     );
 
     // Construct distinguishable F probes from Field-only ops (no
@@ -423,16 +442,16 @@ pub(crate) fn verify_assigned_layout<F: Field>() {
     // `num` for every non-trivial F we care about (char != 2).
     let num = F::ONE + F::ONE;
     let denom = num.double();
-    let rational = Assigned::<F>::Rational(num, denom);
+    let rational = GpuAssigned::<F>::Rational(num, denom);
     let bytes = unsafe {
         std::slice::from_raw_parts(
-            &rational as *const Assigned<F> as *const u8,
+            &rational as *const GpuAssigned<F> as *const u8,
             stride as usize,
         )
     };
     assert_eq!(
         bytes[0], 2,
-        "Assigned::Rational discriminant expected 2, got {}",
+        "GpuAssigned::Rational discriminant expected 2, got {}",
         bytes[0]
     );
     let probe_num =
@@ -441,36 +460,36 @@ pub(crate) fn verify_assigned_layout<F: Field>() {
         unsafe { std::ptr::read_unaligned(bytes.as_ptr().add(denom_off as usize) as *const F) };
     assert!(
         probe_num == num,
-        "Assigned<F> numerator offset mismatch at byte {num_off}"
+        "GpuAssigned<F> numerator offset mismatch at byte {num_off}"
     );
     assert!(
         probe_denom == denom,
-        "Assigned<F> denominator offset mismatch at byte {denom_off}"
+        "GpuAssigned<F> denominator offset mismatch at byte {denom_off}"
     );
 
-    let trivial = Assigned::<F>::Trivial(num);
+    let trivial = GpuAssigned::<F>::Trivial(num);
     let tb = unsafe {
-        std::slice::from_raw_parts(&trivial as *const Assigned<F> as *const u8, stride as usize)
+        std::slice::from_raw_parts(&trivial as *const GpuAssigned<F> as *const u8, stride as usize)
     };
     assert_eq!(
         tb[0], 1,
-        "Assigned::Trivial discriminant expected 1, got {}",
+        "GpuAssigned::Trivial discriminant expected 1, got {}",
         tb[0]
     );
     let probe_trivial =
         unsafe { std::ptr::read_unaligned(tb.as_ptr().add(num_off as usize) as *const F) };
     assert!(
         probe_trivial == num,
-        "Assigned<F> Trivial payload offset mismatch at byte {num_off}"
+        "GpuAssigned<F> Trivial payload offset mismatch at byte {num_off}"
     );
 
-    let zero = Assigned::<F>::Zero;
+    let zero = GpuAssigned::<F>::Zero;
     let zb = unsafe {
-        std::slice::from_raw_parts(&zero as *const Assigned<F> as *const u8, stride as usize)
+        std::slice::from_raw_parts(&zero as *const GpuAssigned<F> as *const u8, stride as usize)
     };
     assert_eq!(
         zb[0], 0,
-        "Assigned::Zero discriminant expected 0, got {}",
+        "GpuAssigned::Zero discriminant expected 0, got {}",
         zb[0]
     );
 }
@@ -496,14 +515,14 @@ pub(crate) fn assert_assigned_kernel_field_is_bn256_fr<F: Field>() {
 mod tests {
     use halo2curves::pasta::Fp;
 
-    use super::Assigned;
+    use super::GpuAssigned;
     // We use (numerator, denominator) in the comments below to denote a rational.
     #[test]
     fn add_trivial_to_inv0_rational() {
         // a = 2
         // b = (1,0)
-        let a = Assigned::Trivial(Fp::from(2));
-        let b = Assigned::Rational(Fp::one(), Fp::zero());
+        let a = GpuAssigned::Trivial(Fp::from(2));
+        let b = GpuAssigned::Rational(Fp::one(), Fp::zero());
 
         // 2 + (1,0) = 2 + 0 = 2
         // This fails if addition is implemented using normal rules for rationals.
@@ -515,8 +534,8 @@ mod tests {
     fn add_rational_to_inv0_rational() {
         // a = (1,2)
         // b = (1,0)
-        let a = Assigned::Rational(Fp::one(), Fp::from(2));
-        let b = Assigned::Rational(Fp::one(), Fp::zero());
+        let a = GpuAssigned::Rational(Fp::one(), Fp::from(2));
+        let b = GpuAssigned::Rational(Fp::one(), Fp::zero());
 
         // (1,2) + (1,0) = (1,2) + 0 = (1,2)
         // This fails if addition is implemented using normal rules for rationals.
@@ -528,8 +547,8 @@ mod tests {
     fn sub_trivial_from_inv0_rational() {
         // a = 2
         // b = (1,0)
-        let a = Assigned::Trivial(Fp::from(2));
-        let b = Assigned::Rational(Fp::one(), Fp::zero());
+        let a = GpuAssigned::Trivial(Fp::from(2));
+        let b = GpuAssigned::Rational(Fp::one(), Fp::zero());
 
         // (1,0) - 2 = 0 - 2 = -2
         // This fails if subtraction is implemented using normal rules for rationals.
@@ -543,8 +562,8 @@ mod tests {
     fn sub_rational_from_inv0_rational() {
         // a = (1,2)
         // b = (1,0)
-        let a = Assigned::Rational(Fp::one(), Fp::from(2));
-        let b = Assigned::Rational(Fp::one(), Fp::zero());
+        let a = GpuAssigned::Rational(Fp::one(), Fp::from(2));
+        let b = GpuAssigned::Rational(Fp::one(), Fp::zero());
 
         // (1,0) - (1,2) = 0 - (1,2) = -(1,2)
         // This fails if subtraction is implemented using normal rules for rationals.
@@ -558,8 +577,8 @@ mod tests {
     fn mul_rational_by_inv0_rational() {
         // a = (1,2)
         // b = (1,0)
-        let a = Assigned::Rational(Fp::one(), Fp::from(2));
-        let b = Assigned::Rational(Fp::one(), Fp::zero());
+        let a = GpuAssigned::Rational(Fp::one(), Fp::from(2));
+        let b = GpuAssigned::Rational(Fp::one(), Fp::zero());
 
         // (1,2) * (1,0) = (1,2) * 0 = 0
         assert_eq!((a * b).evaluate(), Fp::zero());
@@ -580,7 +599,7 @@ mod proptests {
     use halo2curves::pasta::Fp;
     use proptest::{collection::vec, prelude::*, sample::select};
 
-    use super::Assigned;
+    use super::GpuAssigned;
 
     trait UnaryOperand: Neg<Output = Self> {
         fn double(&self) -> Self;
@@ -607,7 +626,7 @@ mod proptests {
         }
     }
 
-    impl<F: Field> UnaryOperand for Assigned<F> {
+    impl<F: Field> UnaryOperand for GpuAssigned<F> {
         fn double(&self) -> Self {
             self.double()
         }
@@ -656,7 +675,7 @@ mod proptests {
 
     trait BinaryOperand: Sized + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self> {}
     impl<F: Field> BinaryOperand for F {}
-    impl<F: Field> BinaryOperand for Assigned<F> {}
+    impl<F: Field> BinaryOperand for GpuAssigned<F> {}
 
     #[derive(Clone, Debug)]
     enum BinaryOperator {
@@ -695,8 +714,8 @@ mod proptests {
     }
 
     prop_compose! {
-        fn arb_trivial()(element in arb_element()) -> Assigned<Fp> {
-            Assigned::Trivial(element)
+        fn arb_trivial()(element in arb_element()) -> GpuAssigned<Fp> {
+            GpuAssigned::Trivial(element)
         }
     }
 
@@ -708,8 +727,8 @@ mod proptests {
                 1 => Just(Fp::zero()),
                 2 => arb_element(),
             ],
-        ) -> Assigned<Fp> {
-            Assigned::Rational(numerator, denominator)
+        ) -> GpuAssigned<Fp> {
+            GpuAssigned::Rational(numerator, denominator)
         }
     }
 
@@ -732,7 +751,7 @@ mod proptests {
         )(
             values in vec(
                 prop_oneof![
-                    1 => Just(Assigned::Zero),
+                    1 => Just(GpuAssigned::Zero),
                     2 => arb_trivial(),
                     2 => arb_rational(),
                 ],
@@ -741,7 +760,7 @@ mod proptests {
                 // - we can apply every binary operator pairwise sequentially.
                 cmp::max(usize::from(num_unary > 0), num_binary + 1)),
             operations in arb_operators(num_unary, num_binary).prop_shuffle(),
-        ) -> (Vec<Assigned<Fp>>, Vec<Operator>) {
+        ) -> (Vec<GpuAssigned<Fp>>, Vec<Operator>) {
             (values, operations)
         }
     }

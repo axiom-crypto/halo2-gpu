@@ -55,10 +55,10 @@ pub use halo2_axiom::plonk::{ProvingKey, VerifyingKey};
 // (re-exported above) remain the backend's working types, rebuilt from canonical
 // via the `From` bridge.
 pub use halo2_axiom::plonk::{
-    Advice, AdviceQuery, Any, Assignment, Challenge, Circuit, Column, ColumnType, Constraint,
-    ConstraintSystem, Constraints, Expression, Fixed, FirstPhase, FixedQuery, FloorPlanner, Gate,
-    Instance, InstanceQuery, Phase, SecondPhase, Selector, TableColumn, ThirdPhase, VirtualCell,
-    VirtualCells,
+    Advice, AdviceQuery, Any, Assigned, Assignment, Challenge, Circuit, Column, ColumnType,
+    Constraint, ConstraintSystem, Constraints, Expression, Fixed, FirstPhase, FixedQuery,
+    FloorPlanner, Gate, Instance, InstanceQuery, Phase, SecondPhase, Selector, TableColumn,
+    ThirdPhase, VirtualCell, VirtualCells,
 };
 
 /// GPU-side verifying key. NOT serialized — the canonical, serialized
@@ -71,7 +71,7 @@ pub struct GpuVerifyingKey<C: CurveAffine> {
     pub(crate) domain: EvaluationDomain<C::Scalar>,
     pub(crate) fixed_commitments: Vec<C>,
     pub(crate) permutation: permutation::VerifyingKey<C>,
-    pub(crate) cs: ConstraintSystem<C::Scalar>,
+    pub(crate) cs: GpuConstraintSystem<C::Scalar>,
     /// Cached maximum degree of `cs` (which doesn't change after construction).
     pub(crate) cs_degree: usize,
     /// The representative of this `VerifyingKey` in transcripts.
@@ -87,7 +87,7 @@ where
     /// reconstructed `EvaluationDomain::new(j, k)`, and a `Vec<C>` clone of the
     /// permutation/fixed commitments — no device traffic, no kernel launch.
     pub fn from_host(vk: &VerifyingKey<C>) -> Self {
-        let cs = ConstraintSystem::from(vk.cs());
+        let cs = GpuConstraintSystem::from(vk.cs());
         let cs_degree = cs.degree();
         let hdomain = vk.get_domain();
         let domain =
@@ -136,11 +136,13 @@ pub struct GpuProvingKey<'a, C: CurveAffine> {
     /// GPU `ConstraintSystem`, rebuilt from `inner.get_vk().cs()`. Holds the
     /// GPU `lookup`/`permutation` Arguments whose inherent `commit_permuted`/
     /// `commit` methods the prover calls.
-    cs: ConstraintSystem<C::Scalar>,
+    cs: GpuConstraintSystem<C::Scalar>,
     /// GPU evaluation domain, reconstructed via `EvaluationDomain::new(j, k)`.
     domain: EvaluationDomain<C::Scalar>,
     /// GPU quotient evaluator, `Evaluator::new(&self.cs)`.
     ev: Evaluator<C>,
+    // (the `cs` field below is the GPU fork `GpuConstraintSystem`, rebuilt from
+    // the canonical cs via the `From` bridge — see `from_cow`)
     /// Cached maximum degree of `cs` (constant after construction). Avoids
     /// rescanning all gates/lookups via `cs.degree()` on the hot proof path
     /// (the permutation commit and the quotient `EvaluatorVkView`).
@@ -225,7 +227,7 @@ where
     /// start empty and populate lazily at first prove with the existing VRAM
     /// gate + host fallback — same H2D count and trigger points as before.
     fn from_cow(inner: Cow<'a, ProvingKey<C>>) -> Self {
-        let cs = ConstraintSystem::from(inner.get_vk().cs());
+        let cs = GpuConstraintSystem::from(inner.get_vk().cs());
         let hdomain = inner.get_vk().get_domain();
         let domain =
             EvaluationDomain::new(hdomain.get_quotient_poly_degree() as u32 + 1, hdomain.k());
