@@ -66,7 +66,7 @@ impl Argument {
     pub(in crate::plonk) fn commit<'params, C: CurveAffine, P: Params<'params, C>, R: RngCore>(
         &self,
         params: &P,
-        pk: &plonk::GpuProvingKey<C>,
+        pk: &plonk::GpuProvingKey<'_, C>,
         advice_device: &[Polynomial<C::Scalar, LagrangeCoeff, Device>],
         fixed_device: &[Polynomial<C::Scalar, LagrangeCoeff, Device>],
         instance_device: &[Polynomial<C::Scalar, LagrangeCoeff, Device>],
@@ -322,7 +322,7 @@ impl<C: CurveAffine> Committed<C> {
 impl<C: CurveAffine> Constructed<C> {
     pub(in crate::plonk) fn evaluate<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
         self,
-        pk: &plonk::GpuProvingKey<C>,
+        pk: &plonk::GpuProvingKey<'_, C>,
         x: ChallengeX<C>,
         transcript: &mut T,
     ) -> Result<Evaluated<C>, Error> {
@@ -370,7 +370,7 @@ impl<C: CurveAffine> Constructed<C> {
 impl<C: CurveAffine> Evaluated<C> {
     pub(in crate::plonk) fn open<'a>(
         &'a self,
-        pk: &'a plonk::GpuProvingKey<C>,
+        pk: &'a plonk::GpuProvingKey<'_, C>,
         x: ChallengeX<C>,
     ) -> impl Iterator<Item = ProverQuery<'a, C>> + Clone {
         let blinding_factors = pk.cs.blinding_factors();

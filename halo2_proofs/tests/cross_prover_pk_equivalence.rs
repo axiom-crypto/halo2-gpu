@@ -299,8 +299,6 @@ fn cross_prover_pk_bytes_equivalence() {
         );
         pk.expect("read canonical ProvingKey from CPU-serialized bytes")
     };
-    let gpk = GpuProvingKey::<G1Affine>::from_host(inner);
-
     // GPU prove with concrete witnesses: public = 7, b = 3, so c = a*b = 21.
     let public = Fr::from(7);
     let b = Fr::from(3);
@@ -314,7 +312,7 @@ fn cross_prover_pk_bytes_equivalence() {
     let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
     create_proof::<KZGCommitmentScheme<Bn256>, ProverSHPLONK<_>, _, _, _, _>(
         &gpu_params,
-        &gpk,
+        &inner,
         std::slice::from_ref(&circuit),
         instances,
         OsRng,
@@ -328,7 +326,7 @@ fn cross_prover_pk_bytes_equivalence() {
     assert!(
         gpu_verify::<VerifierSHPLONK<_>, AccumulatorStrategy<_>>(
             verifier_params,
-            gpk.get_vk(),
+            inner.get_vk(),
             instances,
             &proof[..],
         ),

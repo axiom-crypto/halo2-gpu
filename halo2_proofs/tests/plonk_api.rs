@@ -11,7 +11,7 @@ use halo2_axiom_gpu::circuit::{Cell, Layouter, SimpleFloorPlanner, Value};
 use halo2_axiom_gpu::dev::MockProver;
 use halo2_axiom_gpu::plonk::{
     create_proof as create_plonk_proof, verify_proof as verify_plonk_proof, Advice, Assigned,
-    Circuit, Column, ConstraintSystem, Error, Fixed, GpuProvingKey, TableColumn, VerifyingKey,
+    Circuit, Column, ConstraintSystem, Error, Fixed, ProvingKey, TableColumn, VerifyingKey,
 };
 use halo2_axiom_gpu::poly::commitment::{CommitmentScheme, Params, ParamsProver, Prover, Verifier};
 use halo2_axiom_gpu::poly::kzg::commitment::ParamsKZG;
@@ -31,8 +31,9 @@ use std::marker::PhantomData;
 
 /// CPU (halo2-axiom) circuit variant that drives the canonical `keygen_vk`/
 /// `keygen_pk` (which are halo2-axiom's). The resulting host `ProvingKey` is
-/// wrapped for GPU proving via `GpuProvingKey::from_host`; the GPU prove path
-/// keeps the gpu `MyCircuit` below. The circuit logic is byte-identical to that
+/// passed directly to `create_proof`, which borrows it and builds the GPU view
+/// internally; the GPU prove path keeps the gpu `MyCircuit` below. The circuit
+/// logic is byte-identical to that
 /// `MyCircuit` (the gpu Circuit/Region API is a fork of halo2-axiom's with the
 /// same shape), only re-typed against halo2-axiom's `plonk`/`circuit` modules —
 /// this is the dual-impl the maintainer asked for, isolated to a module so the
@@ -719,15 +720,14 @@ fn plonk_api() {
         }};
     }
 
-    fn keygen(params: &ParamsKZG<Bn256>) -> GpuProvingKey<G1Affine> {
+    fn keygen(params: &ParamsKZG<Bn256>) -> ProvingKey<G1Affine> {
         // Keygen runs on the CPU (halo2-axiom) circuit variant, producing the
-        // canonical host `ProvingKey`; `from_host` wraps it for GPU proving.
-        // (The lookup table mirrors `common!`.)
+        // canonical host `ProvingKey`; `create_proof` borrows it and builds the
+        // GPU view internally. (The lookup table mirrors `common!`.)
         let a = Fr::from(2834758237) * Fr::ZETA;
         let instance = Fr::ONE + Fr::ONE;
         let lookup_table = vec![instance, a, a, Fr::ZERO];
-        let pk = cpu_keygen::build_pk(params.k(), lookup_table);
-        GpuProvingKey::from_host(pk)
+        cpu_keygen::build_pk(params.k(), lookup_table)
     }
 
     fn create_proof<
@@ -740,7 +740,7 @@ fn plonk_api() {
     >(
         rng: R,
         params: &'params Scheme::ParamsProver,
-        pk: &GpuProvingKey<Scheme::Curve>,
+        pk: &ProvingKey<Scheme::Curve>,
     ) -> Vec<u8>
     where
         Scheme::Scalar: Hash + Ord + WithSmallOrderMulGroup<3> + FromUniformBytes<64>,

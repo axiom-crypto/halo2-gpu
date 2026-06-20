@@ -1,5 +1,5 @@
 #![allow(clippy::type_complexity)]
-use ff::{Field, WithSmallOrderMulGroup};
+use ff::{Field, FromUniformBytes, WithSmallOrderMulGroup};
 use group::Curve;
 use log::info;
 use rand_core::RngCore;
@@ -17,7 +17,7 @@ use super::{
         Instance, Selector,
     },
     lookup, permutation, vanishing, ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX,
-    ChallengeY, Error, GpuProvingKey,
+    ChallengeY, Error, GpuProvingKey, ProvingKey,
 };
 use crate::{
     arithmetic::CurveAffine,
@@ -57,14 +57,19 @@ pub fn create_proof<
     ConcreteCircuit: Circuit<Scheme::Scalar>,
 >(
     params: &'params Scheme::ParamsProver,
-    pk: &GpuProvingKey<Scheme::Curve>,
+    pk: &ProvingKey<Scheme::Curve>,
     circuits: &[ConcreteCircuit],
     instances: &[&'a [&'a [Scheme::Scalar]]],
     mut rng: R,
     mut transcript: &'a mut T,
 ) -> Result<(), Error>
 where
-    Scheme::Scalar: Hash + WithSmallOrderMulGroup<3>,
+    // `FromUniformBytes<64>` is required to build the GPU proving-key view from
+    // the canonical key (`GpuProvingKey::from_host_ref` → `ProvingKey::get_vk`,
+    // which carries that bound). This matches `verify_proof`, which already
+    // takes the canonical `&VerifyingKey` and rebuilds its GPU view internally;
+    // every in-graph consumer (BN256 `Fr`) already satisfies it.
+    Scheme::Scalar: Hash + WithSmallOrderMulGroup<3> + FromUniformBytes<64>,
     // GPU prover spawns a scoped thread that borrows `params`, so it needs Sync.
     // The ParamsProver trait itself does not require Sync (to match CPU halo2's API),
     // but the GPU create_proof function does.
@@ -77,6 +82,14 @@ where
 
     assert_eq!(circuits.len(), instances.len());
     assert!(!circuits.is_empty());
+
+    // Build the GPU proving-key view by BORROWING the canonical key — no clone
+    // of the host proving-key polynomials. This is symmetric to `verify_proof`,
+    // which takes the canonical `&VerifyingKey` and rebuilds its GPU view here.
+    // The rebuild is pure host work (`cs`/`domain`/`ev`); device mirrors stay
+    // lazy. Shadow `pk` so the body below operates on the GPU proving key.
+    let gpu_pk = GpuProvingKey::from_host_ref(pk);
+    let pk = &gpu_pk;
 
     let num_instance = pk.cs.num_instance_columns;
     for instance in instances.iter() {

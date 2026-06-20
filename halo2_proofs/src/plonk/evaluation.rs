@@ -1056,7 +1056,7 @@ pub(in crate::plonk) fn quotient_device<C: CurveAffine>(
 // some limitations of the current impl is that it only supports BN256.
 pub(in crate::plonk) fn evaluate_h_device<C: CurveAffine>(
     evaluator: &Evaluator<C>,
-    pk: &GpuProvingKey<C>,
+    pk: &GpuProvingKey<'_, C>,
     advice_polys: &[&[Polynomial<C::ScalarExt, Coeff, Device>]],
     instance_polys: &[&[Polynomial<C::ScalarExt, Coeff, Device>]],
     challenges: &[C::ScalarExt],

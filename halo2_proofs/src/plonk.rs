@@ -36,6 +36,7 @@ pub use verifier::*;
 
 use evaluation::Evaluator;
 
+use std::borrow::Cow;
 use std::io;
 
 // The canonical proving/verifying key structs are the halo2-axiom CPU types:
@@ -104,12 +105,20 @@ where
 /// (`inner`: serde source-of-truth + host-fallback polys + vk metadata) and
 /// holds the GPU-crate composing forks (`cs`/`domain`/`ev`) rebuilt from it,
 /// plus the lazy device mirrors of the pk polynomials.
+///
+/// `inner` is a [`Cow`] so the wrapper can be built either by taking ownership
+/// of a canonical key ([`from_host`](Self::from_host), used by serde/tests) or
+/// by *borrowing* one ([`from_host_ref`](Self::from_host_ref), used by
+/// [`create_proof`] on the per-proof hot path). The borrowed path performs ZERO
+/// host-poly clones — only the cheap `cs`/`domain`/`ev` rebuild — so consumers
+/// holding a canonical `&ProvingKey` pay no per-proof deep copy.
 #[derive(Debug)]
-pub struct GpuProvingKey<C: CurveAffine> {
+pub struct GpuProvingKey<'a, C: CurveAffine> {
     /// Canonical halo2-axiom proving key: serialization, host-fallback polys
     /// (`l0`/`fixed_values`/`fixed_polys`/`permutation`), and vk metadata
-    /// (`fixed_commitments`/`transcript_repr`/selectors).
-    inner: ProvingKey<C>,
+    /// (`fixed_commitments`/`transcript_repr`/selectors). Owned or borrowed via
+    /// [`Cow`]; auto-derefs to `&ProvingKey<C>` at every use site.
+    inner: Cow<'a, ProvingKey<C>>,
     /// GPU `ConstraintSystem`, rebuilt from `inner.get_vk().cs()`. Holds the
     /// GPU `lookup`/`permutation` Arguments whose inherent `commit_permuted`/
     /// `commit` methods the prover calls.
@@ -148,7 +157,7 @@ pub struct GpuProvingKey<C: CurveAffine> {
         OnceCell<Vec<Polynomial<C::Scalar, LagrangeCoeff, crate::poly::Device>>>,
 }
 
-impl<C: CurveAffine> Clone for GpuProvingKey<C> {
+impl<'a, C: CurveAffine> Clone for GpuProvingKey<'a, C> {
     /// Cloning clones the canonical `inner` and the rebuilt GPU composing types
     /// but EMPTIES the device `OnceCell` mirrors — a clone regenerates them
     /// lazily on first use (matches `ParamsKZG`'s OnceCell pattern). `inner`'s
@@ -172,11 +181,28 @@ impl<C: CurveAffine> Clone for GpuProvingKey<C> {
     }
 }
 
-impl<C: CurveAffine> GpuProvingKey<C>
+impl<'a, C: CurveAffine> GpuProvingKey<'a, C>
 where
     C::Scalar: FromUniformBytes<64>,
 {
-    /// Wraps a canonical halo2-axiom [`ProvingKey`] for GPU proving.
+    /// Wraps a canonical halo2-axiom [`ProvingKey`] (taking ownership) for GPU
+    /// proving. Used by the serde/deserialize path and tests. See
+    /// [`from_cow`](Self::from_cow) for the (host-only) rebuild details.
+    pub fn from_host(inner: ProvingKey<C>) -> GpuProvingKey<'static, C> {
+        GpuProvingKey::from_cow(Cow::Owned(inner))
+    }
+
+    /// Wraps a canonical halo2-axiom [`ProvingKey`] by *borrowing* it for GPU
+    /// proving. This is the per-proof hot path: it performs NO clone of the host
+    /// proving-key polynomials — only the cheap `cs`/`domain`/`ev` rebuild —
+    /// letting [`create_proof`] accept a borrowed canonical `&ProvingKey` from a
+    /// consumer and avoid a per-proof deep copy. Device mirrors still populate
+    /// lazily from the borrowed host polys, exactly as in the owned path.
+    pub fn from_host_ref(inner: &'a ProvingKey<C>) -> Self {
+        GpuProvingKey::from_cow(Cow::Borrowed(inner))
+    }
+
+    /// Shared constructor for the owned/borrowed paths.
     ///
     /// PURE HOST rebuild — performs ZERO device traffic and ZERO kernel
     /// launches: a `ConstraintSystem` field-copy from `inner.get_vk().cs()`
@@ -184,7 +210,7 @@ where
     /// `EvaluationDomain::new(j, k)`, and `Evaluator::new(&cs)`. Device mirrors
     /// start empty and populate lazily at first prove with the existing VRAM
     /// gate + host fallback — same H2D count and trigger points as before.
-    pub fn from_host(inner: ProvingKey<C>) -> Self {
+    fn from_cow(inner: Cow<'a, ProvingKey<C>>) -> Self {
         let cs = ConstraintSystem::from(inner.get_vk().cs());
         let hdomain = inner.get_vk().get_domain();
         let domain =
@@ -215,7 +241,7 @@ where
     }
 }
 
-impl<C: CurveAffine> GpuProvingKey<C> {
+impl<'a, C: CurveAffine> GpuProvingKey<'a, C> {
     /// Hashes the canonical verifying-key representative into a transcript.
     /// Reads the cached `transcript_repr` scalar and writes it via the GPU
     /// transcript trait (the transcript trait is a GPU fork, so we cannot
@@ -363,7 +389,7 @@ impl<C: CurveAffine> GpuProvingKey<C> {
 // therefore halo2-axiom's (`halo2_axiom::SerdeFormat` + `halo2_axiom::helpers`
 // serde traits + a `halo2_axiom::plonk::Circuit` for cs reconstruction on read);
 // reading reproduces today's lazy behavior — device mirrors start empty.
-impl<C> GpuProvingKey<C>
+impl<'a, C> GpuProvingKey<'a, C>
 where
     // The gpu serde traits are blanket-impl'd over `CurveAffine + SerdeObject`,
     // which also satisfies halo2-axiom's identical blanket impls — so the

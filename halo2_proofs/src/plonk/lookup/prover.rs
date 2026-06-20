@@ -81,7 +81,7 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
     /// The Permuted<C> struct is used to update the Lookup, and is then returned.
     pub(in crate::plonk) fn commit_permuted<'a, 'params: 'a, C, P: Params<'params, C>>(
         &self,
-        pk: &GpuProvingKey<C>,
+        pk: &GpuProvingKey<'_, C>,
         params: &P,
         domain: &EvaluationDomain<C::Scalar>,
         theta: ChallengeTheta<C>,
@@ -312,7 +312,7 @@ impl<C: CurveAffine> Permuted<C> {
     /// added to the Lookup and finally returned by the method.
     pub(in crate::plonk) fn commit_product<'params, P: Params<'params, C>, R: RngCore>(
         self,
-        pk: &GpuProvingKey<C>,
+        pk: &GpuProvingKey<'_, C>,
         params: &P,
         beta: ChallengeBeta<C>,
         gamma: ChallengeGamma<C>,
@@ -467,7 +467,7 @@ impl<C: CurveAffine> Permuted<C> {
 impl<C: CurveAffine> CommittedUnpacked<C> {
     pub(in crate::plonk) fn evaluate<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
         self,
-        pk: &GpuProvingKey<C>,
+        pk: &GpuProvingKey<'_, C>,
         x: ChallengeX<C>,
         transcript: &mut T,
     ) -> Result<Evaluated<C>, Error> {
@@ -525,7 +525,7 @@ impl<C: CurveAffine> CommittedUnpacked<C> {
 impl<C: CurveAffine> Evaluated<C> {
     pub(in crate::plonk) fn open<'a>(
         &'a self,
-        pk: &'a GpuProvingKey<C>,
+        pk: &'a GpuProvingKey<'_, C>,
         x: ChallengeX<C>,
     ) -> impl Iterator<Item = ProverQuery<'a, C>> + Clone {
         let x_inv = pk.domain.rotate_omega(*x, Rotation::prev());
@@ -654,7 +654,7 @@ type ExpressionPair<F> = (Polynomial<F, LagrangeCoeff>, Polynomial<F, LagrangeCo
 ///
 /// This method returns (A', S') if no errors are encountered.
 fn permute_expression_pair<'params, C: CurveAffine, P: Params<'params, C>>(
-    pk: &GpuProvingKey<C>,
+    pk: &GpuProvingKey<'_, C>,
     params: &P,
     domain: &EvaluationDomain<C::Scalar>,
     input_expression: &Polynomial<C::Scalar, LagrangeCoeff>,
