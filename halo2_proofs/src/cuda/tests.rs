@@ -1853,7 +1853,10 @@ fn test_compress_expressions_gpu_vs_cpu() {
     use crate::cuda::funcs::ColumnPool;
     use crate::plonk::evaluation::{compress_expressions_device, evaluate};
     use crate::plonk::sealed::SealedPhase;
-    use crate::plonk::{AdviceQuery, Expression, FirstPhase, FixedQuery, InstanceQuery};
+    use crate::plonk::{
+        GpuAdviceQuery as AdviceQuery, GpuExpression as Expression, GpuFirstPhase as FirstPhase,
+        GpuFixedQuery as FixedQuery, GpuInstanceQuery as InstanceQuery,
+    };
     use crate::poly::Rotation;
 
     fn run_one(log_n: u32) {
@@ -1965,7 +1968,10 @@ fn test_compress_expressions_gpu_inplace_device_vs_host() {
         compress_expressions_device, compress_expressions_in_place_device, GraphEvaluator,
     };
     use crate::plonk::sealed::SealedPhase;
-    use crate::plonk::{AdviceQuery, Expression, FirstPhase, FixedQuery, InstanceQuery};
+    use crate::plonk::{
+        GpuAdviceQuery as AdviceQuery, GpuExpression as Expression, GpuFirstPhase as FirstPhase,
+        GpuFixedQuery as FixedQuery, GpuInstanceQuery as InstanceQuery,
+    };
     use crate::poly::Rotation;
     use openvm_cuda_common::copy::cuda_memcpy_on;
     use openvm_cuda_common::d_buffer::DeviceBuffer;

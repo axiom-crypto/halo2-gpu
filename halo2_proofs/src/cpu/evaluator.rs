@@ -475,8 +475,10 @@ mod test_eval {
 
     use crate::cuda::utils::HALO2_GPU_CTX;
     use crate::plonk::{
-        lookup, permutation, AdviceQuery, Any, Column, ConstraintSystem, Expression, FirstPhase,
-        FixedQuery, Gate, InstanceQuery,
+        lookup, permutation, GpuAdviceQuery as AdviceQuery, GpuAny as Any, GpuColumn as Column,
+        GpuConstraintSystem as ConstraintSystem, GpuExpression as Expression,
+        GpuFirstPhase as FirstPhase, GpuFixedQuery as FixedQuery, GpuGate as Gate,
+        GpuInstanceQuery as InstanceQuery,
     };
     use crate::poly::{
         Coeff, Device, DevicePolyExt, EvaluationDomain, ExtendedLagrangeCoeff, HostPolyExt,

@@ -229,7 +229,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{plonk::FixedQuery, poly::Rotation};
+    use crate::{plonk::GpuFixedQuery as FixedQuery, poly::Rotation};
     use halo2curves::pasta::Fp;
     use proptest::collection::{vec, SizeRange};
     use proptest::prelude::*;
@@ -280,7 +280,7 @@ mod tests {
             let mut query = 0;
             let (combination_assignments, selector_assignments) =
                 process::<Fp, _>(selectors.clone(), max_degree, || {
-                    let tmp = Expression::Fixed(FixedQuery {
+                    let tmp = GpuExpression::Fixed(FixedQuery {
                         index: Some(query),
                         column_index: query,
                         rotation: Rotation::cur(),

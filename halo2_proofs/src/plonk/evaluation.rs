@@ -2146,7 +2146,8 @@ mod tests {
             let qb = meta.query_advice(b, Rotation::next());
             vec![qa * qb]
         });
-        let ev = Evaluator::<G1Affine>::new(&cs);
+        let gpu_cs = GpuConstraintSystem::from(&cs);
+        let ev = Evaluator::<G1Affine>::new(&gpu_cs);
         let (rules_ev, vp_ev) = ev.encode();
         let (rules_direct, vp_direct) = ev.custom_gates.encode_for_device();
         assert_eq!(vp_ev, vp_direct);
@@ -2413,7 +2414,8 @@ mod tests {
             vec![ret]
         });
 
-        let evaluator = Evaluator::<G1Affine>::new(&cs);
+        let gpu_cs = GpuConstraintSystem::from(&cs);
+        let evaluator = Evaluator::<G1Affine>::new(&gpu_cs);
         println!("{:?}", evaluator);
     }
 
@@ -2427,7 +2429,7 @@ mod tests {
 
         use crate::{
             circuit::{Layouter, SimpleFloorPlanner, Value},
-            plonk::{Advice, Circuit, Column, GpuError, Fixed, TableColumn},
+            plonk::{Advice, Circuit, Column, Error, Fixed, TableColumn},
         };
         #[derive(Clone, Debug)]
         struct TestCircuitConfig {
@@ -2517,7 +2519,7 @@ mod tests {
                 &self,
                 config: Self::Config,
                 mut layouter: impl Layouter<F>,
-            ) -> Result<(), GpuError> {
+            ) -> Result<(), Error> {
                 layouter.assign_table(
                     || "table for uint8",
                     |mut table| {
@@ -2604,7 +2606,8 @@ mod tests {
         // a evaluator from it.
         let test_config = TestCircuit::configure(&mut cs);
 
-        let mut evaluator = Evaluator::<G1Affine>::new(&cs);
+        let gpu_cs = GpuConstraintSystem::from(&cs);
+        let mut evaluator = Evaluator::<G1Affine>::new(&gpu_cs);
 
         let vp = evaluator.custom_gates.calculations.last_mut().unwrap();
         match &mut (vp.calculation) {
