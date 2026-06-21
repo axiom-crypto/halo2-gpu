@@ -88,10 +88,33 @@ impl From<halo2_axiom::plonk::Error> for GpuError {
             Canonical::InstanceTooLarge => GpuError::InstanceTooLarge,
             Canonical::NotEnoughColumnsForConstants => GpuError::NotEnoughColumnsForConstants,
             Canonical::Opening => GpuError::Opening,
-            // `Synthesis`, `Transcript`, `ColumnNotInPermutation`, and `TableError`
-            // (whose payload types differ across the crate boundary) surface as a
-            // generic synthesis failure on the keygen path.
+            // These three are losslessly mappable: after the unified-pk ESCALATE
+            // the payloads are canonical re-exports — `io::Error` is `std`,
+            // `Column<Any>` is the canonical type `GpuError::ColumnNotInPermutation`
+            // already holds, and canonical `TableError` converts variant-for-variant
+            // (its `TableColumn` is the canonical re-export too).
+            Canonical::Transcript(e) => GpuError::Transcript(e),
+            Canonical::ColumnNotInPermutation(column) => GpuError::ColumnNotInPermutation(column),
+            Canonical::TableError(e) => GpuError::TableError(e.into()),
+            // `Synthesis` carries no payload; it is the true generic fallback.
             _ => GpuError::Synthesis,
+        }
+    }
+}
+
+/// Converts a canonical halo2-axiom `TableError` into the GPU crate's local
+/// `TableError`. The payloads (`TableColumn`) are canonical re-exports, so this
+/// is a lossless, variant-for-variant mapping.
+impl From<halo2_axiom::plonk::TableError> for TableError {
+    fn from(e: halo2_axiom::plonk::TableError) -> Self {
+        use halo2_axiom::plonk::TableError as Canonical;
+        match e {
+            Canonical::ColumnNotAssigned(col) => TableError::ColumnNotAssigned(col),
+            Canonical::UnevenColumnLengths(a, b) => TableError::UnevenColumnLengths(a, b),
+            Canonical::UsedColumn(col) => TableError::UsedColumn(col),
+            Canonical::OverwriteDefault(col, default, val) => {
+                TableError::OverwriteDefault(col, default, val)
+            }
         }
     }
 }
