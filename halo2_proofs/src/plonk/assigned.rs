@@ -1,6 +1,7 @@
 use std::any::TypeId;
 use std::mem;
 use std::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
+use std::sync::Once;
 
 use group::ff::Field;
 
@@ -505,21 +506,46 @@ pub(crate) fn verify_assigned_layout<F: Field>() {
 /// stored cell reinterpreted as the canonical `halo2_axiom` `Assigned<F>`.
 /// Canonical `Assigned` is `#[repr(Rust)]` (layout left unspecified by the
 /// language), so that reinterpret is only sound while its in-memory layout
-/// coincides with the pinned `GpuAssigned` layout. It does on every toolchain
-/// we build with (tag `u8` at offset 0 with Zero=0/Trivial=1/Rational=2, `F`
-/// payload at `align_of::<F>()`), but a future `repr(Rust)` change could
-/// diverge. This probe turns that latent mismatch into a clear panic instead
-/// of silent witness corruption, mirroring `verify_assigned_layout` for the
-/// device side. Run once per proof at `WitnessCollection` construction.
+/// coincides with the pinned `GpuAssigned` layout.
+///
+/// Size and alignment are checked at compile time (both are const-evaluable),
+/// so a divergence fails the build for the instantiated `F` instead of a
+/// proof. The discriminant values and `F`-payload byte offsets need `F`
+/// arithmetic and `unsafe` reads of constructed values, so they cannot be
+/// const; that probe runs once per process behind a `Once`.
+///
+/// This stays a runtime guard rather than a `#[test]`: a test would only cover
+/// the test toolchain and its `F`, whereas this must fire on the *production*
+/// toolchain and the real `Scheme::Scalar` the prover runs with. The layout is
+/// invariant across proofs, so once-per-process is sufficient.
 pub(crate) fn assert_canonical_assigned_matches_gpu_layout<F: Field>() {
+    // Compile-time layout equality. A prior review noted the guard never
+    // checked alignment; `align_of` is const, so it is asserted here too.
+    const {
+        assert!(
+            mem::size_of::<GpuAssigned<F>>() == mem::size_of::<halo2_axiom::plonk::Assigned<F>>(),
+            "canonical Assigned<F> size != GpuAssigned<F> size; \
+             the assign_advice reinterpret would be unsound"
+        );
+        assert!(
+            mem::align_of::<GpuAssigned<F>>() == mem::align_of::<halo2_axiom::plonk::Assigned<F>>(),
+            "canonical Assigned<F> alignment != GpuAssigned<F> alignment; \
+             the assign_advice reinterpret would be unsound"
+        );
+    }
+
+    // The remaining probes are not const-evaluable; run them once per process.
+    static PROBED: Once = Once::new();
+    PROBED.call_once(probe_canonical_assigned_layout::<F>);
+}
+
+/// Discriminant + `F`-payload byte-offset probe for the canonical `Assigned<F>`,
+/// mirroring `verify_assigned_layout` for the device side. Driven once via
+/// [`assert_canonical_assigned_matches_gpu_layout`]; panics with a clear message
+/// on mismatch instead of silently corrupting the witness.
+fn probe_canonical_assigned_layout<F: Field>() {
     use halo2_axiom::plonk::Assigned as CanonicalAssigned;
     let (stride, num_off, denom_off) = assigned_layout_offsets::<F>();
-    let actual = mem::size_of::<CanonicalAssigned<F>>() as u32;
-    assert_eq!(
-        stride, actual,
-        "canonical Assigned<F> size {actual} != GpuAssigned<F> stride {stride}; \
-         the assign_advice reinterpret would be unsound"
-    );
 
     // Same Field-only probes as `verify_assigned_layout` (no `From<u64>`).
     let num = F::ONE + F::ONE;

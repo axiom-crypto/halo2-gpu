@@ -279,7 +279,7 @@ where
             );
             // The `Assignment` contract returns `Value<&Assigned<F>>`. `GpuAssigned`
             // and canonical `Assigned` share an identical in-memory layout (asserted
-            // once per proof by `assert_canonical_assigned_matches_gpu_layout`), so
+            // once per process by `assert_canonical_assigned_matches_gpu_layout`), so
             // the stored cell is reinterpreted in place — no extra storage, and the
             // reference stays valid for synthesis (the `advice` Vec is pre-sized and
             // never reallocated).
@@ -602,7 +602,7 @@ where
 
             // Soundness guard for the `assign_advice` fast path: the prover stores
             // advice cells as `GpuAssigned` and reinterprets them as canonical
-            // `Assigned` for the `Assignment` return. Verify (once per proof) that
+            // `Assigned` for the `Assignment` return. Verify (once per process) that
             // the two share an identical in-memory layout before any reinterpret.
             crate::plonk::assert_canonical_assigned_matches_gpu_layout::<Scheme::Scalar>();
 
