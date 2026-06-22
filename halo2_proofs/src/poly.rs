@@ -358,9 +358,6 @@ impl<F> DeviceChunks<F> for Polynomial<F, Coeff, Device> {
     }
 }
 
-// NOTE: the `PolyIo` host-polynomial serde trait was removed along with the
-// gpu pk/vk serde — pk serialization is now the canonical halo2-axiom path.
-
 /// Device batch-inversion of per-cell denominators: each column's
 /// `numerator * inv_denom` is reduced into a `DeviceBuffer<F>` (one
 /// `Polynomial<_, LagrangeCoeff, Device>` per column), all on the shared stream.

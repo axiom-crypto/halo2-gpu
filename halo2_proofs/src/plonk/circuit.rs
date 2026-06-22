@@ -464,12 +464,6 @@ impl TryFrom<GpuColumn<GpuAny>> for GpuColumn<GpuInstance> {
 pub struct GpuSelector(pub(crate) usize, bool);
 
 impl GpuSelector {
-    // `enable(region)` removed: enabling a selector during synthesis is a
-    // canonical-frontend operation (`halo2_axiom::plonk::Selector::enable`,
-    // backed by the canonical `Region::enable_selector`). `GpuSelector` is the
-    // backend fork rebuilt from the canonical cs and only ever read (index /
-    // is_simple); it never drives synthesis, so it needs no `enable`.
-
     /// Is this selector "simple"? Simple selectors can only be multiplied
     /// by expressions that contain no other simple selectors.
     pub fn is_simple(&self) -> bool {
@@ -805,11 +799,8 @@ impl<F: Field> GpuExpression<F> {
         }
     }
 
-    /// Visitor specialized to selector-only inspection. Returns `identity` for
-    /// every non-selector node type; applies `selector_fn` to selectors; combines
-    /// sub-results with `combine` for both Sum and Product nodes; preserves
-    /// identity through Negated and Scaled. Use when the evaluator only cares
-    /// about which selectors appear in the expression.
+    /// Evaluate over selectors only: `selector_fn` on selectors, `combine` on
+    /// Sum/Product, `identity` everywhere else.
     pub fn evaluate_selectors<T: Clone>(
         &self,
         identity: T,
@@ -1246,10 +1237,8 @@ impl<F: Field> Mul<F> for GpuExpression<F> {
 /// A "virtual cell" is a PLONK cell that has been queried at a particular relative offset
 /// within a custom gate.
 ///
-/// `column`/`rotation` are populated for structural parity with the canonical
-/// `VirtualCell` (via the `From` bridge), but the GPU quotient evaluator drives
-/// off `GpuGate::polys`, not the queried-cell debug tracking — hence
-/// `#[allow(dead_code)]`.
+/// Populated for structural parity with the canonical `VirtualCell`; the GPU
+/// quotient evaluator drives off `GpuGate::polys`, so these fields are unread.
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub struct GpuVirtualCell {
@@ -1391,10 +1380,8 @@ pub struct GpuGate<F: Field> {
     pub(crate) name: String,
     pub(crate) constraint_names: Vec<String>,
     pub(crate) polys: Vec<GpuExpression<F>>,
-    /// We track queried selectors separately from other cells, so that we can use them to
-    /// trigger debug checks on gates. Kept for structural parity with the
-    /// canonical `Gate` (populated by the `From` bridge); the GPU evaluator does
-    /// not read them, hence `#[allow(dead_code)]`.
+    /// Queried selectors, tracked separately for gate debug checks. Kept for
+    /// parity with the canonical `Gate`; the GPU evaluator does not read them.
     #[allow(dead_code)]
     pub(crate) queried_selectors: Vec<GpuSelector>,
     #[allow(dead_code)]
@@ -1473,73 +1460,6 @@ pub struct GpuConstraintSystem<F: Field> {
     pub(crate) minimum_degree: Option<usize>,
 }
 
-/// Represents the minimal parameters that determine a `GpuConstraintSystem`.
-// Vestigial fork-parity mirror of halo2-axiom's canonical `PinnedConstraintSystem`.
-// Not read on any live path: `GpuConstraintSystem::pinned()` has no callers, and the
-// GPU key copies `transcript_repr` from the canonical VK (`GpuVerifyingKey::from_host`
-// / `GpuProvingKey::from_cow`) rather than hashing this struct's `Debug` output. GPU
-// keygen returns the canonical `VerifyingKey::from_parts(...)`, so the transcript
-// representative is computed by halo2-axiom's canonical pinned VK/CS.
-#[allow(
-    dead_code,
-    reason = "vestigial fork-parity mirror of canonical PinnedConstraintSystem; not read on any live path (transcript_repr is taken from the canonical VK)"
-)]
-pub struct GpuPinnedConstraintSystem<'a, F: Field> {
-    num_fixed_columns: &'a usize,
-    num_advice_columns: &'a usize,
-    num_instance_columns: &'a usize,
-    num_selectors: &'a usize,
-    num_challenges: &'a usize,
-    advice_column_phase: &'a Vec<sealed::Phase>,
-    challenge_phase: &'a Vec<sealed::Phase>,
-    gates: GpuPinnedGates<'a, F>,
-    advice_queries: &'a Vec<(GpuColumn<GpuAdvice>, Rotation)>,
-    instance_queries: &'a Vec<(GpuColumn<GpuInstance>, Rotation)>,
-    fixed_queries: &'a Vec<(GpuColumn<GpuFixed>, Rotation)>,
-    permutation: &'a permutation::Argument,
-    lookups: &'a Vec<lookup::Argument<F>>,
-    constants: &'a Vec<GpuColumn<GpuFixed>>,
-    minimum_degree: &'a Option<usize>,
-}
-
-impl<'a, F: Field> std::fmt::Debug for GpuPinnedConstraintSystem<'a, F> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut debug_struct = f.debug_struct("PinnedConstraintSystem");
-        debug_struct
-            .field("num_fixed_columns", self.num_fixed_columns)
-            .field("num_advice_columns", self.num_advice_columns)
-            .field("num_instance_columns", self.num_instance_columns)
-            .field("num_selectors", self.num_selectors);
-        // Only show multi-phase related fields if it's used.
-        if *self.num_challenges > 0 {
-            debug_struct
-                .field("num_challenges", self.num_challenges)
-                .field("advice_column_phase", self.advice_column_phase)
-                .field("challenge_phase", self.challenge_phase);
-        }
-        debug_struct
-            .field("gates", &self.gates)
-            .field("advice_queries", self.advice_queries)
-            .field("instance_queries", self.instance_queries)
-            .field("fixed_queries", self.fixed_queries)
-            .field("permutation", self.permutation)
-            .field("lookups", self.lookups)
-            .field("constants", self.constants)
-            .field("minimum_degree", self.minimum_degree);
-        debug_struct.finish()
-    }
-}
-
-struct GpuPinnedGates<'a, F: Field>(&'a Vec<GpuGate<F>>);
-
-impl<'a, F: Field> std::fmt::Debug for GpuPinnedGates<'a, F> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        f.debug_list()
-            .entries(self.0.iter().flat_map(|gate| gate.polynomials().iter()))
-            .finish()
-    }
-}
-
 impl<F: Field> Default for GpuConstraintSystem<F> {
     fn default() -> GpuConstraintSystem<F> {
         GpuConstraintSystem {
@@ -1566,29 +1486,6 @@ impl<F: Field> Default for GpuConstraintSystem<F> {
 }
 
 impl<F: Field> GpuConstraintSystem<F> {
-    /// Obtain a pinned version of this constraint system; a structure with the
-    /// minimal parameters needed to determine the rest of the constraint
-    /// system.
-    pub fn pinned(&self) -> GpuPinnedConstraintSystem<'_, F> {
-        GpuPinnedConstraintSystem {
-            num_fixed_columns: &self.num_fixed_columns,
-            num_advice_columns: &self.num_advice_columns,
-            num_instance_columns: &self.num_instance_columns,
-            num_selectors: &self.num_selectors,
-            num_challenges: &self.num_challenges,
-            advice_column_phase: &self.advice_column_phase,
-            challenge_phase: &self.challenge_phase,
-            gates: GpuPinnedGates(&self.gates),
-            fixed_queries: &self.fixed_queries,
-            advice_queries: &self.advice_queries,
-            instance_queries: &self.instance_queries,
-            permutation: &self.permutation,
-            lookups: &self.lookups,
-            constants: &self.constants,
-            minimum_degree: &self.minimum_degree,
-        }
-    }
-
     /// Enables this fixed column to be used for global constant assignments.
     ///
     /// # Side-effects
@@ -2002,12 +1899,6 @@ impl<F: Field> GpuConstraintSystem<F> {
         }
     }
 
-    // `annotate_lookup_column` / `annotate_lookup_any_column` removed: they
-    // populated `general_column_annotations` (dev-tooling metadata keyed by the
-    // forked `metadata::Column`) which is never read post-keygen and is rebuilt
-    // empty in `from_host`. The canonical synthesis frontend owns annotation;
-    // the GPU backend cs has no live caller for these.
-
     /// Allocate a new fixed column
     pub fn fixed_column(&mut self) -> GpuColumn<GpuFixed> {
         let tmp = GpuColumn {
@@ -2338,29 +2229,11 @@ impl<'a, F: Field> GpuVirtualCells<'a, F> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// `GpuProvingKey::from_host` / `GpuVerifyingKey::from_host` rebuild support.
-//
 // Conversions from the canonical halo2-axiom constraint-system types into the
-// GPU-crate forks. The two families are structurally identical (verified: same
-// 18 `GpuConstraintSystem` fields, same 10-variant `GpuExpression` enum); these are
-// mechanical field copies plus a recursive `GpuExpression` map. This is the
-// equivalence-critical path — a bug here would silently desync the rebuilt GPU
-// `cs`/`Evaluator`/`Arguments` from what keygen produced.
-//
-// Notes:
-// - The query `index: Option<usize>` is NOT readable from halo2-axiom (private,
-//   no accessor) and is NOT consumed by the GPU prover/evaluator (`GraphEvaluator`
-//   keys off `column_index` + `rotation`; the prover's final queries iterate the
-//   top-level `*_queries` lists). It is set to `None`, exactly as a freshly
-//   `configure`d expression carries before `query_cells`.
-// - `GpuGate::{constraint_names, queried_selectors, queried_cells}` are dev-tooling
-//   metadata never read post-keygen and have no halo2-axiom accessor; rebuilt empty.
-// - `general_column_annotations` is dev-tooling metadata keyed by a forked
-//   `metadata::Column`; never read post-keygen; rebuilt empty.
-// - `lookup::Argument` cannot be named from this crate (halo2-axiom's `lookup`
-//   module is private), so it is rebuilt inline below from its public accessors.
-// ---------------------------------------------------------------------------
+// GPU-crate forks (see ARCHITECTURE.md). Equivalence-critical: a bug here
+// silently desyncs the rebuilt GPU cs/Evaluator/Arguments from what keygen
+// produced. Query `index` is set to `None` (not readable from halo2-axiom and
+// unread by the GPU prover) and backfilled below for the verifier path.
 
 impl<F: Field> From<&halo2_axiom::plonk::Expression<F>> for GpuExpression<F> {
     fn from(e: &halo2_axiom::plonk::Expression<F>) -> Self {
@@ -2517,18 +2390,13 @@ impl<F: Field> From<&halo2_axiom::plonk::ConstraintSystem<F>> for GpuConstraintS
                         .collect(),
                 })
                 .collect(),
-            // Dev-tooling metadata keyed by a forked `metadata::Column`; never
-            // read post-keygen. Rebuilt empty (behaviorally exact for prove/verify).
+            // Dev-tooling metadata, unread post-keygen; rebuilt empty.
             general_column_annotations: HashMap::new(),
             constants: cs.constants().iter().map(GpuColumn::from).collect(),
             minimum_degree: cs.minimum_degree(),
         };
-        // Backfill the per-query `index` into each gate/lookup `GpuExpression`.
-        // The GraphEvaluator-based prover keys on `column_index`+`rotation` (so
-        // it never reads `index`), but the verifier evaluates gate/lookup polys
-        // through `query.index`, and keygen's cs has these set — so reconstruct
-        // them here by position in the (order-preserving) query lists, making the
-        // rebuilt cs equivalence-EXACT to what keygen produced.
+        // Backfill the per-query `index` the verifier reads, by position in the
+        // order-preserving query lists (matches what keygen's cs assigns).
         let fq = out.fixed_queries.clone();
         let aq = out.advice_queries.clone();
         let iq = out.instance_queries.clone();
@@ -2550,10 +2418,8 @@ impl<F: Field> From<&halo2_axiom::plonk::ConstraintSystem<F>> for GpuConstraintS
     }
 }
 
-/// Reconstructs the per-query `index` (`Option<usize>`) inside an `GpuExpression`
-/// during the `from_host` cs rebuild: the index is the position of the query's
-/// `(column, rotation)` in the cs's order-preserving query list — exactly what
-/// `GpuConstraintSystem::query_*_index` assigns at keygen time.
+/// Sets each query's `index` to the position of its `(column, rotation)` in the
+/// cs's query list, matching what `query_*_index` assigns at keygen time.
 fn assign_expr_query_indices<F: Field>(
     expr: &mut GpuExpression<F>,
     fixed_queries: &[(GpuColumn<GpuFixed>, Rotation)],

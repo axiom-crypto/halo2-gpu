@@ -33,11 +33,8 @@ pub fn verify_proof<
 where
     Scheme::Scalar: WithSmallOrderMulGroup<3> + FromUniformBytes<64>,
 {
-    // The verifier operates on the GPU-crate forks (`cs`/`domain`/`permutation`)
-    // whose inherent methods (`read_product_commitments`/`evaluate`/`queries`)
-    // attach to GPU types. Rebuild them from the canonical halo2-axiom vk (pure
-    // host: cs field-copy + reconstructed domain + commitments clone), then
-    // shadow `vk` so the body below operates on the GPU verifying key.
+    // The verifier's methods attach to the GPU-crate forks, so rebuild the GPU
+    // verifying key from the canonical vk (pure host) and shadow `vk`.
     let gpu_vk = GpuVerifyingKey::<Scheme::Curve>::from_host(vk);
     let vk = &gpu_vk;
 

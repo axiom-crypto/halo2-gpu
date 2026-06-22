@@ -16,9 +16,7 @@ use crate::cuda::HaloGpuError;
 
 pub(crate) mod domain;
 
-// Retained as the CPU reference for the device batch-inversion equivalence
-// tests (the gpu keygen that previously called these in the lib was removed in
-// favor of halo2-axiom's keygen).
+// CPU reference for the device batch-inversion equivalence tests.
 #[allow(dead_code)]
 pub(crate) fn batch_invert_assigned<F: Field, PR>(
     assigned: impl AsRef<[PR]>,

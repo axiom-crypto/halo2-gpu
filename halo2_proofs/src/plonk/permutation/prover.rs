@@ -77,9 +77,7 @@ impl Argument {
         crate::perf_section!("permutation_commit");
         let domain = &pk.domain;
 
-        // Lagrange σ-columns staged once into a device-resident PK mirror (the
-        // distinct Lagrange mirror, moved onto `GpuProvingKey`). The host-arm
-        // permutation σ vector (`inner.permutation().permutations()`) backs it.
+        // Device-resident Lagrange σ-columns, mirrored on `GpuProvingKey`.
         let permutations_device = pk.permutation_lagrange_device().ok_or(GpuError::HaloGpu(
             HaloGpuError::InsufficientGpuMemory {
                 context: "permutation::Argument::commit: permutations_device unavailable",
@@ -99,7 +97,7 @@ impl Argument {
         // Each column gets its own delta power.
         let mut deltaomega = C::Scalar::ONE;
 
-        // Track the "last" value from the previous column set
+        // The "last" value carried from the previous column set.
         let mut last_z = C::Scalar::ONE;
 
         let mut sets = vec![];
@@ -117,9 +115,8 @@ impl Argument {
         let n = params.n() as usize;
         let scalar_bytes = std::mem::size_of::<C::Scalar>();
 
-        // Caller-owned device-resident ONE-fill template. Each chunk-loop
-        // iteration allocates a fresh `d_modified_values` and initialises it
-        // via a single D2D copy from this template.
+        // Device-resident ONE-fill template; each chunk re-inits its fresh
+        // `d_modified_values` via a single D2D copy from this.
         let d_ones_template = vec![C::Scalar::ONE; n]
             .as_slice()
             .to_device_on(&HALO2_GPU_CTX)
@@ -140,11 +137,8 @@ impl Argument {
             // where p_j(X) is the jth column in this permutation,
             // and i is the ith row of the column.
 
-            // Fresh per-chunk accumulator: the device-input grand_product
-            // wrapper consumes the buffer by value (returns the scan-bearing
-            // buffer back to the caller), so a fresh allocation per chunk
-            // restores the layout. ONE-init via D2D from the hoisted
-            // template.
+            // Fresh per-chunk accumulator: grand_product consumes the buffer by
+            // value, so each chunk needs its own allocation. ONE-init via D2D.
             let mut d_modified_values =
                 DeviceBuffer::<C::Scalar>::with_capacity_on(n, &HALO2_GPU_CTX);
             unsafe {
@@ -199,26 +193,16 @@ impl Argument {
                 end_timer!(gpu_time);
             }
 
-            // The modified_values vector is a vector of products of fractions
-            // of the form
-            //
-            // (p_j(\omega^i) + \delta^j \omega^i \beta + \gamma) /
-            // (p_j(\omega^i) + \beta s_j(\omega^i) + \gamma)
-            //
-            // where i is the index into modified_values, for the jth column in
-            // the permutation
+            // `d_modified_values` now holds the per-row fraction products above.
 
             #[cfg(feature = "profile")]
             let z_grand_product_time = start_timer!(|| "Z_i(X) grand product");
             // Device-resident running product Z_i(X). Layout:
             //   z[0]              = last_z (cross-chunk roll-in)
             //   z[1..acc_len]     = scan of modified_values[0..acc_len-1]
-            //                       (last_z · ∏_{j=0..i} modified_values[j])
             //   z[acc_len..n]     = RNG blinding factors
-            // The scan FFI is in-place on its input buffer, so its output
-            // sits at d_scanned[0..acc_len-1]; a single D2D shifts it into
-            // d_z[1..acc_len] — the shift stays in HBM and avoids a
-            // full-buffer PCIe copy.
+            // The scan FFI is in-place, so its output sits at
+            // d_scanned[0..acc_len-1]; a D2D shifts it into d_z[1..acc_len].
             let d_scanned = {
                 crate::perf_section!("grand_product_scan");
                 grand_product_device(d_modified_values, acc_len - 1, last_z)?
@@ -246,9 +230,8 @@ impl Argument {
             }
             drop(d_scanned);
 
-            // Blinding factors are host-RNG-generated and uploaded with a
-            // single `blinding_factors`-element tail H2D into the device
-            // buffer — the n-element accumulator stays device-resident.
+            // Host-RNG blinding factors, uploaded with a single tail H2D so the
+            // n-element accumulator stays device-resident.
             let host_blind: Vec<C::Scalar> = (0..blinding_factors)
                 .map(|_| C::Scalar::random(&mut rng))
                 .collect();
@@ -263,9 +246,8 @@ impl Argument {
                 .map_err(HaloGpuError::from)?;
             }
 
-            // Roll the cross-chunk last_z dependency: matches the host arm
-            // `last_z = z[n - (blinding_factors + 1)] = z[acc_len - 1]`,
-            // i.e. the last element of the scan region. Single 32-byte D2H.
+            // Carry last_z = z[acc_len - 1] (last element of the scan region)
+            // into the next chunk. Single 32-byte D2H.
             unsafe {
                 cuda_memcpy_on::<true, false>(
                     &mut last_z as *mut C::Scalar as *mut libc::c_void,
@@ -283,8 +265,8 @@ impl Argument {
 
             let z = Polynomial::<C::Scalar, LagrangeCoeff, Device>::from_device(d_z);
 
-            // Single-stream GPU prover: commit Z_i(X) via device-scalars MSM,
-            // then device-input iFFT to coeff form. No PCIe traffic on Z_i.
+            // Commit Z_i(X) via device-scalars MSM, then device-input iFFT to
+            // coeff form. No PCIe traffic on Z_i.
             let commitment = params
                 .commit_lagrange_device(&z, Blind::default())
                 .to_affine();
@@ -315,10 +297,6 @@ impl<C: CurveAffine> Committed<C> {
     }
 }
 
-// NOTE: permutation σ-poly evaluation (previously `permutation::ProvingKey::evaluate`)
-// now lives on `GpuProvingKey::evaluate_permutation`, since the gpu
-// `permutation::ProvingKey` was deleted in favor of the canonical halo2-axiom pk.
-
 impl<C: CurveAffine> Constructed<C> {
     pub(in crate::plonk) fn evaluate<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
         self,
@@ -334,8 +312,6 @@ impl<C: CurveAffine> Constructed<C> {
 
             while let Some(set) = sets.next() {
                 crate::perf_section!("permutation.evaluate.eval_at_loop");
-                // `eval_at` dispatches on the polynomial's storage
-                // variant (Host or Device).
                 let permutation_product_eval = set.permutation_product_poly.eval_at(*x);
 
                 let permutation_product_next_eval = set

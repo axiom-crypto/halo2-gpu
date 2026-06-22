@@ -3,9 +3,8 @@ use group::Curve;
 use rayon::prelude::*;
 
 // Keygen consumes the halo2-axiom constraint system, so the permutation
-// argument (and its columns) are the halo2-axiom types — not the GPU fork
-// `permutation::Argument`. `Any`/`Column` likewise resolve to the halo2-axiom
-// re-exports; errors are returned as the GPU crate's `GpuError`.
+// argument and its `Any`/`Column` types are the halo2-axiom ones, not the GPU
+// fork's `permutation::Argument`.
 use crate::arithmetic::CurveAffine;
 use crate::cpu::arithmetic::parallelize;
 use crate::plonk::{Any, Column, GpuError};
@@ -15,12 +14,9 @@ use crate::poly::{
 };
 use halo2_axiom::plonk::permutation::Argument;
 
-/// Struct that accumulates all the necessary data in order to construct the permutation argument.
-///
-/// The permutation proving/verifying keys are now produced by halo2-axiom's keygen
-/// (the canonical pk/vk), so the GPU crate keeps only the copy-constraint assembly
-/// used by `dev::MockProver`; the former `build_pk`/`build_vk` helpers were removed
-/// along with the GPU `permutation::ProvingKey`.
+/// Accumulates the copy-constraint data needed to construct the permutation
+/// argument. Produces the canonical halo2-axiom permutation pk/vk via
+/// [`build_pk`]/[`build_vk`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Assembly {
     /// Columns that participate on the copy permutation argument.
@@ -35,16 +31,13 @@ pub struct Assembly {
 
 impl Assembly {
     pub(crate) fn new(n: usize, p: &Argument) -> Self {
-        // Canonical permutation argument: `columns` field is private upstream, so
-        // pull the (owned) column list via the public `get_columns()` accessor.
+        // Upstream `columns` is private, so use the public `get_columns()` accessor.
         let perm_columns = p.get_columns();
         let num_columns = perm_columns.len();
 
-        // Initialize the copy vector to keep track of copy constraints in all
-        // the permutation arguments.
         let mut mapping = vec![];
         for i in 0..num_columns {
-            // Computes [(i, 0), (i, 1), ..., (i, n - 1)]
+            // [(i, 0), (i, 1), ..., (i, n - 1)]
             mapping.push((0..n).map(|j| (i, j)).collect());
         }
 
@@ -127,8 +120,8 @@ impl Assembly {
         &self.columns
     }
 
-    /// Builds the **canonical** permutation [`VerifyingKey`] (σ-column
-    /// commitments) via GPU MSM. Consumes `self` for symmetry with `build_pk`.
+    /// Builds the canonical permutation [`VerifyingKey`] (σ-column commitments)
+    /// via GPU MSM.
     pub(crate) fn build_vk<'params, C: CurveAffine, P: Params<'params, C>>(
         self,
         params: &P,
@@ -138,8 +131,8 @@ impl Assembly {
         build_vk(params, domain, p, |i, j| self.mapping[i][j])
     }
 
-    /// Builds the **canonical** permutation [`ProvingKey`] (σ-polys in Lagrange
-    /// + Coeff form) via GPU iFFT.
+    /// Builds the canonical permutation [`ProvingKey`] (σ-polys in Lagrange +
+    /// Coeff form) via GPU iFFT.
     pub(crate) fn build_pk<'params, C: CurveAffine, P: Params<'params, C>>(
         self,
         params: &P,
@@ -158,9 +151,8 @@ impl Assembly {
 }
 
 /// Computes the σ-permutation polynomials (Lagrange basis) from the copy
-/// `mapping`, then GPU-iFFTs them to Coeff form, returning the halo2-axiom
-/// permutation `ProvingKey` via `from_parts` (GPU `lagrange_to_coeff_many`;
-/// no CPU-MSM).
+/// `mapping`, then GPU-iFFTs them to Coeff form for the halo2-axiom
+/// permutation `ProvingKey`.
 pub(crate) fn build_pk<'params, C: CurveAffine, P: Params<'params, C>>(
     params: &P,
     domain: &EvaluationDomain<C::Scalar>,
@@ -176,8 +168,8 @@ pub(crate) fn build_pk<'params, C: CurveAffine, P: Params<'params, C>>(
     ))
 }
 
-/// Computes the σ-permutation polynomials and their GPU-MSM commitments,
-/// returning the **canonical** permutation `VerifyingKey` via `from_commitments`.
+/// Computes the σ-permutation polynomials and their GPU-MSM commitments for the
+/// halo2-axiom permutation `VerifyingKey`.
 pub(crate) fn build_vk<'params, C: CurveAffine, P: Params<'params, C>>(
     params: &P,
     domain: &EvaluationDomain<C::Scalar>,
@@ -207,7 +199,7 @@ fn permutation_lagrange_polys<'params, C: CurveAffine, P: Params<'params, C>>(
 ) -> Vec<Polynomial<C::Scalar, LagrangeCoeff>> {
     let num_columns = p.get_columns().len();
 
-    // Compute [omega^0, omega^1, ..., omega^{params.n - 1}]
+    // [omega^0, omega^1, ..., omega^{n - 1}]
     let mut omega_powers = vec![C::Scalar::ZERO; params.n() as usize];
     {
         let omega = domain.get_omega();
@@ -220,7 +212,7 @@ fn permutation_lagrange_polys<'params, C: CurveAffine, P: Params<'params, C>>(
         })
     }
 
-    // Compute [omega_powers * \delta^0, omega_powers * \delta^1, ..., omega_powers * \delta^m]
+    // [omega_powers * delta^0, omega_powers * delta^1, ..., omega_powers * delta^m]
     let mut deltaomega = vec![omega_powers; num_columns];
     {
         parallelize(&mut deltaomega, |o, start| {
@@ -234,7 +226,6 @@ fn permutation_lagrange_polys<'params, C: CurveAffine, P: Params<'params, C>>(
         });
     }
 
-    // Compute permutation polynomials.
     let mut permutations = vec![domain.empty_lagrange(); num_columns];
     {
         parallelize(&mut permutations, |o, start| {

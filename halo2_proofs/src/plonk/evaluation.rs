@@ -1070,8 +1070,7 @@ pub(in crate::plonk) fn evaluate_h_device<C: CurveAffine>(
 where
     C::ScalarExt: WithSmallOrderMulGroup<3>,
 {
-    // The evaluator view reads the rebuilt GPU `cs`/`domain` held on the
-    // `GpuProvingKey` (the prover never touches the canonical vk's forked cs).
+    // Evaluator view over the GPU `cs`/`domain` held on the `GpuProvingKey`.
     let view = EvaluatorVkView {
         blinding_factors: pk.cs.blinding_factors(),
         cs_degree: pk.cs_degree,

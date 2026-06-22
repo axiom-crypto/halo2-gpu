@@ -1,22 +1,17 @@
-//! Cross-prover proving-key equivalence (the runtime lock).
+//! Cross-prover proving-key equivalence.
 //!
-//! A proving key produced by `halo2-axiom`'s CPU `keygen_pk` is the canonical,
-//! serde-source-of-truth `ProvingKey`. This test proves, end to end, that such
-//! a key — serialized to bytes by the CPU side — is consumable by the GPU
-//! prover after a `GpuProvingKey::from_host` rebuild, and that the resulting
-//! proof verifies.
+//! Proves end to end that a canonical `ProvingKey` from `halo2-axiom`'s CPU
+//! `keygen_pk`, serialized to bytes, is consumable by the GPU prover after a
+//! `GpuProvingKey::from_host` rebuild, and that the resulting proof verifies.
 //!
-//! Both circuits share ONE SRS: the GPU `ParamsKZG` is generated once, written
-//! to bytes, and read back into a `halo2-axiom` `ParamsKZG` for CPU keygen. A
-//! fresh `ParamsKZG::new` per side would draw a different toxic `s` and break
-//! the shared-SRS requirement, so the bytes round-trip is load-bearing.
+//! Both sides share ONE SRS: a fresh `ParamsKZG::new` per side would draw a
+//! different toxic `s`, so the GPU `ParamsKZG` is written to bytes and read back
+//! into a `halo2-axiom` `ParamsKZG` — the bytes round-trip is load-bearing.
 //!
-//! The circuit is a single-region multiplication gate `q * (a * b - c)` with a
-//! public input that ties advice `a` to the instance column (a copy constraint
-//! that activates the permutation argument). It implements both
-//! `halo2_axiom::plonk::Circuit<Fr>` (for CPU keygen) and
-//! `halo2_axiom_gpu::plonk::Circuit<Fr>` (for the GPU prover), with byte-
-//! identical configure/synthesize bodies re-typed against each crate.
+//! The circuit is a single-region multiplication gate `q * (a * b - c)` whose
+//! public input ties advice `a` to the instance column (a copy constraint that
+//! activates the permutation argument). It is implemented twice, once against
+//! each crate, since CPU keygen and the GPU prover need their own `Circuit` type.
 
 use halo2_axiom_gpu::circuit::{Layouter, SimpleFloorPlanner, Value};
 use halo2_axiom_gpu::plonk::{
@@ -35,7 +30,7 @@ use halo2curves::bn256::{Bn256, Fr, G1Affine};
 use rand_core::OsRng;
 
 /// `1 << K` rows. K >= 14 clears `GPU_MSM_THRESHOLD` so the real GPU MSM path
-/// runs (rather than the small-circuit CPU-multiexp fallback).
+/// runs (rather than the CPU fallback).
 const K: u32 = 14;
 
 /// GPU-side single-region multiplication circuit (drives `create_proof`).
@@ -84,7 +79,6 @@ impl Circuit<Fr> for MulCircuit {
             let b = meta.query_advice(b, Rotation::cur());
             let c = meta.query_advice(c, Rotation::cur());
             let q = meta.query_fixed(q, Rotation::cur());
-            // Degree 3 (q * a * b), so `cs.degree() >= 3`.
             vec![q * (a * b - c)]
         });
 
@@ -101,8 +95,7 @@ impl Circuit<Fr> for MulCircuit {
         layouter.assign_region(
             || "mul",
             |mut region| {
-                // Tie advice `a[0]` to public `instance[0]`: a copy constraint
-                // that populates the permutation argument.
+                // Tie advice `a[0]` to public `instance[0]` (copy constraint).
                 region.assign_advice_from_instance(
                     || "a = public",
                     config.instance,
@@ -120,9 +113,9 @@ impl Circuit<Fr> for MulCircuit {
     }
 }
 
-/// CPU (halo2-axiom) circuit variant + canonical keygen. Byte-identical to the
-/// GPU `MulCircuit` above, re-typed against `halo2_axiom::{plonk, circuit}` so
-/// `halo2_axiom::keygen_pk` (which needs a `halo2_axiom::Circuit`) resolves.
+/// CPU (halo2-axiom) circuit variant + canonical keygen. Same circuit as the GPU
+/// `MulCircuit` above, re-typed against `halo2_axiom::{plonk, circuit}` so
+/// `halo2_axiom::keygen_pk` resolves.
 mod cpu {
     use halo2_axiom::circuit::{Layouter, SimpleFloorPlanner, Value};
     use halo2_axiom::plonk::{
@@ -214,8 +207,8 @@ mod cpu {
         }
     }
 
-    /// Reads the SHARED SRS bytes into a halo2-axiom `ParamsKZG`, then runs the
-    /// canonical CPU `keygen_vk`/`keygen_pk` on an empty (witness-free) circuit.
+    /// Reads the shared SRS bytes into a halo2-axiom `ParamsKZG`, then runs the
+    /// canonical CPU `keygen_vk`/`keygen_pk` on a witness-free circuit.
     pub fn build_pk(srs_bytes: &[u8]) -> ProvingKey<G1Affine> {
         let params =
             ParamsKZG::<Bn256>::read_custom(&mut &srs_bytes[..], SerdeFormat::RawBytesUnchecked)
@@ -229,10 +222,10 @@ mod cpu {
     }
 }
 
-/// Runs the GPU verifier and finalizes the strategy. Standalone-generic over
-/// the `Verifier`/`VerificationStrategy` pair so `finalize` can resolve the
-/// verifier impl (`AccumulatorStrategy` implements `VerificationStrategy` for
-/// every verifier, so the choice must be pinned at the call site).
+/// Runs the GPU verifier and finalizes the strategy. Generic over the
+/// `Verifier`/`VerificationStrategy` pair, which must be pinned at the call site
+/// since `AccumulatorStrategy` implements `VerificationStrategy` for every
+/// verifier.
 fn gpu_verify<'params, V, Strategy>(
     params: &'params ParamsKZG<Bn256>,
     vk: &VerifyingKey<G1Affine>,
@@ -258,8 +251,8 @@ where
 
 #[test]
 fn cross_prover_pk_bytes_equivalence() {
-    // 1. ONE SRS, generated once on the GPU side and shared with CPU keygen via
-    //    a byte round-trip (identical serde layout across the two forks).
+    // 1. ONE SRS, generated on the GPU side and shared with CPU keygen via a
+    //    byte round-trip.
     let gpu_params = ParamsKZG::<Bn256>::setup(K, OsRng);
     let mut srs_bytes = Vec::new();
     gpu_params
@@ -275,7 +268,7 @@ fn cross_prover_pk_bytes_equivalence() {
     let bytes = cpu_pk.to_bytes(fmt);
 
     // 3. Serde-identity guard: wrapping the CPU pk in a GpuProvingKey serializes
-    //    to byte-identical output (the serde delegates to the canonical pk).
+    //    to byte-identical output.
     let gpk_guard = GpuProvingKey::<G1Affine>::from_host(cpu_pk.clone());
     assert_eq!(
         gpk_guard.to_bytes(fmt),
@@ -283,8 +276,8 @@ fn cross_prover_pk_bytes_equivalence() {
         "GpuProvingKey serialization must be byte-identical to the canonical pk"
     );
 
-    // 4. Substantive lock: read the CPU-serialized pk back into a canonical
-    //    ProvingKey, wrap it for the GPU prover, then prove + verify.
+    // 4. Read the CPU-serialized pk back into a canonical ProvingKey, then
+    //    prove + verify on the GPU.
     let inner = {
         #[cfg(feature = "circuit-params")]
         let pk = halo2_axiom::plonk::ProvingKey::<G1Affine>::read::<_, cpu::MulCircuit>(
@@ -299,7 +292,7 @@ fn cross_prover_pk_bytes_equivalence() {
         );
         pk.expect("read canonical ProvingKey from CPU-serialized bytes")
     };
-    // GPU prove with concrete witnesses: public = 7, b = 3, so c = a*b = 21.
+    // GPU prove with concrete witnesses: public = 7, b = 3, c = 21.
     let public = Fr::from(7);
     let b = Fr::from(3);
     let circuit = MulCircuit {
@@ -321,7 +314,7 @@ fn cross_prover_pk_bytes_equivalence() {
     .expect("gpu create_proof");
     let proof = transcript.finalize();
 
-    // GPU verify with the canonical vk (the verifier rebuilds GpuVerifyingKey).
+    // GPU verify with the canonical vk.
     let verifier_params = gpu_params.verifier_params();
     assert!(
         gpu_verify::<VerifierSHPLONK<_>, AccumulatorStrategy<_>>(

@@ -4,7 +4,6 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
-// use assert_matches::assert_matches;
 use ff::{FromUniformBytes, WithSmallOrderMulGroup};
 use halo2_axiom_gpu::arithmetic::Field;
 use halo2_axiom_gpu::circuit::{Cell, Layouter, SimpleFloorPlanner, Value};
@@ -29,20 +28,10 @@ use std::hash::Hash;
 use std::io::{BufReader, BufWriter};
 use std::marker::PhantomData;
 
-/// CPU (halo2-axiom) circuit variant that drives the canonical `keygen_vk`/
-/// `keygen_pk` (which are halo2-axiom's). The resulting host `ProvingKey` is
-/// passed directly to `create_proof`, which borrows it and builds the GPU view
-/// internally; the GPU prove path keeps the gpu `MyCircuit` below. The circuit
-/// logic is byte-identical to that
-/// `MyCircuit` (the gpu Circuit/Region API is a fork of halo2-axiom's with the
-/// same shape), only re-typed against halo2-axiom's `plonk`/`circuit` modules —
-/// this is the dual-impl the maintainer asked for, isolated to a module so the
-/// gpu prove/verify path is untouched.
-///
-/// NOTE: this is exercised for COMPILE only — `plonk_api` is `#[ignore]`d. For a
-/// real run, the keygen params (built here) and the gpu prove params must share
-/// the same SRS; the Phase-C cross-prover equivalence test locks the
-/// CPU-serialized-pk → GPU-prove path properly.
+/// CPU (halo2-axiom) circuit variant driving the canonical `keygen_vk`/
+/// `keygen_pk`. The resulting host `ProvingKey` is passed to `create_proof`,
+/// which borrows it and builds the GPU view internally. Same circuit as the gpu
+/// `MyCircuit` below, re-typed against halo2-axiom's `plonk`/`circuit` modules.
 mod cpu_keygen {
     use ff::Field;
     use halo2_axiom::circuit::{Cell, Layouter, SimpleFloorPlanner, Value};
@@ -721,9 +710,7 @@ fn plonk_api() {
     }
 
     fn keygen(params: &ParamsKZG<Bn256>) -> ProvingKey<G1Affine> {
-        // Keygen runs on the CPU (halo2-axiom) circuit variant, producing the
-        // canonical host `ProvingKey`; `create_proof` borrows it and builds the
-        // GPU view internally. (The lookup table mirrors `common!`.)
+        // Keygen runs on the CPU circuit variant; the lookup table mirrors `common!`.
         let a = Fr::from(2834758237) * Fr::ZETA;
         let instance = Fr::ONE + Fr::ONE;
         let lookup_table = vec![instance, a, a, Fr::ZERO];
@@ -800,7 +787,6 @@ fn plonk_api() {
             params_verifier,
             vk,
             strategy,
-            // &[&[&pubinputs[..]], &[&pubinputs[..]]],
             &[&[&pubinputs[..]]],
             &mut transcript,
         )
@@ -835,9 +821,7 @@ fn plonk_api() {
 
         env_logger::init();
         type Scheme = KZGCommitmentScheme<Bn256>;
-        //bad_keys!(Scheme);
 
-        // let params = ParamsKZG::<Bn256>::new(K);
         let params = create_or_load_params(K);
         let rng = OsRng;
 
@@ -865,7 +849,6 @@ fn plonk_api() {
         use halo2curves::bn256::Bn256;
 
         type Scheme = KZGCommitmentScheme<Bn256>;
-        //bad_keys!(Scheme);
 
         let params = ParamsKZG::<Bn256>::new(K);
         let rng = OsRng;

@@ -5,21 +5,14 @@ use std::sync::Once;
 
 use group::ff::Field;
 
-/// A value assigned to a cell within a circuit.
+/// A value assigned to a cell within a circuit, stored as a fraction so the
+/// backend can batch inversions. A zero denominator maps to a value of zero.
 ///
-/// Stored as a fraction, so the backend can use batch inversion.
-///
-/// A denominator of zero maps to an assigned value of zero.
-///
-/// `#[repr(C, u8)]` pins the in-memory layout so the GPU
-/// `_halo2_decode_assigned` kernel can read raw `GpuAssigned<F>` bytes
-/// directly off device without a host-side enum-decode pass. The layout
-/// is: a `u8` discriminant at offset 0 (Zero=0, Trivial=1, Rational=2)
-/// followed by a `#[repr(C)]` union of per-variant structs starting at
-/// `align_of::<F>()`. The kernel reads `num` at offset `align_of::<F>()`
-/// and `denom` at offset `align_of::<F>() + size_of::<F>()`.
-/// `poly::batch_invert_assigned_device` runs a probe self-check
-/// against this layout before launching the kernel.
+/// `#[repr(C, u8)]` is load-bearing: it pins the layout (tag `u8` at offset 0
+/// with Zero=0/Trivial=1/Rational=2, then `F` payload at `align_of::<F>()`) so
+/// the GPU `_halo2_decode_assigned` kernel reads raw `GpuAssigned<F>` bytes off
+/// device with no host-side decode. `batch_invert_assigned_device` probes this
+/// layout before launching the kernel.
 #[repr(C, u8)]
 #[derive(Clone, Copy, Debug)]
 pub enum GpuAssigned<F> {
@@ -37,13 +30,9 @@ impl<F: Field> From<&GpuAssigned<F>> for GpuAssigned<F> {
     }
 }
 
-/// Synthesis→device boundary conversion: the canonical `halo2-axiom`
-/// `Assigned<F>` (produced by the canonical `Assignment` trait the GPU
-/// `WitnessCollection`/keygen `Assembly` implement) is reinterpreted into the
-/// GPU `#[repr(C, u8)]` `GpuAssigned<F>` just before the raw-byte device upload
-/// (`batch_invert_assigned_device`). Canonical `Assigned` is *not* `repr(C,u8)`,
-/// so it cannot feed the `_halo2_decode_assigned` kernel directly — this `From`
-/// is the (host-side, per-cell) bridge. Variant-for-variant; no field math.
+/// Host-side, per-cell bridge from canonical `Assigned<F>` (not `repr(C,u8)`,
+/// so it can't feed the kernel directly) into device-repr `GpuAssigned<F>`.
+/// Variant-for-variant; no field math.
 impl<F> From<halo2_axiom::plonk::Assigned<F>> for GpuAssigned<F> {
     fn from(val: halo2_axiom::plonk::Assigned<F>) -> Self {
         match val {
@@ -81,18 +70,16 @@ impl<F> AsRef<GpuAssigned<F>> for GpuAssigned<F> {
 impl<F: Field> PartialEq for GpuAssigned<F> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            // At least one side is directly zero.
             (Self::Zero, Self::Zero) => true,
             (Self::Zero, x) | (x, Self::Zero) => x.is_zero_vartime(),
 
-            // One side is x/0 which maps to zero.
+            // x/0 maps to zero.
             (Self::Rational(_, denominator), x) | (x, Self::Rational(_, denominator))
                 if denominator.is_zero_vartime() =>
             {
                 x.is_zero_vartime()
             }
 
-            // Okay, we need to do some actual math...
             (Self::Trivial(lhs), Self::Trivial(rhs)) => lhs == rhs,
             (Self::Trivial(x), Self::Rational(numerator, denominator))
             | (Self::Rational(numerator, denominator), Self::Trivial(x)) => {
@@ -130,18 +117,16 @@ impl<F: Field> Add for GpuAssigned<F> {
     type Output = GpuAssigned<F>;
     fn add(self, rhs: GpuAssigned<F>) -> GpuAssigned<F> {
         match (self, rhs) {
-            // One side is directly zero.
             (Self::Zero, _) => rhs,
             (_, Self::Zero) => self,
 
-            // One side is x/0 which maps to zero.
+            // x/0 maps to zero.
             (Self::Rational(_, denominator), other) | (other, Self::Rational(_, denominator))
                 if denominator.is_zero_vartime() =>
             {
                 other
             }
 
-            // Okay, we need to do some actual math...
             (Self::Trivial(lhs), Self::Trivial(rhs)) => Self::Trivial(lhs + rhs),
             (Self::Rational(numerator, denominator), Self::Trivial(other))
             | (Self::Trivial(other), Self::Rational(numerator, denominator)) => {
@@ -402,16 +387,9 @@ impl<F: Field> GpuAssigned<F> {
     }
 }
 
-/// Byte offsets and per-element stride of `GpuAssigned<F>` under the
-/// `#[repr(C, u8)]` layout pinned on the enum in this module.
-///
-/// Layout: tag `u8` at offset 0, then a `#[repr(C)]` union of variant
-/// structs starting at `align_of::<F>()`. So the first `F` payload
-/// (`Trivial`'s value or `Rational`'s numerator) lives at offset
-/// `align_of::<F>()`, and `Rational`'s denominator at
-/// `align_of::<F>() + size_of::<F>()`.
-///
-/// Returns `(stride_bytes, num_offset, denom_offset)`.
+/// Returns `(stride_bytes, num_offset, denom_offset)` for the `GpuAssigned<F>`
+/// `#[repr(C, u8)]` layout: the first `F` payload sits at `align_of::<F>()`,
+/// the `Rational` denominator at `align_of::<F>() + size_of::<F>()`.
 pub(crate) const fn assigned_layout_offsets<F: Field>() -> (u32, u32, u32) {
     let num_offset = mem::align_of::<F>() as u32;
     let denom_offset = num_offset + mem::size_of::<F>() as u32;
@@ -419,15 +397,10 @@ pub(crate) const fn assigned_layout_offsets<F: Field>() -> (u32, u32, u32) {
     (stride_bytes, num_offset, denom_offset)
 }
 
-/// Self-check on the `GpuAssigned<F>` byte layout the kernel reads.
-///
-/// `#[repr(C, u8)]` pins the layout per the Rust reference, but a
-/// compiler regression or a generic `F` with unusual alignment could
-/// shift the payload offsets. Probe values are constructed and inspected as raw
-/// bytes to confirm: the discriminant byte (0/1/2 for Zero/Trivial/Rational),
-/// the size matches `assigned_layout_offsets`, and the F payload sits
-/// at the computed offsets. Mismatch panics with a clear message before
-/// any kernel launch.
+/// Self-check on the `GpuAssigned<F>` byte layout the kernel reads: confirms the
+/// discriminant byte, the stride, and the `F`-payload offsets against
+/// `assigned_layout_offsets`, guarding against a compiler regression or an `F`
+/// with unusual alignment. Panics before any kernel launch on mismatch.
 pub(crate) fn verify_assigned_layout<F: Field>() {
     let (stride, num_off, denom_off) = assigned_layout_offsets::<F>();
     let actual_stride = mem::size_of::<GpuAssigned<F>>() as u32;
@@ -436,9 +409,8 @@ pub(crate) fn verify_assigned_layout<F: Field>() {
         "GpuAssigned<F> stride mismatch: expected {stride}, got {actual_stride}"
     );
 
-    // Construct distinguishable F probes from Field-only ops (no
-    // `From<u64>` bound). `denom` is `num.double()`, which differs from
-    // `num` for every non-trivial F we care about (char != 2).
+    // Distinguishable F probes from Field-only ops (no `From<u64>` bound);
+    // `denom = num.double()` differs from `num` for char != 2.
     let num = F::ONE + F::ONE;
     let denom = num.double();
     let rational = GpuAssigned::<F>::Rational(num, denom);
@@ -496,31 +468,17 @@ pub(crate) fn verify_assigned_layout<F: Field>() {
     );
 }
 
-/// Soundness guard for the `WitnessCollection::assign_advice` fast path.
+/// Soundness guard for the `WitnessCollection::assign_advice` fast path, which
+/// reinterprets a stored `GpuAssigned<F>` cell as canonical `Assigned<F>` to
+/// satisfy the `Value<&Assigned<F>>` return. Canonical `Assigned` is
+/// `#[repr(Rust)]`, so that reinterpret is sound only while its layout coincides
+/// with the pinned `GpuAssigned` layout.
 ///
-/// The GPU prover stores advice cells as `GpuAssigned<F>` (`#[repr(C, u8)]`,
-/// pinned layout) so the per-phase device upload can borrow the columns
-/// directly — no per-column re-conversion into a freshly allocated
-/// `Vec<GpuAssigned>`. But the canonical `Assignment::assign_advice` contract
-/// returns `Value<&Assigned<F>>`, so the prover hands back a reference to the
-/// stored cell reinterpreted as the canonical `halo2_axiom` `Assigned<F>`.
-/// Canonical `Assigned` is `#[repr(Rust)]` (layout left unspecified by the
-/// language), so that reinterpret is only sound while its in-memory layout
-/// coincides with the pinned `GpuAssigned` layout.
-///
-/// Size and alignment are checked at compile time (both are const-evaluable),
-/// so a divergence fails the build for the instantiated `F` instead of a
-/// proof. The discriminant values and `F`-payload byte offsets need `F`
-/// arithmetic and `unsafe` reads of constructed values, so they cannot be
-/// const; that probe runs once per process behind a `Once`.
-///
-/// This stays a runtime guard rather than a `#[test]`: a test would only cover
-/// the test toolchain and its `F`, whereas this must fire on the *production*
-/// toolchain and the real `Scheme::Scalar` the prover runs with. The layout is
-/// invariant across proofs, so once-per-process is sufficient.
+/// Size and alignment are const-checked (build fails per instantiated `F`); the
+/// discriminant and `F`-payload offsets need runtime probes, run once per
+/// process behind a `Once`. A runtime guard rather than a `#[test]` so it fires
+/// on the production toolchain and real `Scheme::Scalar`.
 pub(crate) fn assert_canonical_assigned_matches_gpu_layout<F: Field>() {
-    // Compile-time layout equality. A prior review noted the guard never
-    // checked alignment; `align_of` is const, so it is asserted here too.
     const {
         assert!(
             mem::size_of::<GpuAssigned<F>>() == mem::size_of::<halo2_axiom::plonk::Assigned<F>>(),
@@ -534,20 +492,17 @@ pub(crate) fn assert_canonical_assigned_matches_gpu_layout<F: Field>() {
         );
     }
 
-    // The remaining probes are not const-evaluable; run them once per process.
     static PROBED: Once = Once::new();
     PROBED.call_once(probe_canonical_assigned_layout::<F>);
 }
 
-/// Discriminant + `F`-payload byte-offset probe for the canonical `Assigned<F>`,
-/// mirroring `verify_assigned_layout` for the device side. Driven once via
-/// [`assert_canonical_assigned_matches_gpu_layout`]; panics with a clear message
-/// on mismatch instead of silently corrupting the witness.
+/// Discriminant + `F`-payload offset probe for canonical `Assigned<F>`,
+/// mirroring `verify_assigned_layout`. Driven once via
+/// [`assert_canonical_assigned_matches_gpu_layout`]; panics on mismatch.
 fn probe_canonical_assigned_layout<F: Field>() {
     use halo2_axiom::plonk::Assigned as CanonicalAssigned;
     let (stride, num_off, denom_off) = assigned_layout_offsets::<F>();
 
-    // Same Field-only probes as `verify_assigned_layout` (no `From<u64>`).
     let num = F::ONE + F::ONE;
     let denom = num.double();
 
@@ -609,13 +564,10 @@ fn probe_canonical_assigned_layout<F: Field>() {
     );
 }
 
-/// Hard guard: the CUDA decoder is hardwired to `fr_t` (bn256 Fr) in
-/// `halo2_proofs/cuda/include/kernel/decode_assigned.h`. Any non-Fr `F`
-/// would land bn256 Fr bytes into a `DeviceBuffer<F>` and corrupt
-/// downstream device arithmetic. Field-type compatibility cannot be
-/// verified by `verify_assigned_layout::<F>()` (which only probes enum
-/// byte layout), so it is asserted explicitly here before the FFI
-/// launch.
+/// Hard guard: the CUDA decoder is hardwired to bn256 `Fr` in
+/// `cuda/include/kernel/decode_assigned.h`, so a non-Fr `F` would decode Fr
+/// bytes into the wrong field. `verify_assigned_layout` only probes byte layout,
+/// not field type, so the type is asserted explicitly before the FFI launch.
 pub(crate) fn assert_assigned_kernel_field_is_bn256_fr<F: Field>() {
     assert!(
         TypeId::of::<F>() == TypeId::of::<halo2curves::bn256::Fr>(),

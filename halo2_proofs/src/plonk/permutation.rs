@@ -71,9 +71,8 @@ impl Argument {
     }
 }
 
-/// Rebuilds the GPU-crate permutation `Argument` from the canonical
-/// halo2-axiom one (consumed by `GpuProvingKey`/`GpuVerifyingKey::from_host`).
-/// `permutation` is a `pub mod` in halo2-axiom, so the type is nameable here.
+/// Rebuilds the GPU-crate permutation `Argument` from the canonical halo2-axiom
+/// one (used by `GpuProvingKey`/`GpuVerifyingKey::from_host`).
 impl From<&halo2_axiom::plonk::permutation::Argument> for Argument {
     fn from(a: &halo2_axiom::plonk::permutation::Argument) -> Self {
         Argument {

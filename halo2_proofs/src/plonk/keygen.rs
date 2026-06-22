@@ -1,24 +1,10 @@
 //! GPU-local key generation.
 //!
-//! These functions take a **GPU** [`Params`](crate::poly::commitment::Params)
-//! and a **canonical** [`Circuit`](crate::plonk::Circuit) and return the
-//! **canonical** halo2-axiom [`ProvingKey`]/[`VerifyingKey`] (the serde
-//! source-of-truth). This matches the signatures the patched `halo2-base`/
-//! `openvm` stack calls (`keygen_pk2`, `keygen_vk_custom`, `keygen_pk`), while
-//! keeping the GPU `Params` on the input side.
-//!
-//! Assembles the canonical key types via halo2-axiom's `from_parts`
-//! constructors. GPU acceleration is preserved by construction:
-//!
-//! * fixed-column + selector commitments via **GPU MSM** `params.commit_lagrange`;
-//! * fixed/basis/σ polynomials via **GPU iFFT** `domain.lagrange_to_coeff[_many]`;
-//! * permutation vk/pk via the GPU [`permutation::keygen::Assembly`].
-//!
-//! The circuit is synthesized through the **canonical** `Circuit`/`Assignment`
-//! frontend (`Assembly` implements `halo2_axiom::plonk::Assignment`), so the
-//! constraint system is built natively as the canonical `ConstraintSystem` —
-//! no reverse cs translation. The only halo2-axiom additions needed are the
-//! `from_parts`/`from_commitments` constructors.
+//! Takes a GPU [`Params`](crate::poly::commitment::Params) and a canonical
+//! [`Circuit`](crate::plonk::Circuit), returns the canonical halo2-axiom
+//! [`ProvingKey`]/[`VerifyingKey`]. GPU acceleration: fixed/selector
+//! commitments via GPU MSM, fixed/σ polynomials via GPU iFFT, permutation
+//! vk/pk via [`permutation::keygen::Assembly`].
 
 use std::marker::PhantomData;
 use std::ops::Range;
@@ -43,11 +29,9 @@ use crate::poly::{
     EvaluationDomain, LagrangeCoeff, Polynomial,
 };
 
-/// Builds the GPU evaluation domain + canonical constraint system + circuit
-/// config by running the **canonical** `Circuit::configure` against a fresh
-/// canonical `ConstraintSystem`. The domain is the GPU fork (the FFT/MSM
-/// engine); the canonical-typed vk domain is reconstructed identically from
-/// `degree`+`k` in [`keygen_pk_impl`]/[`keygen_vk_custom`].
+/// Runs `Circuit::configure` to build the GPU evaluation domain, the canonical
+/// constraint system, and the circuit config. The vk's canonical-typed domain
+/// is reconstructed identically from `(degree, k)` by the callers.
 fn create_domain<C, ConcreteCircuit>(
     k: u32,
     #[cfg(feature = "circuit-params")] params: ConcreteCircuit::Params,
@@ -72,12 +56,12 @@ where
     (domain, cs, config)
 }
 
-/// Assembly accumulator for keygen synthesis. Implements the **canonical**
-/// `Assignment` trait, so it is driven by the canonical `Circuit::synthesize`.
+/// Assembly accumulator for keygen synthesis. Implements the canonical
+/// `Assignment` trait, so it is driven by `Circuit::synthesize`.
 struct Assembly<F: Field> {
     k: u32,
-    /// Canonical-`Assigned` fixed columns; converted to the device-repr
-    /// `GpuAssigned` only at the batch-inversion boundary below.
+    /// Converted to the device-repr `GpuAssigned` at the batch-inversion
+    /// boundary below.
     fixed: Vec<Polynomial<Assigned<F>, LagrangeCoeff>>,
     permutation: permutation::keygen::Assembly,
     selectors: Vec<Vec<bool>>,
@@ -257,8 +241,6 @@ where
         #[cfg(feature = "circuit-params")]
         circuit.params(),
     );
-    // The vk domain is the canonical-typed twin of the GPU `domain`, built
-    // identically from `(degree, k)` so the vk is byte-identical to CPU keygen.
     let degree = cs.degree();
 
     if (params.n() as usize) < cs.minimum_rows() {
@@ -278,7 +260,6 @@ where
     #[cfg(feature = "profile")]
     end_timer!(assembly_time);
 
-    // Synthesize the circuit to obtain URS.
     #[cfg(feature = "profile")]
     let synthesize_time = start_timer!(|| "synthesize");
     ConcreteCircuit::FloorPlanner::synthesize(
@@ -298,8 +279,6 @@ where
     let (cs, selector_polys) = if compress_selectors {
         cs.compress_selectors(assembly.selectors.clone())
     } else {
-        // After this, the ConstraintSystem has no selectors: `verify` doesn't
-        // need them and `keygen_pk` regenerates `cs` from scratch anyway.
         let selectors = std::mem::take(&mut assembly.selectors);
         cs.directly_convert_selectors_to_fixed(selectors)
     };
@@ -363,9 +342,8 @@ where
     keygen_pk_impl(params, None, circuit, compress_selectors)
 }
 
-/// Shared body: builds the canonical `ProvingKey` from either a precomputed
-/// `VerifyingKey` or a freshly-generated one (the latter shares the fixed-column
-/// FFTs). GPU-accelerated throughout (MSM commitments, iFFTs); no CPU-MSM.
+/// Shared body for `keygen_pk`/`keygen_pk2`: builds the canonical `ProvingKey`
+/// from either a precomputed `VerifyingKey` or a freshly-generated one.
 fn keygen_pk_impl<'params, C, P, ConcreteCircuit>(
     params: &P,
     vk: Option<VerifyingKey<C>>,
@@ -402,7 +380,6 @@ where
     #[cfg(feature = "profile")]
     end_timer!(assembly_time);
 
-    // Synthesize the circuit to obtain URS.
     #[cfg(feature = "profile")]
     let synthesize_time = start_timer!(|| "synthesize");
     ConcreteCircuit::FloorPlanner::synthesize(
@@ -462,27 +439,26 @@ where
         }
     };
 
-    // GPU iFFT: fixed Lagrange -> Coeff.
     let fixed_polys = domain.lagrange_to_coeff_many(&fixed)?;
 
     let blinding_factors = vk.cs().blinding_factors();
 
-    // Compute l_0(X).
+    // l_0(X): 1 on row 0.
     let mut l0 = domain.empty_lagrange();
     l0[0] = C::Scalar::ONE;
     let l0 = domain.lagrange_to_coeff(l0)?;
 
-    // Compute l_blind(X): 1 on each blinding-factor row, 0 elsewhere.
+    // l_blind(X): 1 on each blinding-factor row.
     let mut l_blind = domain.empty_lagrange();
     for evaluation in l_blind[..].iter_mut().rev().take(blinding_factors) {
         *evaluation = C::Scalar::ONE;
     }
 
-    // Compute l_last(X): 1 on the first inactive row, 0 elsewhere.
+    // l_last(X): 1 on the first inactive row.
     let mut l_last = domain.empty_lagrange();
     l_last[params.n() as usize - blinding_factors - 1] = C::Scalar::ONE;
 
-    // Compute l_active_row(X).
+    // l_active_row(X) = 1 - (l_last + l_blind).
     let one = C::Scalar::ONE;
     let mut l_active_row = domain.empty_lagrange();
     parallelize(&mut l_active_row, |values, start| {
@@ -506,9 +482,8 @@ where
     ))
 }
 
-/// Synthesis→device boundary for keygen: reinterpret the per-cell canonical
-/// `Assigned` fixed columns into the device-repr `GpuAssigned`, then run the
-/// (CPU) batch inversion shared with the device-path equivalence oracle.
+/// Reinterprets the canonical `Assigned` fixed columns as device-repr
+/// `GpuAssigned`, then runs the (CPU) batch inversion.
 fn batch_invert_fixed<F: Field>(
     fixed: &[Polynomial<Assigned<F>, LagrangeCoeff>],
 ) -> Vec<Polynomial<F, LagrangeCoeff>> {

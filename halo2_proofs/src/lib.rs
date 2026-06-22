@@ -19,10 +19,8 @@
 // #![deny(unsafe_code)]
 
 pub mod arithmetic;
-/// Frontend circuit API (Layouter/Region/Cell/Value/SimpleFloorPlanner/…).
-/// Re-exported verbatim from the canonical `halo2-axiom` crate: the synthesis
-/// frontend is device-free and identical, so the unified `ProvingKey` path uses
-/// the canonical types directly (no GPU fork).
+/// Frontend circuit API (Layouter/Region/Cell/Value/SimpleFloorPlanner/…),
+/// re-exported from the canonical `halo2-axiom` crate.
 pub use halo2_axiom::circuit;
 pub use halo2curves;
 /// Test-oracle and runtime-fallback CPU implementations corresponding to GPU
@@ -33,9 +31,8 @@ pub use halo2curves;
 #[doc(hidden)]
 pub mod cpu;
 pub mod cuda;
-/// Circuit development tooling (MockProver, failure diagnostics, metadata).
-/// Re-exported verbatim from the canonical `halo2-axiom` crate (the GPU fork
-/// was device-free and identical).
+/// Circuit development tooling (MockProver, failure diagnostics, metadata),
+/// re-exported from the canonical `halo2-axiom` crate.
 pub use halo2_axiom::dev;
 pub mod fft;
 mod helpers;
