@@ -167,7 +167,14 @@ where
         num_instance_columns: usize,
         #[allow(dead_code)]
         num_advice_columns: usize,
-        pub advice: Vec<Assigned<C::Scalar>>,
+        // Advice cells are stored in the device representation `GpuAssigned`
+        // (`#[repr(C, u8)]`) so the per-phase `batch_invert_assigned_device`
+        // upload borrows each column directly — no per-column re-conversion into
+        // a freshly allocated `Vec<GpuAssigned>` on the prover hot path. The
+        // canonical `Assigned` returned by `assign_advice` is reinterpreted from
+        // these bytes; `assert_canonical_assigned_matches_gpu_layout` guards that
+        // the two layouts coincide.
+        pub advice: Vec<GpuAssigned<C::Scalar>>,
         challenges: &'b mut HashMap<usize, C::Scalar>,
         instances: &'a [&'a [C::Scalar]],
         usable_rows: RangeTo<usize>,
@@ -264,9 +271,19 @@ where
             // panic-on-unknown contract (create_proof forbids `Value::unknown()`).
             let mut assigned = None;
             to.map(|v| assigned = Some(v));
-            *advice_get_mut =
-                assigned.expect("No Value::unknown() in advice column allowed during create_proof");
-            let immutable_raw_ptr = advice_get_mut as *const Assigned<F>;
+            // Store in the device representation; `GpuAssigned::from` is a
+            // variant-for-variant bridge (no field math). The per-phase device
+            // upload then borrows these bytes with no further conversion.
+            *advice_get_mut = GpuAssigned::from(
+                assigned.expect("No Value::unknown() in advice column allowed during create_proof"),
+            );
+            // The `Assignment` contract returns `Value<&Assigned<F>>`. `GpuAssigned`
+            // and canonical `Assigned` share an identical in-memory layout (asserted
+            // once per proof by `assert_canonical_assigned_matches_gpu_layout`), so
+            // the stored cell is reinterpreted in place — no extra storage, and the
+            // reference stays valid for synthesis (the `advice` Vec is pre-sized and
+            // never reallocated).
+            let immutable_raw_ptr = advice_get_mut as *const GpuAssigned<F> as *const Assigned<F>;
             Value::known(unsafe { &*immutable_raw_ptr })
         }
 
@@ -357,7 +374,7 @@ where
                 let blind_start = col_start + self.unusable_rows_start;
                 let col_end = col_start + self.params_n;
                 for cell in &mut self.advice[blind_start..col_end] {
-                    *cell = Assigned::Trivial(F::random(&mut self.rng));
+                    *cell = GpuAssigned::Trivial(F::random(&mut self.rng));
                 }
             }
             #[cfg(feature = "profile")]
@@ -366,21 +383,19 @@ where
             #[cfg(feature = "profile")]
             let batch_invert_time = start_timer!(|| "batch invert witness assignment");
             // `Assignment::next_phase` returns `()`, so errors must `expect` rather than `?`.
-            // Synthesis→device boundary: the per-cell advice are canonical
-            // `Assigned` (from the canonical `Assignment` impl); reinterpret each
-            // column into the device-repr `GpuAssigned` for the raw-byte upload
-            // kernel inside `batch_invert_assigned_device`.
+            // The advice cells are already stored as device-repr `GpuAssigned`
+            // (converted once at the `assign_advice` write site), so each column of
+            // this phase is handed to the raw-byte upload kernel BY BORROW — no
+            // per-column re-conversion or fresh `Vec<GpuAssigned>` allocation on the
+            // prover hot path.
             let advice_values = batch_invert_assigned_device(
                 column_indices_for_phase
                     .iter()
                     .map(|column_index| {
-                        self.advice
+                        &self.advice
                             [*column_index * self.params_n..(*column_index + 1) * self.params_n]
-                            .iter()
-                            .map(|a| GpuAssigned::from(*a))
-                            .collect::<Vec<GpuAssigned<C::Scalar>>>()
                     })
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<&[GpuAssigned<C::Scalar>]>>(),
             )
             .expect("batch_invert_assigned_device (CUDA) failed inside Assignment::next_phase");
             #[cfg(feature = "profile")]
@@ -585,6 +600,12 @@ where
             let mut challenges =
                 HashMap::<usize, Scheme::Scalar>::with_capacity(meta.num_challenges);
 
+            // Soundness guard for the `assign_advice` fast path: the prover stores
+            // advice cells as `GpuAssigned` and reinterprets them as canonical
+            // `Assigned` for the `Assignment` return. Verify (once per proof) that
+            // the two share an identical in-memory layout before any reinterpret.
+            crate::plonk::assert_canonical_assigned_matches_gpu_layout::<Scheme::Scalar>();
+
             for (circuit, instances) in circuits.iter().zip(instances) {
                 #[cfg(feature = "profile")]
                 let start = std::time::Instant::now();
@@ -596,7 +617,7 @@ where
                     current_phase: phases[0],
                     num_instance_columns: num_instance,
                     num_advice_columns: meta.num_advice_columns,
-                    advice: vec![Assigned::Zero; params.n() as usize * meta.num_advice_columns],
+                    advice: vec![GpuAssigned::Zero; params.n() as usize * meta.num_advice_columns],
                     instances,
                     challenges: &mut challenges,
                     usable_rows: ..unusable_rows_start,

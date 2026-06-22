@@ -495,6 +495,94 @@ pub(crate) fn verify_assigned_layout<F: Field>() {
     );
 }
 
+/// Soundness guard for the `WitnessCollection::assign_advice` fast path.
+///
+/// The GPU prover stores advice cells as `GpuAssigned<F>` (`#[repr(C, u8)]`,
+/// pinned layout) so the per-phase device upload can borrow the columns
+/// directly — no per-column re-conversion into a freshly allocated
+/// `Vec<GpuAssigned>`. But the canonical `Assignment::assign_advice` contract
+/// returns `Value<&Assigned<F>>`, so the prover hands back a reference to the
+/// stored cell reinterpreted as the canonical `halo2_axiom` `Assigned<F>`.
+/// Canonical `Assigned` is `#[repr(Rust)]` (layout left unspecified by the
+/// language), so that reinterpret is only sound while its in-memory layout
+/// coincides with the pinned `GpuAssigned` layout. It does on every toolchain
+/// we build with (tag `u8` at offset 0 with Zero=0/Trivial=1/Rational=2, `F`
+/// payload at `align_of::<F>()`), but a future `repr(Rust)` change could
+/// diverge. This probe turns that latent mismatch into a clear panic instead
+/// of silent witness corruption, mirroring `verify_assigned_layout` for the
+/// device side. Run once per proof at `WitnessCollection` construction.
+pub(crate) fn assert_canonical_assigned_matches_gpu_layout<F: Field>() {
+    use halo2_axiom::plonk::Assigned as CanonicalAssigned;
+    let (stride, num_off, denom_off) = assigned_layout_offsets::<F>();
+    let actual = mem::size_of::<CanonicalAssigned<F>>() as u32;
+    assert_eq!(
+        stride, actual,
+        "canonical Assigned<F> size {actual} != GpuAssigned<F> stride {stride}; \
+         the assign_advice reinterpret would be unsound"
+    );
+
+    // Same Field-only probes as `verify_assigned_layout` (no `From<u64>`).
+    let num = F::ONE + F::ONE;
+    let denom = num.double();
+
+    let rational = CanonicalAssigned::Rational(num, denom);
+    let rb = unsafe {
+        std::slice::from_raw_parts(
+            &rational as *const CanonicalAssigned<F> as *const u8,
+            stride as usize,
+        )
+    };
+    assert_eq!(
+        rb[0], 2,
+        "canonical Assigned::Rational discriminant expected 2, got {}",
+        rb[0]
+    );
+    let probe_num =
+        unsafe { std::ptr::read_unaligned(rb.as_ptr().add(num_off as usize) as *const F) };
+    let probe_denom =
+        unsafe { std::ptr::read_unaligned(rb.as_ptr().add(denom_off as usize) as *const F) };
+    assert!(
+        probe_num == num,
+        "canonical Assigned numerator offset mismatch vs GpuAssigned at byte {num_off}"
+    );
+    assert!(
+        probe_denom == denom,
+        "canonical Assigned denominator offset mismatch vs GpuAssigned at byte {denom_off}"
+    );
+
+    let trivial = CanonicalAssigned::Trivial(num);
+    let tb = unsafe {
+        std::slice::from_raw_parts(
+            &trivial as *const CanonicalAssigned<F> as *const u8,
+            stride as usize,
+        )
+    };
+    assert_eq!(
+        tb[0], 1,
+        "canonical Assigned::Trivial discriminant expected 1, got {}",
+        tb[0]
+    );
+    let probe_trivial =
+        unsafe { std::ptr::read_unaligned(tb.as_ptr().add(num_off as usize) as *const F) };
+    assert!(
+        probe_trivial == num,
+        "canonical Assigned Trivial payload offset mismatch vs GpuAssigned at byte {num_off}"
+    );
+
+    let zero = CanonicalAssigned::<F>::Zero;
+    let zb = unsafe {
+        std::slice::from_raw_parts(
+            &zero as *const CanonicalAssigned<F> as *const u8,
+            stride as usize,
+        )
+    };
+    assert_eq!(
+        zb[0], 0,
+        "canonical Assigned::Zero discriminant expected 0, got {}",
+        zb[0]
+    );
+}
+
 /// Hard guard: the CUDA decoder is hardwired to `fr_t` (bn256 Fr) in
 /// `halo2_proofs/cuda/include/kernel/decode_assigned.h`. Any non-Fr `F`
 /// would land bn256 Fr bytes into a `DeviceBuffer<F>` and corrupt
