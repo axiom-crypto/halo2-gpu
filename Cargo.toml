@@ -32,13 +32,3 @@ codegen-units = 1
 
 [patch."https://github.com/axiom-crypto/halo2-gpu.git"]
 halo2-axiom-gpu = { path = "halo2_proofs" }
-
-# === TEMP (local validation only) — REMOVE before pushing halo2-gpu ===
-# The 4 additive `from_parts` constructors (commit d262716c on
-# feat/proving-key-accessors) are committed LOCALLY but NOT pushed. This path
-# patch lets halo2-gpu build against that local halo2-axiom for local validation.
-# Maintainer sequence: (1) push halo2 from_parts commit -> (2) repoint the
-# halo2-axiom dep in halo2_proofs/Cargo.toml to git@<new-sha> -> (3) delete this
-# patch -> (4) push halo2-gpu.
-[patch."https://github.com/axiom-crypto/halo2"]
-halo2-axiom = { path = "/home/grigorii/dev/halo2/halo2/halo2_proofs" }
