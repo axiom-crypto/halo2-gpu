@@ -850,7 +850,10 @@ fn permute_expression_pair_seq<C: CurveAffine>(
                     None
                 } else {
                     // Return error if input_value not found
-                    panic!("{:?}", GpuError::ConstraintSystemFailure);
+                    panic!(
+                        "{:?}",
+                        GpuError::Canonical(halo2_axiom::plonk::Error::ConstraintSystemFailure)
+                    );
                 }
                 // If input value is repeated
             } else {
@@ -995,7 +998,9 @@ mod tests {
                     }
                     if not_found {
                         // Return error if input_value not found
-                        Some(Err(GpuError::ConstraintSystemFailure))
+                        Some(Err(GpuError::Canonical(
+                            halo2_axiom::plonk::Error::ConstraintSystemFailure,
+                        )))
                     } else {
                         None
                     }

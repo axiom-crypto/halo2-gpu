@@ -147,7 +147,12 @@ impl<F: Field> Assignment<F> for Assembly<F> {
             .fixed
             .get_mut(column.index())
             .and_then(|v| v.get_mut(row))
-            .unwrap_or_else(|| panic!("{:?}", GpuError::BoundsFailure)) = to;
+            .unwrap_or_else(|| {
+                panic!(
+                    "{:?}",
+                    GpuError::Canonical(halo2_axiom::plonk::Error::BoundsFailure)
+                )
+            }) = to;
     }
 
     fn copy(

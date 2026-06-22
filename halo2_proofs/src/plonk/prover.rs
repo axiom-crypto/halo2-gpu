@@ -110,7 +110,9 @@ where
     let num_instance = pk.cs.num_instance_columns;
     for instance in instances.iter() {
         if instance.len() != num_instance {
-            return Err(GpuError::InvalidInstances);
+            return Err(GpuError::Canonical(
+                halo2_axiom::plonk::Error::InvalidInstances,
+            ));
         }
     }
     pk.hash_into(transcript)?;
@@ -1121,7 +1123,7 @@ where
         let multiopen_timer = start_timer!(|| "phase5 multiopen");
         let multiopen_res = prover
             .create_proof(rng, transcript, instances)
-            .map_err(|_| GpuError::ConstraintSystemFailure);
+            .map_err(|_| GpuError::Canonical(halo2_axiom::plonk::Error::ConstraintSystemFailure));
         #[cfg(feature = "profile")]
         end_timer!(multiopen_timer);
 

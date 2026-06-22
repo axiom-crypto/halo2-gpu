@@ -66,22 +66,28 @@ impl Assembly {
         right_column: Column<Any>,
         right_row: usize,
     ) -> Result<(), GpuError> {
-        let left_column = self
-            .columns
-            .iter()
-            .position(|c| c == &left_column)
-            .ok_or(GpuError::ColumnNotInPermutation(left_column))?;
-        let right_column = self
-            .columns
-            .iter()
-            .position(|c| c == &right_column)
-            .ok_or(GpuError::ColumnNotInPermutation(right_column))?;
+        let left_column =
+            self.columns
+                .iter()
+                .position(|c| c == &left_column)
+                .ok_or(GpuError::Canonical(
+                    halo2_axiom::plonk::Error::ColumnNotInPermutation(left_column),
+                ))?;
+        let right_column =
+            self.columns
+                .iter()
+                .position(|c| c == &right_column)
+                .ok_or(GpuError::Canonical(
+                    halo2_axiom::plonk::Error::ColumnNotInPermutation(right_column),
+                ))?;
 
         // Check bounds
         if left_row >= self.mapping[left_column].len()
             || right_row >= self.mapping[right_column].len()
         {
-            return Err(GpuError::BoundsFailure);
+            return Err(GpuError::Canonical(
+                halo2_axiom::plonk::Error::BoundsFailure,
+            ));
         }
 
         // See book/src/design/permutation.md for a description of this algorithm.
