@@ -221,10 +221,9 @@ fn assert_keygen_byte_identity(
     );
 
     // --- keygen_pk (from the precomputed vk) ---
-    let gpu_pk = halo2_axiom_gpu::plonk::keygen_pk(gpu_params, gpu_vk, circuit)
-        .expect("gpu keygen_pk");
-    let cpu_pk =
-        halo2_axiom::plonk::keygen_pk(cpu_params, cpu_vk, circuit).expect("cpu keygen_pk");
+    let gpu_pk =
+        halo2_axiom_gpu::plonk::keygen_pk(gpu_params, gpu_vk, circuit).expect("gpu keygen_pk");
+    let cpu_pk = halo2_axiom::plonk::keygen_pk(cpu_params, cpu_vk, circuit).expect("cpu keygen_pk");
     assert_eq!(
         gpu_pk.to_bytes(fmt),
         cpu_pk.to_bytes(fmt),

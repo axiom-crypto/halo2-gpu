@@ -25,7 +25,10 @@ impl<F: Field> Argument<F> {
     /// Constructs a new lookup argument.
     ///
     /// `table_map` is a sequence of `(input, table)` tuples.
-    pub fn new<S: AsRef<str>>(name: S, table_map: Vec<(GpuExpression<F>, GpuExpression<F>)>) -> Self {
+    pub fn new<S: AsRef<str>>(
+        name: S,
+        table_map: Vec<(GpuExpression<F>, GpuExpression<F>)>,
+    ) -> Self {
         let (input_expressions, table_expressions) = table_map.into_iter().unzip();
         Argument {
             name: name.as_ref().to_string(),

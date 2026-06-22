@@ -137,7 +137,10 @@ impl<F: Field> Assignment<F> for Assembly<F> {
 
     fn assign_fixed(&mut self, column: Column<Fixed>, row: usize, to: Assigned<F>) {
         if !self.usable_rows.contains(&row) {
-            panic!("Assign Fixed {:?}", GpuError::not_enough_rows_available(self.k));
+            panic!(
+                "Assign Fixed {:?}",
+                GpuError::not_enough_rows_available(self.k)
+            );
         }
 
         *self
@@ -265,7 +268,12 @@ where
     };
 
     // Synthesize the circuit to obtain URS.
-    ConcreteCircuit::FloorPlanner::synthesize(&mut assembly, circuit, config, cs.constants().clone())?;
+    ConcreteCircuit::FloorPlanner::synthesize(
+        &mut assembly,
+        circuit,
+        config,
+        cs.constants().clone(),
+    )?;
 
     let mut fixed = batch_invert_fixed::<C::Scalar>(&assembly.fixed);
     let (cs, selector_polys) = if compress_selectors {
@@ -372,7 +380,12 @@ where
     };
 
     // Synthesize the circuit to obtain URS.
-    ConcreteCircuit::FloorPlanner::synthesize(&mut assembly, circuit, config, cs.constants().clone())?;
+    ConcreteCircuit::FloorPlanner::synthesize(
+        &mut assembly,
+        circuit,
+        config,
+        cs.constants().clone(),
+    )?;
 
     let mut fixed = batch_invert_fixed::<C::Scalar>(&assembly.fixed);
     let (cs, selector_polys) = if compress_selectors {
@@ -387,10 +400,11 @@ where
             .map(|poly| domain.lagrange_from_vec(poly)),
     );
 
-    let permutation_pk = assembly
-        .permutation
-        .clone()
-        .build_pk(params, &domain, cs.permutation())?;
+    let permutation_pk =
+        assembly
+            .permutation
+            .clone()
+            .build_pk(params, &domain, cs.permutation())?;
 
     let vk = match vk {
         Some(vk) => vk,

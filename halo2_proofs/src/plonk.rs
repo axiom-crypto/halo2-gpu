@@ -56,7 +56,7 @@ pub use halo2_axiom::plonk::{ProvingKey, VerifyingKey};
 // via the `From` bridge.
 pub use halo2_axiom::plonk::{
     Advice, AdviceQuery, Any, Assigned, Assignment, Challenge, Circuit, Column, ColumnType,
-    Constraint, ConstraintSystem, Constraints, Error, Expression, Fixed, FirstPhase, FixedQuery,
+    Constraint, ConstraintSystem, Constraints, Error, Expression, FirstPhase, Fixed, FixedQuery,
     FloorPlanner, Gate, Instance, InstanceQuery, Phase, SecondPhase, Selector, TableColumn,
     ThirdPhase, VirtualCell, VirtualCells,
 };

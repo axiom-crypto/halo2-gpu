@@ -250,7 +250,9 @@ impl Ord for GpuAny {
         // This ordering is consensus-critical! The layouters rely on deterministic column
         // orderings.
         match (self, other) {
-            (GpuAny::Instance, GpuAny::Instance) | (GpuAny::Fixed, GpuAny::Fixed) => std::cmp::Ordering::Equal,
+            (GpuAny::Instance, GpuAny::Instance) | (GpuAny::Fixed, GpuAny::Fixed) => {
+                std::cmp::Ordering::Equal
+            }
             (GpuAny::Advice(lhs), GpuAny::Advice(rhs)) => lhs.phase.cmp(&rhs.phase),
             // Across column types, sort GpuInstance < GpuAdvice < GpuFixed.
             (GpuAny::Instance, GpuAny::Advice(_))
@@ -1671,7 +1673,11 @@ impl<F: Field> GpuConstraintSystem<F> {
         index
     }
 
-    pub(crate) fn query_advice_index(&mut self, column: GpuColumn<GpuAdvice>, at: Rotation) -> usize {
+    pub(crate) fn query_advice_index(
+        &mut self,
+        column: GpuColumn<GpuAdvice>,
+        at: Rotation,
+    ) -> usize {
         // Return existing query, if it exists
         for (index, advice_query) in self.advice_queries.iter().enumerate() {
             if advice_query == &(column, at) {
@@ -1707,14 +1713,20 @@ impl<F: Field> GpuConstraintSystem<F> {
             GpuAny::Advice(_) => {
                 self.query_advice_index(GpuColumn::<GpuAdvice>::try_from(column).unwrap(), at)
             }
-            GpuAny::Fixed => self.query_fixed_index(GpuColumn::<GpuFixed>::try_from(column).unwrap(), at),
+            GpuAny::Fixed => {
+                self.query_fixed_index(GpuColumn::<GpuFixed>::try_from(column).unwrap(), at)
+            }
             GpuAny::Instance => {
                 self.query_instance_index(GpuColumn::<GpuInstance>::try_from(column).unwrap(), at)
             }
         }
     }
 
-    pub(crate) fn get_advice_query_index(&self, column: GpuColumn<GpuAdvice>, at: Rotation) -> usize {
+    pub(crate) fn get_advice_query_index(
+        &self,
+        column: GpuColumn<GpuAdvice>,
+        at: Rotation,
+    ) -> usize {
         for (index, advice_query) in self.advice_queries.iter().enumerate() {
             if advice_query == &(column, at) {
                 return index;
@@ -1734,7 +1746,11 @@ impl<F: Field> GpuConstraintSystem<F> {
         panic!("get_fixed_query_index called for non-existent query");
     }
 
-    pub(crate) fn get_instance_query_index(&self, column: GpuColumn<GpuInstance>, at: Rotation) -> usize {
+    pub(crate) fn get_instance_query_index(
+        &self,
+        column: GpuColumn<GpuInstance>,
+        at: Rotation,
+    ) -> usize {
         for (index, instance_query) in self.instance_queries.iter().enumerate() {
             if instance_query == &(column, at) {
                 return index;
@@ -1752,9 +1768,8 @@ impl<F: Field> GpuConstraintSystem<F> {
             GpuAny::Fixed => {
                 self.get_fixed_query_index(GpuColumn::<GpuFixed>::try_from(column).unwrap(), at)
             }
-            GpuAny::Instance => {
-                self.get_instance_query_index(GpuColumn::<GpuInstance>::try_from(column).unwrap(), at)
-            }
+            GpuAny::Instance => self
+                .get_instance_query_index(GpuColumn::<GpuInstance>::try_from(column).unwrap(), at),
         }
     }
 
@@ -2280,7 +2295,11 @@ impl<'a, F: Field> GpuVirtualCells<'a, F> {
     }
 
     /// Query an instance column at a relative position
-    pub fn query_instance(&mut self, column: GpuColumn<GpuInstance>, at: Rotation) -> GpuExpression<F> {
+    pub fn query_instance(
+        &mut self,
+        column: GpuColumn<GpuInstance>,
+        at: Rotation,
+    ) -> GpuExpression<F> {
         self.queried_cells.push((column, at).into());
         GpuExpression::Instance(GpuInstanceQuery {
             index: Some(self.meta.query_instance_index(column, at)),
@@ -2290,12 +2309,20 @@ impl<'a, F: Field> GpuVirtualCells<'a, F> {
     }
 
     /// Query an GpuAny column at a relative position
-    pub fn query_any<C: Into<GpuColumn<GpuAny>>>(&mut self, column: C, at: Rotation) -> GpuExpression<F> {
+    pub fn query_any<C: Into<GpuColumn<GpuAny>>>(
+        &mut self,
+        column: C,
+        at: Rotation,
+    ) -> GpuExpression<F> {
         let column = column.into();
         match column.column_type() {
-            GpuAny::Advice(_) => self.query_advice(GpuColumn::<GpuAdvice>::try_from(column).unwrap(), at),
+            GpuAny::Advice(_) => {
+                self.query_advice(GpuColumn::<GpuAdvice>::try_from(column).unwrap(), at)
+            }
             GpuAny::Fixed => self.query_fixed(GpuColumn::<GpuFixed>::try_from(column).unwrap(), at),
-            GpuAny::Instance => self.query_instance(GpuColumn::<GpuInstance>::try_from(column).unwrap(), at),
+            GpuAny::Instance => {
+                self.query_instance(GpuColumn::<GpuInstance>::try_from(column).unwrap(), at)
+            }
         }
     }
 
@@ -2364,7 +2391,9 @@ impl<F: Field> From<&halo2_axiom::plonk::Expression<F>> for GpuExpression<F> {
                 Box::new(GpuExpression::from(a.as_ref())),
                 Box::new(GpuExpression::from(b.as_ref())),
             ),
-            HExpr::Scaled(a, f) => GpuExpression::Scaled(Box::new(GpuExpression::from(a.as_ref())), *f),
+            HExpr::Scaled(a, f) => {
+                GpuExpression::Scaled(Box::new(GpuExpression::from(a.as_ref())), *f)
+            }
         }
     }
 }

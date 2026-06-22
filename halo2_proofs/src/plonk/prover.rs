@@ -14,8 +14,17 @@ use super::{
     // The fork backend `sealed::Phase` matches `pk.cs.phases()` (a
     // `GpuConstraintSystem`); the per-phase witness loop tracks it internally.
     circuit::sealed::{self},
-    lookup, permutation, vanishing, ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX,
-    ChallengeY, GpuError, GpuProvingKey, ProvingKey,
+    lookup,
+    permutation,
+    vanishing,
+    ChallengeBeta,
+    ChallengeGamma,
+    ChallengeTheta,
+    ChallengeX,
+    ChallengeY,
+    GpuError,
+    GpuProvingKey,
+    ProvingKey,
 };
 use crate::{
     arithmetic::CurveAffine,
@@ -28,8 +37,8 @@ use crate::{
     // `batch_invert_assigned_device` boundary. The fork backend cs is reached
     // only via `pk.cs` (a `GpuConstraintSystem`) after synthesis completes.
     plonk::{
-        evaluation, Advice, Any, Assigned, Assignment, Challenge, Circuit, Column, ConstraintSystem,
-        Fixed, FloorPlanner, GpuAssigned, Instance, Selector,
+        evaluation, Advice, Any, Assigned, Assignment, Challenge, Circuit, Column,
+        ConstraintSystem, Fixed, FloorPlanner, GpuAssigned, Instance, Selector,
     },
     poly::{
         commitment::{Blind, CommitmentScheme, Params, Prover},
@@ -255,8 +264,8 @@ where
             // panic-on-unknown contract (create_proof forbids `Value::unknown()`).
             let mut assigned = None;
             to.map(|v| assigned = Some(v));
-            *advice_get_mut = assigned
-                .expect("No Value::unknown() in advice column allowed during create_proof");
+            *advice_get_mut =
+                assigned.expect("No Value::unknown() in advice column allowed during create_proof");
             let immutable_raw_ptr = advice_get_mut as *const Assigned<F>;
             Value::known(unsafe { &*immutable_raw_ptr })
         }

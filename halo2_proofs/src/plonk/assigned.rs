@@ -48,9 +48,7 @@ impl<F> From<halo2_axiom::plonk::Assigned<F>> for GpuAssigned<F> {
         match val {
             halo2_axiom::plonk::Assigned::Zero => GpuAssigned::Zero,
             halo2_axiom::plonk::Assigned::Trivial(num) => GpuAssigned::Trivial(num),
-            halo2_axiom::plonk::Assigned::Rational(num, denom) => {
-                GpuAssigned::Rational(num, denom)
-            }
+            halo2_axiom::plonk::Assigned::Rational(num, denom) => GpuAssigned::Rational(num, denom),
         }
     }
 }
@@ -469,7 +467,10 @@ pub(crate) fn verify_assigned_layout<F: Field>() {
 
     let trivial = GpuAssigned::<F>::Trivial(num);
     let tb = unsafe {
-        std::slice::from_raw_parts(&trivial as *const GpuAssigned<F> as *const u8, stride as usize)
+        std::slice::from_raw_parts(
+            &trivial as *const GpuAssigned<F> as *const u8,
+            stride as usize,
+        )
     };
     assert_eq!(
         tb[0], 1,
