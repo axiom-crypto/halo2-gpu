@@ -1477,7 +1477,7 @@ pub struct GpuConstraintSystem<F: Field> {
 // Load-bearing: referenced as `cs: GpuPinnedConstraintSystem<'a, ...>` inside
 // `PinnedVerificationKey`, whose Debug output is hashed into `vk.transcript_repr`
 // via Blake2b. Removing fields would change the VK transcript representation.
-#[allow(dead_code)]
+#[allow(dead_code, reason = "read via Debug → hashed into transcript_repr")]
 pub struct GpuPinnedConstraintSystem<'a, F: Field> {
     num_fixed_columns: &'a usize,
     num_advice_columns: &'a usize,
