@@ -7,9 +7,8 @@
 //! `openvm` stack calls (`keygen_pk2`, `keygen_vk_custom`, `keygen_pk`), while
 //! keeping the GPU `Params` on the input side.
 //!
-//! Port of the GPU-local keygen recovered at commit `b222e4d`, retargeted to
-//! assemble the canonical key types via halo2-axiom's `from_parts` constructors.
-//! GPU acceleration is preserved by construction:
+//! Assembles the canonical key types via halo2-axiom's `from_parts`
+//! constructors. GPU acceleration is preserved by construction:
 //!
 //! * fixed-column + selector commitments via **GPU MSM** `params.commit_lagrange`;
 //! * fixed/basis/σ polynomials via **GPU iFFT** `domain.lagrange_to_coeff[_many]`;

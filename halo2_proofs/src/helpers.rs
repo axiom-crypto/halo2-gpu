@@ -3,11 +3,11 @@ use halo2curves::{serde::SerdeObject, CurveAffine};
 
 use std::io;
 
-// The serde format is the CANONICAL halo2-axiom `SerdeFormat`, re-exported so
-// consumers that call canonical `ProvingKey`/`VerifyingKey` read/write (e.g.
-// `snark-verifier-sdk`) pass the same type the canonical key methods expect.
-// The GPU crate's own serde (`ParamsKZG`, the `Serde*` traits below) matches on
-// the same three variants, so this is a drop-in for the former fork enum.
+// The serde format is the halo2-axiom `SerdeFormat`, re-exported so that
+// consumers calling `ProvingKey`/`VerifyingKey` read/write (e.g.
+// `snark-verifier-sdk`) pass the type the key methods expect. The GPU crate's
+// own serde (`ParamsKZG`, the `Serde*` traits below) matches on the same three
+// variants.
 pub use halo2_axiom::SerdeFormat;
 
 // Keep this trait for compatibility with IPA serialization

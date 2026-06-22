@@ -2,10 +2,10 @@ use ff::{Field, PrimeField};
 use group::Curve;
 use rayon::prelude::*;
 
-// Keygen consumes the CANONICAL constraint system, so the permutation argument
-// (and its columns) are the canonical halo2-axiom types — not the GPU fork
-// `permutation::Argument`. `Any`/`Column` likewise resolve to the canonical
-// frontend re-exports; `Error` is the GPU crate's own error enum.
+// Keygen consumes the halo2-axiom constraint system, so the permutation
+// argument (and its columns) are the halo2-axiom types — not the GPU fork
+// `permutation::Argument`. `Any`/`Column` likewise resolve to the halo2-axiom
+// re-exports; errors are returned as the GPU crate's `GpuError`.
 use crate::arithmetic::CurveAffine;
 use crate::cpu::arithmetic::parallelize;
 use crate::plonk::{Any, Column, GpuError};
@@ -158,9 +158,9 @@ impl Assembly {
 }
 
 /// Computes the σ-permutation polynomials (Lagrange basis) from the copy
-/// `mapping`, then GPU-iFFTs them to Coeff form, returning the **canonical**
-/// permutation `ProvingKey` via `from_parts`. Port of the b222e4d GPU keygen
-/// (GPU `lagrange_to_coeff_many`; no CPU-MSM).
+/// `mapping`, then GPU-iFFTs them to Coeff form, returning the halo2-axiom
+/// permutation `ProvingKey` via `from_parts` (GPU `lagrange_to_coeff_many`;
+/// no CPU-MSM).
 pub(crate) fn build_pk<'params, C: CurveAffine, P: Params<'params, C>>(
     params: &P,
     domain: &EvaluationDomain<C::Scalar>,

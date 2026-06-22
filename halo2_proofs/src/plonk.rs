@@ -39,21 +39,18 @@ use evaluation::Evaluator;
 use std::borrow::Cow;
 use std::io;
 
-// The canonical proving/verifying key structs are the halo2-axiom CPU types:
-// one source-of-truth struct family, byte-identical serialization for CPU and
-// GPU by construction. The GPU crate keeps its own forked composing types,
-// renamed `Gpu*` (`GpuConstraintSystem`/`GpuExpression`/`GpuGate`/`GpuColumn`/…,
-// exported by `pub use circuit::*` above), which the GPU prover/verifier operate
-// on after a cheap host-only rebuild (`GpuProvingKey`/`GpuVerifyingKey::from_host`)
-// via the `From<&canonical ConstraintSystem> for GpuConstraintSystem` bridge.
+// The proving/verifying key structs are the halo2-axiom types: one
+// source-of-truth struct family, byte-identical serialization for CPU and GPU.
+// The GPU prover/verifier operate on the `Gpu*` forks (exported by
+// `pub use circuit::*` above), rebuilt host-only from a key via
+// `GpuProvingKey`/`GpuVerifyingKey::from_host`. See `ARCHITECTURE.md`.
 pub use halo2_axiom::plonk::{ProvingKey, VerifyingKey};
 
-// Canonical frontend (the ESCALATE re-export). Consumers (`halo2-base`,
-// `snark-verifier`, `openvm`) and the GPU crate's own keygen/prover synthesis
-// resolve these names to the canonical halo2-axiom types, so `impl Circuit` and
-// `configure(&mut ConstraintSystem)` are canonical end-to-end. The `Gpu*` forks
-// (re-exported above) remain the backend's working types, rebuilt from canonical
-// via the `From` bridge.
+// The synthesis frontend is the halo2-axiom one. Consumers (`halo2-base`,
+// `snark-verifier`, `openvm`) and this crate's own keygen/prover resolve these
+// names to the halo2-axiom types, so `impl Circuit` and
+// `configure(&mut ConstraintSystem)` are halo2-axiom end-to-end; the `Gpu*`
+// forks are rebuilt from them via the `From` bridge.
 pub use halo2_axiom::plonk::{
     Advice, AdviceQuery, Any, Assigned, Assignment, Challenge, Circuit, Column, ColumnType,
     Constraint, ConstraintSystem, Constraints, Error, Expression, FirstPhase, Fixed, FixedQuery,
@@ -141,8 +138,6 @@ pub struct GpuProvingKey<'a, C: CurveAffine> {
     domain: EvaluationDomain<C::Scalar>,
     /// GPU quotient evaluator, `Evaluator::new(&self.cs)`.
     ev: Evaluator<C>,
-    // (the `cs` field below is the GPU fork `GpuConstraintSystem`, rebuilt from
-    // the canonical cs via the `From` bridge — see `from_cow`)
     /// Cached maximum degree of `cs` (constant after construction). Avoids
     /// rescanning all gates/lookups via `cs.degree()` on the hot proof path
     /// (the permutation commit and the quotient `EvaluatorVkView`).
