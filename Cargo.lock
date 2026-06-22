@@ -2142,7 +2142,7 @@ dependencies = [
 [[package]]
 name = "halo2-axiom"
 version = "0.5.1"
-source = "git+https://github.com/axiom-crypto/halo2?branch=feat%2Fproving-key-accessors#b2a264aadbae536039918938532041e124519f81"
+source = "git+https://github.com/axiom-crypto/halo2?branch=main#e3f4a4da2a36b44393a2dfab2b2db399cc92829b"
 dependencies = [
  "blake2b_simd",
  "crossbeam",
@@ -2179,7 +2179,7 @@ dependencies = [
  "getrandom 0.2.17",
  "git-version",
  "group 0.13.0",
- "halo2-axiom 0.5.1 (git+https://github.com/axiom-crypto/halo2?branch=feat%2Fproving-key-accessors)",
+ "halo2-axiom 0.5.1 (git+https://github.com/axiom-crypto/halo2?branch=main)",
  "halo2_legacy_pdqsort",
  "halo2curves-axiom 0.7.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "itertools 0.11.0",
