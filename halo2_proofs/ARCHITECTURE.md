@@ -71,9 +71,9 @@ forced by upstream visibility, not by choice:
 
 | Re-defined here | Where | Why it cannot be re-exported |
 |---|---|---|
-| `CurveRead`, `SerdeCurveAffine`, `SerdePrimeField` | `src/helpers.rs` | `pub(crate)`/private serde helper traits upstream. |
+| `CurveRead`, `SerdeCurveAffine`, `SerdePrimeField` | `src/helpers.rs` | `CurveRead` is `pub(crate)` upstream; `SerdeCurveAffine`/`SerdePrimeField` are `pub` traits inside halo2-axiom's *private* `helpers` module, so they are externally unnameable and cannot be re-exported. |
 | `read_n_points`, `read_n_scalars` | `src/transcript.rs` | `pub(crate)` batch-read helpers upstream; re-defined as thin wrappers over the re-exported `TranscriptRead`. |
-| keygen `Assembly` | `src/plonk/keygen.rs` | Canonical `Assembly` is private upstream; this one also holds device-representation columns. Implements the canonical `Assignment` so it is still driven by the canonical `Circuit::synthesize`. |
+| keygen `Assembly` | `src/plonk/keygen.rs` | Canonical `Assembly` is private upstream. The local one synthesizes the fixed columns (canonical `Assigned`), collects selectors/copy constraints, and drives the local permutation assembly, then feeds the GPU-accelerated keygen steps — which convert to `GpuAssigned` only at the batch-inversion boundary. Implements the canonical `Assignment` so it is still driven by the canonical `Circuit::synthesize`. |
 | `GpuExpression` | `src/plonk/circuit.rs` | The substrate for the GPU evaluator/keygen AST. Built from the canonical `Expression` via `From`; removing it would require the `GraphEvaluator` to consume the canonical `Expression` directly (a large, separate refactor). |
 | permutation `Argument` / `VerifyingKey` forks | `src/plonk/permutation.rs` | Carry GPU-specific commit behavior; built from the canonical permutation argument via `From`. |
 

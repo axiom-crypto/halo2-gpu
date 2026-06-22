@@ -1474,10 +1474,16 @@ pub struct GpuConstraintSystem<F: Field> {
 }
 
 /// Represents the minimal parameters that determine a `GpuConstraintSystem`.
-// Load-bearing: referenced as `cs: GpuPinnedConstraintSystem<'a, ...>` inside
-// `PinnedVerificationKey`, whose Debug output is hashed into `vk.transcript_repr`
-// via Blake2b. Removing fields would change the VK transcript representation.
-#[allow(dead_code, reason = "read via Debug → hashed into transcript_repr")]
+// Vestigial fork-parity mirror of halo2-axiom's canonical `PinnedConstraintSystem`.
+// Not read on any live path: `GpuConstraintSystem::pinned()` has no callers, and the
+// GPU key copies `transcript_repr` from the canonical VK (`GpuVerifyingKey::from_host`
+// / `GpuProvingKey::from_cow`) rather than hashing this struct's `Debug` output. GPU
+// keygen returns the canonical `VerifyingKey::from_parts(...)`, so the transcript
+// representative is computed by halo2-axiom's canonical pinned VK/CS.
+#[allow(
+    dead_code,
+    reason = "vestigial fork-parity mirror of canonical PinnedConstraintSystem; not read on any live path (transcript_repr is taken from the canonical VK)"
+)]
 pub struct GpuPinnedConstraintSystem<'a, F: Field> {
     num_fixed_columns: &'a usize,
     num_advice_columns: &'a usize,
