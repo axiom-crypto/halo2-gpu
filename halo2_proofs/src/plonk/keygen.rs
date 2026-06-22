@@ -27,6 +27,9 @@ use std::ops::Range;
 use group::ff::{Field, FromUniformBytes};
 use group::Curve;
 
+#[cfg(feature = "profile")]
+use crate::{end_timer, start_timer};
+
 use super::{permutation, Circuit, GpuError, ProvingKey, VerifyingKey};
 use crate::arithmetic::CurveAffine;
 use crate::circuit::Value;
@@ -263,6 +266,8 @@ where
         return Err(GpuError::not_enough_rows_available(params.k()));
     }
 
+    #[cfg(feature = "profile")]
+    let assembly_time = start_timer!(|| "create assembly object");
     let mut assembly: Assembly<C::Scalar> = Assembly {
         k: params.k(),
         fixed: vec![domain.empty_lagrange_assigned(); cs.num_fixed_columns()],
@@ -271,16 +276,26 @@ where
         usable_rows: 0..params.n() as usize - (cs.blinding_factors() + 1),
         _marker: PhantomData,
     };
+    #[cfg(feature = "profile")]
+    end_timer!(assembly_time);
 
     // Synthesize the circuit to obtain URS.
+    #[cfg(feature = "profile")]
+    let synthesize_time = start_timer!(|| "synthesize");
     ConcreteCircuit::FloorPlanner::synthesize(
         &mut assembly,
         circuit,
         config,
         cs.constants().clone(),
     )?;
+    #[cfg(feature = "profile")]
+    end_timer!(synthesize_time);
 
+    #[cfg(feature = "profile")]
+    let batch_invert_time = start_timer!(|| "batch invert fixed columns");
     let mut fixed = batch_invert_fixed::<C::Scalar>(&assembly.fixed);
+    #[cfg(feature = "profile")]
+    end_timer!(batch_invert_time);
     let (cs, selector_polys) = if compress_selectors {
         cs.compress_selectors(assembly.selectors.clone())
     } else {
@@ -375,6 +390,8 @@ where
         return Err(GpuError::not_enough_rows_available(params.k()));
     }
 
+    #[cfg(feature = "profile")]
+    let assembly_time = start_timer!(|| "create assembly object");
     let mut assembly: Assembly<C::Scalar> = Assembly {
         k: params.k(),
         fixed: vec![domain.empty_lagrange_assigned(); cs.num_fixed_columns()],
@@ -383,16 +400,26 @@ where
         usable_rows: 0..params.n() as usize - (cs.blinding_factors() + 1),
         _marker: PhantomData,
     };
+    #[cfg(feature = "profile")]
+    end_timer!(assembly_time);
 
     // Synthesize the circuit to obtain URS.
+    #[cfg(feature = "profile")]
+    let synthesize_time = start_timer!(|| "synthesize");
     ConcreteCircuit::FloorPlanner::synthesize(
         &mut assembly,
         circuit,
         config,
         cs.constants().clone(),
     )?;
+    #[cfg(feature = "profile")]
+    end_timer!(synthesize_time);
 
+    #[cfg(feature = "profile")]
+    let batch_invert_time = start_timer!(|| "batch invert fixed columns");
     let mut fixed = batch_invert_fixed::<C::Scalar>(&assembly.fixed);
+    #[cfg(feature = "profile")]
+    end_timer!(batch_invert_time);
     let (cs, selector_polys) = if compress_selectors {
         cs.compress_selectors(assembly.selectors.clone())
     } else {
