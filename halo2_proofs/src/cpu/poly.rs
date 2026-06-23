@@ -16,8 +16,8 @@ use crate::cuda::HaloGpuError;
 
 pub(crate) mod domain;
 
-// CPU reference for the device batch-inversion equivalence tests.
-#[allow(dead_code)]
+// CPU batch-inversion: used by keygen's fixed-column path and as the reference
+// for the device batch-inversion equivalence tests.
 pub(crate) fn batch_invert_assigned<F: Field, PR>(
     assigned: impl AsRef<[PR]>,
 ) -> Vec<Polynomial<F, LagrangeCoeff>>
@@ -27,7 +27,6 @@ where
     batch_invert_assigned_par(assigned)
 }
 
-#[allow(dead_code)]
 pub(crate) fn batch_invert_assigned_par<F: Field, PR>(
     assigned: impl AsRef<[PR]>,
 ) -> Vec<Polynomial<F, LagrangeCoeff>>
