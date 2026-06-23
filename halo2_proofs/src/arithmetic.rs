@@ -8,6 +8,10 @@ use ff::{BatchInvert, PrimeField};
 use group::{prime::PrimeCurveAffine, Curve, Group as _, GroupOpsOwned, ScalarMulOwned};
 pub use halo2curves::{CurveAffine, CurveExt};
 
+// `powers(base)` yields `base^0, base^1, …`, re-exported from canonical halo2-axiom
+// so host folds share one source of truth with downstream consumers.
+pub use halo2_axiom::arithmetic::powers;
+
 /// Mirrors `DENSE_POWER_DEGREE` in `halo2_proofs/cuda/include/kernel/omega.h`.
 /// The GPU omega LUT layout assumes this value — changing one side without
 /// the other produces silently wrong FFT twiddles.
@@ -236,10 +240,6 @@ pub(crate) fn evaluate_vanishing_polynomial<F: Field>(roots: &[F], z: F) -> F {
         });
         parts.iter().fold(F::ONE, |acc, part| acc * part)
     }
-}
-
-pub(crate) fn powers<F: Field>(base: F) -> impl Iterator<Item = F> {
-    std::iter::successors(Some(F::ONE), move |power| Some(base * power))
 }
 
 #[cfg(test)]

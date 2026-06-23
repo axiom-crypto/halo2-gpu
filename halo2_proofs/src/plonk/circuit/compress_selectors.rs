@@ -1,4 +1,4 @@
-use super::Expression;
+use super::GpuExpression;
 use ff::Field;
 
 /// This describes a selector and where it is activated.
@@ -28,33 +28,23 @@ pub struct SelectorAssignment<F> {
     pub combination_index: usize,
 
     /// The expression we wish to substitute with
-    pub expression: Expression<F>,
+    pub expression: GpuExpression<F>,
 }
 
-/// This function takes a vector that defines each selector as well as a closure
-/// used to allocate new fixed columns, and returns the assignment of each
-/// combination as well as details about each selector assignment.
+/// Combines selectors into fixed columns, given a closure that allocates a new
+/// fixed column (queried at `Rotation::cur()`) on demand and `max_degree`, the
+/// maximum allowed gate degree.
 ///
-/// This function takes
-/// * `selectors`, a vector of `SelectorDescription`s that describe each
-///   selector
-/// * `max_degree`, the maximum allowed degree of any gate
-/// * `allocate_fixed_columns`, a closure that constructs a new fixed column and
-///   queries it at Rotation::cur(), returning the expression
-///
-/// and returns `Vec<Vec<F>>` containing the assignment of each new fixed column
-/// (which each correspond to a combination) as well as a vector of
-/// `SelectorAssignment` that the caller can use to perform the necessary
-/// substitutions to the constraint system.
-///
-/// This function is completely deterministic.
+/// Returns the assignment of each new fixed column (one per combination) plus a
+/// `SelectorAssignment` per selector, which the caller uses to substitute the
+/// selectors in the constraint system. Completely deterministic.
 pub fn process<F: Field, E>(
     mut selectors: Vec<SelectorDescription>,
     max_degree: usize,
     mut allocate_fixed_column: E,
 ) -> (Vec<Vec<F>>, Vec<SelectorAssignment<F>>)
 where
-    E: FnMut() -> Expression<F>,
+    E: FnMut() -> GpuExpression<F>,
 {
     if selectors.is_empty() {
         // There is nothing to optimize.
@@ -132,10 +122,8 @@ where
         }
         added[i] = true;
         assert!(selector.max_degree <= max_degree);
-        // This is used to keep track of the largest degree gate involved in the
-        // combination so far. We subtract by one to omit the virtual selector
-        // which will be substituted by the caller with the expression we give
-        // them.
+        // Largest gate degree in the combination so far, minus one to omit the
+        // virtual selector (the caller substitutes it with our expression).
         let mut d = selector.max_degree - 1;
         let mut combination = vec![selector];
         let mut combination_added = vec![i];
@@ -161,9 +149,8 @@ where
                 }
             }
 
-            // Can the new selector join the combination? Reminder: we use
-            // selector.max_degree - 1 to omit the influence of the virtual
-            // selector on the degree, as it will be substituted.
+            // Can the new selector join the combination? (max_degree - 1 omits
+            // the virtual selector, which will be substituted.)
             let new_d = std::cmp::max(d, selector.max_degree - 1);
             if new_d + combination.len() + 1 > max_degree {
                 // Guess not.
@@ -195,7 +182,7 @@ where
             let mut root = F::ONE;
             for _ in 0..combination_len {
                 if root != assigned_root {
-                    expression = expression * (Expression::Constant(root) - query.clone());
+                    expression = expression * (GpuExpression::Constant(root) - query.clone());
                 }
                 root += F::ONE;
             }
@@ -229,7 +216,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{plonk::FixedQuery, poly::Rotation};
+    use crate::{plonk::GpuFixedQuery as FixedQuery, poly::Rotation};
     use halo2curves::pasta::Fp;
     use proptest::collection::{vec, SizeRange};
     use proptest::prelude::*;
@@ -280,7 +267,7 @@ mod tests {
             let mut query = 0;
             let (combination_assignments, selector_assignments) =
                 process::<Fp, _>(selectors.clone(), max_degree, || {
-                    let tmp = Expression::Fixed(FixedQuery {
+                    let tmp = GpuExpression::Fixed(FixedQuery {
                         index: Some(query),
                         column_index: query,
                         rotation: Rotation::cur(),

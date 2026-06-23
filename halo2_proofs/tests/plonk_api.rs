@@ -4,7 +4,6 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
-// use assert_matches::assert_matches;
 use ff::{FromUniformBytes, WithSmallOrderMulGroup};
 use halo2_axiom_gpu::arithmetic::Field;
 use halo2_axiom_gpu::circuit::{Cell, Layouter, SimpleFloorPlanner, Value};
@@ -22,7 +21,7 @@ use halo2_axiom_gpu::transcript::{
     Blake2bRead, Blake2bWrite, Challenge255, EncodedChallenge, TranscriptReadBuffer,
     TranscriptWriterBuffer,
 };
-use halo2curves::bn256::Bn256;
+use halo2curves::bn256::{Bn256, Fr, G1Affine};
 use log::info;
 use rand_core::{OsRng, RngCore};
 use std::fs::File;
@@ -374,50 +373,16 @@ fn plonk_api() {
         }};
     }
 
-    macro_rules! bad_keys {
-        ($scheme:ident) => {{
-            let (_, _, lookup_table) = common!($scheme);
-            let empty_circuit: MyCircuit<<$scheme as CommitmentScheme>::Scalar> = MyCircuit {
-                a: Value::unknown(),
-                lookup_table: lookup_table.clone(),
-            };
-
-            // Check that we get an error if we try to initialize the proving key with a value of
-            // k that is too small for the minimum required number of rows.
-            let much_too_small_params= <$scheme as CommitmentScheme>::ParamsProver::new(1);
-            assert_matches!(
-                keygen_vk(&much_too_small_params, &empty_circuit),
-                Err(Error::NotEnoughRowsAvailable {
-                    current_k,
-                }) if current_k == 1
-            );
-
-            // Check that we get an error if we try to initialize the proving key with a value of
-            // k that is too small for the number of rows the circuit uses.
-            let slightly_too_small_params = <$scheme as CommitmentScheme>::ParamsProver::new(K-1);
-            assert_matches!(
-                keygen_vk(&slightly_too_small_params, &empty_circuit),
-                Err(Error::NotEnoughRowsAvailable {
-                    current_k,
-                }) if current_k == K - 1
-            );
-        }};
-    }
-
-    fn keygen<Scheme: CommitmentScheme>(params: &Scheme::ParamsProver) -> ProvingKey<Scheme::Curve>
-    where
-        Scheme::Scalar: FromUniformBytes<64> + WithSmallOrderMulGroup<3>,
-        <Scheme as CommitmentScheme>::ParamsProver: Sync,
-    {
-        let (_, _, lookup_table) = common!(Scheme);
-        let empty_circuit: MyCircuit<Scheme::Scalar> = MyCircuit {
+    fn keygen(params: &ParamsKZG<Bn256>) -> ProvingKey<G1Affine> {
+        // Keygen uses the shared `params` SRS; the lookup table mirrors `common!`.
+        let a = Fr::from(2834758237) * Fr::ZETA;
+        let instance = Fr::ONE + Fr::ONE;
+        let lookup_table = vec![instance, a, a, Fr::ZERO];
+        let empty_circuit: MyCircuit<Fr> = MyCircuit {
             a: Value::unknown(),
             lookup_table,
         };
-
-        // Initialize the proving key
         let vk = keygen_vk(params, &empty_circuit).expect("keygen_vk should not fail");
-
         keygen_pk(params, vk, &empty_circuit).expect("keygen_pk should not fail")
     }
 
@@ -491,7 +456,6 @@ fn plonk_api() {
             params_verifier,
             vk,
             strategy,
-            // &[&[&pubinputs[..]], &[&pubinputs[..]]],
             &[&[&pubinputs[..]]],
             &mut transcript,
         )
@@ -526,13 +490,11 @@ fn plonk_api() {
 
         env_logger::init();
         type Scheme = KZGCommitmentScheme<Bn256>;
-        //bad_keys!(Scheme);
 
-        // let params = ParamsKZG::<Bn256>::new(K);
         let params = create_or_load_params(K);
         let rng = OsRng;
 
-        let pk = keygen::<KZGCommitmentScheme<_>>(&params);
+        let pk = keygen(&params);
 
         let proof = create_proof::<_, ProverGWC<_>, _, _, Blake2bWrite<_, _, Challenge255<_>>>(
             rng, &params, &pk,
@@ -556,12 +518,11 @@ fn plonk_api() {
         use halo2curves::bn256::Bn256;
 
         type Scheme = KZGCommitmentScheme<Bn256>;
-        //bad_keys!(Scheme);
 
         let params = ParamsKZG::<Bn256>::new(K);
         let rng = OsRng;
 
-        let pk = keygen::<KZGCommitmentScheme<_>>(&params);
+        let pk = keygen(&params);
 
         let proof = create_proof::<_, ProverSHPLONK<_>, _, _, Blake2bWrite<_, _, Challenge255<_>>>(
             rng, &params, &pk,

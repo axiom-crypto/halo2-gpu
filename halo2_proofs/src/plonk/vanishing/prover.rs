@@ -16,7 +16,7 @@ use crate::cuda::funcs::{
 use crate::cuda::utils::HALO2_GPU_CTX;
 use crate::{
     arithmetic::{eval_polynomial, CurveAffine},
-    plonk::{ChallengeX, Error},
+    plonk::{ChallengeX, GpuError},
     poly::{
         commitment::{Blind, ParamsProver},
         Coeff, Device, DeviceChunks, DevicePolyExt, EvaluationDomain, ExtendedLagrangeCoeff, Host,
@@ -75,7 +75,7 @@ impl<C: CurveAffine> Argument<C> {
         domain: &EvaluationDomain<C::Scalar>,
         _: R,
         transcript: &mut T,
-    ) -> Result<Committed<C>, Error> {
+    ) -> Result<Committed<C>, GpuError> {
         crate::perf_section!("vanishing.commit");
         // Sample a random polynomial of degree n - 1
         let mut random_poly = domain.empty_coeff();
@@ -110,7 +110,7 @@ impl<C: CurveAffine> Committed<C> {
         h_poly: crate::poly::MaybeDevice<C::Scalar, ExtendedLagrangeCoeff>,
         mut rng: R,
         transcript: &mut T,
-    ) -> Result<Constructed<C>, Error>
+    ) -> Result<Constructed<C>, GpuError>
     where
         C::Scalar: WithSmallOrderMulGroup<3>,
     {
@@ -193,7 +193,7 @@ impl<C: CurveAffine> Constructed<C> {
         xn: C::Scalar,
         domain: &EvaluationDomain<C::Scalar>,
         transcript: &mut T,
-    ) -> Result<Evaluated<C>, Error> {
+    ) -> Result<Evaluated<C>, GpuError> {
         crate::perf_section!("vanishing.evaluate");
         // Device-resident h_pieces fold via an explicit accumulator loop
         // (`poly_scale_device` + `poly_multiply_add_device`); host-resident
@@ -223,9 +223,9 @@ impl<C: CurveAffine> Constructed<C> {
                     for piece in pieces.iter().rev() {
                         let d_eval = piece.device_buf();
                         poly_scale_device_with_d_s_minus_one(&mut d_acc, &d_xn_minus_one)
-                            .map_err(Error::HaloGpu)?;
+                            .map_err(GpuError::HaloGpu)?;
                         poly_multiply_add_device_with_d_scalar(&mut d_acc, d_eval, &d_one)
-                            .map_err(Error::HaloGpu)?;
+                            .map_err(GpuError::HaloGpu)?;
                     }
                 }
                 crate::poly::MaybeDevice::Device(

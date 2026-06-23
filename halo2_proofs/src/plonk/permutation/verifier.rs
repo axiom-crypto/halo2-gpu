@@ -1,7 +1,7 @@
 use ff::{Field, PrimeField};
 use std::iter;
 
-use super::super::{circuit::Any, ChallengeBeta, ChallengeGamma, ChallengeX};
+use super::super::{circuit::GpuAny, ChallengeBeta, ChallengeGamma, ChallengeX};
 use super::{Argument, VerifyingKey};
 use crate::{
     arithmetic::CurveAffine,
@@ -40,7 +40,7 @@ impl Argument {
         T: TranscriptRead<C, E>,
     >(
         &self,
-        vk: &plonk::VerifyingKey<C>,
+        vk: &plonk::GpuVerifyingKey<C>,
         transcript: &mut T,
     ) -> Result<Committed<C>, Error> {
         let chunk_len = vk.cs_degree - 2;
@@ -106,7 +106,7 @@ impl<C: CurveAffine> Evaluated<C> {
     #[allow(clippy::too_many_arguments)]
     pub(in crate::plonk) fn expressions<'a>(
         &'a self,
-        vk: &'a plonk::VerifyingKey<C>,
+        vk: &'a plonk::GpuVerifyingKey<C>,
         p: &'a Argument,
         common: &'a CommonEvaluated<C>,
         advice_evals: &'a [C::Scalar],
@@ -165,13 +165,13 @@ impl<C: CurveAffine> Evaluated<C> {
                         for (eval, permutation_eval) in columns
                             .iter()
                             .map(|&column| match column.column_type() {
-                                Any::Advice(_) => {
+                                GpuAny::Advice(_) => {
                                     advice_evals[vk.cs.get_any_query_index(column, Rotation::cur())]
                                 }
-                                Any::Fixed => {
+                                GpuAny::Fixed => {
                                     fixed_evals[vk.cs.get_any_query_index(column, Rotation::cur())]
                                 }
-                                Any::Instance => {
+                                GpuAny::Instance => {
                                     instance_evals
                                         [vk.cs.get_any_query_index(column, Rotation::cur())]
                                 }
@@ -186,13 +186,13 @@ impl<C: CurveAffine> Evaluated<C> {
                             * &(<C::Scalar as PrimeField>::DELTA
                                 .pow_vartime([(chunk_index * chunk_len) as u64]));
                         for eval in columns.iter().map(|&column| match column.column_type() {
-                            Any::Advice(_) => {
+                            GpuAny::Advice(_) => {
                                 advice_evals[vk.cs.get_any_query_index(column, Rotation::cur())]
                             }
-                            Any::Fixed => {
+                            GpuAny::Fixed => {
                                 fixed_evals[vk.cs.get_any_query_index(column, Rotation::cur())]
                             }
-                            Any::Instance => {
+                            GpuAny::Instance => {
                                 instance_evals[vk.cs.get_any_query_index(column, Rotation::cur())]
                             }
                         }) {
@@ -207,7 +207,7 @@ impl<C: CurveAffine> Evaluated<C> {
 
     pub(in crate::plonk) fn queries<'r, M: MSM<C> + 'r>(
         &'r self,
-        vk: &'r plonk::VerifyingKey<C>,
+        vk: &'r plonk::GpuVerifyingKey<C>,
         x: ChallengeX<C>,
     ) -> impl Iterator<Item = VerifierQuery<'r, C, M>> + Clone {
         let blinding_factors = vk.cs.blinding_factors();
@@ -219,7 +219,6 @@ impl<C: CurveAffine> Evaluated<C> {
         iter::empty()
             .chain(self.sets.iter().flat_map(move |set| {
                 iter::empty()
-                    // Open permutation product commitments at x and \omega^{-1} x
                     // Open permutation product commitments at x and \omega x
                     .chain(Some(VerifierQuery::new_commitment(
                         &set.permutation_product_commitment,

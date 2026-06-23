@@ -1,29 +1,35 @@
+//! GPU-local key generation. Takes a GPU [`Params`](crate::poly::commitment::Params)
+//! and a canonical [`Circuit`](crate::plonk::Circuit); returns the canonical
+//! [`ProvingKey`]/[`VerifyingKey`]. Fixed/selector commitments use GPU MSM, σ
+//! polynomials GPU iFFT.
+
+use std::marker::PhantomData;
 use std::ops::Range;
 
-use super::{
-    circuit::{
-        Advice, Any, Assignment, Circuit, Column, ConstraintSystem, Fixed, FloorPlanner, Instance,
-        Selector,
-    },
-    evaluation::Evaluator,
-    permutation, Assigned, Challenge, Error, LagrangeCoeff, Polynomial, ProvingKey, VerifyingKey,
-};
-use crate::{
-    arithmetic::CurveAffine,
-    circuit::Value,
-    cpu::arithmetic::parallelize,
-    cpu::poly::batch_invert_assigned,
-    poly::{
-        commitment::{Blind, Params},
-        EvaluationDomain,
-    },
-};
-#[cfg(feature = "profile")]
-use ark_std::{end_timer, start_timer};
-use ff::{Field, FromUniformBytes};
+use group::ff::{Field, FromUniformBytes};
 use group::Curve;
 
-pub(crate) fn create_domain<C, ConcreteCircuit>(
+#[cfg(feature = "profile")]
+use crate::{end_timer, start_timer};
+
+use super::{permutation, Circuit, GpuError, ProvingKey, VerifyingKey};
+use crate::arithmetic::CurveAffine;
+use crate::circuit::Value;
+use crate::cpu::arithmetic::parallelize;
+use crate::cpu::poly::batch_invert_assigned;
+use crate::plonk::{
+    Advice, Any, Assigned, Assignment, Challenge, Column, ConstraintSystem, Fixed, FloorPlanner,
+    GpuAssigned, Instance, Selector,
+};
+use crate::poly::{
+    commitment::{Blind, Params},
+    EvaluationDomain, LagrangeCoeff, Polynomial,
+};
+
+/// Runs `Circuit::configure` to build the GPU evaluation domain, the canonical
+/// constraint system, and the circuit config. The vk's canonical-typed domain
+/// is reconstructed identically from `(degree, k)` by the callers.
+fn create_domain<C, ConcreteCircuit>(
     k: u32,
     #[cfg(feature = "circuit-params")] params: ConcreteCircuit::Params,
 ) -> (
@@ -42,22 +48,22 @@ where
     let config = ConcreteCircuit::configure(&mut cs);
 
     let degree = cs.degree();
-
     let domain = EvaluationDomain::new(degree as u32, k);
 
     (domain, cs, config)
 }
 
-/// Assembly to be used in circuit synthesis.
-#[derive(Debug)]
+/// Assembly accumulator for keygen synthesis; implements the canonical `Assignment` trait.
 struct Assembly<F: Field> {
     k: u32,
+    /// Converted to the device-repr `GpuAssigned` at the batch-inversion
+    /// boundary below.
     fixed: Vec<Polynomial<Assigned<F>, LagrangeCoeff>>,
     permutation: permutation::keygen::Assembly,
     selectors: Vec<Vec<bool>>,
     // A range of available rows for assignment and copies.
     usable_rows: Range<usize>,
-    _marker: std::marker::PhantomData<F>,
+    _marker: PhantomData<F>,
 }
 
 impl<F: Field> Assignment<F> for Assembly<F> {
@@ -70,23 +76,32 @@ impl<F: Field> Assignment<F> for Assembly<F> {
 
     fn exit_region(&mut self) {}
 
-    fn enable_selector<A, AR>(&mut self, _: A, selector: &Selector, row: usize) -> Result<(), Error>
+    fn enable_selector<A, AR>(
+        &mut self,
+        _: A,
+        selector: &Selector,
+        row: usize,
+    ) -> Result<(), halo2_axiom::plonk::Error>
     where
         A: FnOnce() -> AR,
         AR: Into<String>,
     {
         if !self.usable_rows.contains(&row) {
-            return Err(Error::not_enough_rows_available(self.k));
+            return Err(halo2_axiom::plonk::Error::NotEnoughRowsAvailable { current_k: self.k });
         }
 
-        self.selectors[selector.0][row] = true;
+        self.selectors[selector.index()][row] = true;
 
         Ok(())
     }
 
-    fn query_instance(&self, _: Column<Instance>, row: usize) -> Result<Value<F>, Error> {
+    fn query_instance(
+        &self,
+        _: Column<Instance>,
+        row: usize,
+    ) -> Result<Value<F>, halo2_axiom::plonk::Error> {
         if !self.usable_rows.contains(&row) {
-            return Err(Error::not_enough_rows_available(self.k));
+            return Err(halo2_axiom::plonk::Error::NotEnoughRowsAvailable { current_k: self.k });
         }
 
         // There is no instance in this context.
@@ -106,7 +121,7 @@ impl<F: Field> Assignment<F> for Assembly<F> {
         if !self.usable_rows.contains(&row) {
             panic!(
                 "Assign Fixed {:?}",
-                Error::not_enough_rows_available(self.k)
+                GpuError::not_enough_rows_available(self.k)
             );
         }
 
@@ -114,7 +129,12 @@ impl<F: Field> Assignment<F> for Assembly<F> {
             .fixed
             .get_mut(column.index())
             .and_then(|v| v.get_mut(row))
-            .unwrap_or_else(|| panic!("{:?}", Error::BoundsFailure)) = to;
+            .unwrap_or_else(|| {
+                panic!(
+                    "{:?}",
+                    GpuError::Canonical(halo2_axiom::plonk::Error::BoundsFailure)
+                )
+            }) = to;
     }
 
     fn copy(
@@ -125,7 +145,7 @@ impl<F: Field> Assignment<F> for Assembly<F> {
         right_row: usize,
     ) {
         if !self.usable_rows.contains(&left_row) || !self.usable_rows.contains(&right_row) {
-            panic!("{:?}", Error::not_enough_rows_available(self.k));
+            panic!("{:?}", GpuError::not_enough_rows_available(self.k));
         }
 
         self.permutation
@@ -138,17 +158,21 @@ impl<F: Field> Assignment<F> for Assembly<F> {
         column: Column<Fixed>,
         from_row: usize,
         to: Value<Assigned<F>>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), halo2_axiom::plonk::Error> {
         if !self.usable_rows.contains(&from_row) {
-            return Err(Error::not_enough_rows_available(self.k));
+            return Err(halo2_axiom::plonk::Error::NotEnoughRowsAvailable { current_k: self.k });
         }
 
         let col = self
             .fixed
             .get_mut(column.index())
-            .ok_or(Error::BoundsFailure)?;
+            .ok_or(halo2_axiom::plonk::Error::BoundsFailure)?;
 
-        let filler = to.assign()?;
+        // Canonical `Value::assign()` is `pub(crate)`; extract the known value
+        // via the public `map` closure (erroring on unknown, as `assign` does).
+        let mut filler = None;
+        to.map(|v| filler = Some(v));
+        let filler = filler.ok_or(halo2_axiom::plonk::Error::Synthesis)?;
         for row in self.usable_rows.clone().skip(from_row) {
             col[row] = filler;
         }
@@ -177,12 +201,13 @@ impl<F: Field> Assignment<F> for Assembly<F> {
     fn pop_namespace(&mut self, _: Option<String>) {}
 }
 
-/// Generate a `VerifyingKey` from an instance of `Circuit`.
+/// Generate a [`VerifyingKey`] from an instance of [`Circuit`].
+///
 /// By default, selector compression is turned **off**.
 pub fn keygen_vk<'params, C, P, ConcreteCircuit>(
     params: &P,
     circuit: &ConcreteCircuit,
-) -> Result<VerifyingKey<C>, Error>
+) -> Result<VerifyingKey<C>, GpuError>
 where
     C: CurveAffine,
     P: Params<'params, C> + Sync,
@@ -192,14 +217,15 @@ where
     keygen_vk_custom(params, circuit, false)
 }
 
-/// Generate a `VerifyingKey` from an instance of `Circuit`.
+/// Generate a [`VerifyingKey`] from an instance of [`Circuit`].
 ///
-/// The selector compression optimization is turned on only if `compress_selectors` is `true`.
+/// The selector compression optimization is turned on only if
+/// `compress_selectors` is `true`.
 pub fn keygen_vk_custom<'params, C, P, ConcreteCircuit>(
     params: &P,
     circuit: &ConcreteCircuit,
     compress_selectors: bool,
-) -> Result<VerifyingKey<C>, Error>
+) -> Result<VerifyingKey<C>, GpuError>
 where
     C: CurveAffine,
     P: Params<'params, C> + Sync,
@@ -211,41 +237,44 @@ where
         #[cfg(feature = "circuit-params")]
         circuit.params(),
     );
+    let degree = cs.degree();
 
     if (params.n() as usize) < cs.minimum_rows() {
-        return Err(Error::not_enough_rows_available(params.k()));
+        return Err(GpuError::not_enough_rows_available(params.k()));
     }
 
     #[cfg(feature = "profile")]
     let assembly_time = start_timer!(|| "create assembly object");
     let mut assembly: Assembly<C::Scalar> = Assembly {
         k: params.k(),
-        fixed: vec![domain.empty_lagrange_assigned(); cs.num_fixed_columns],
-        permutation: permutation::keygen::Assembly::new(params.n() as usize, &cs.permutation),
-        selectors: vec![vec![false; params.n() as usize]; cs.num_selectors],
+        fixed: vec![domain.empty_lagrange_assigned(); cs.num_fixed_columns()],
+        permutation: permutation::keygen::Assembly::new(params.n() as usize, cs.permutation()),
+        selectors: vec![vec![false; params.n() as usize]; cs.num_selectors()],
         usable_rows: 0..params.n() as usize - (cs.blinding_factors() + 1),
-        _marker: std::marker::PhantomData,
+        _marker: PhantomData,
     };
     #[cfg(feature = "profile")]
     end_timer!(assembly_time);
 
     #[cfg(feature = "profile")]
     let synthesize_time = start_timer!(|| "synthesize");
-    // Synthesize the circuit to obtain URS
     ConcreteCircuit::FloorPlanner::synthesize(
         &mut assembly,
         circuit,
         config,
-        cs.constants.clone(),
+        cs.constants().clone(),
     )?;
     #[cfg(feature = "profile")]
     end_timer!(synthesize_time);
 
-    let mut fixed = batch_invert_assigned(assembly.fixed);
+    #[cfg(feature = "profile")]
+    let batch_invert_time = start_timer!(|| "batch invert fixed columns");
+    let mut fixed = batch_invert_fixed::<C::Scalar>(&assembly.fixed);
+    #[cfg(feature = "profile")]
+    end_timer!(batch_invert_time);
     let (cs, selector_polys) = if compress_selectors {
         cs.compress_selectors(assembly.selectors.clone())
     } else {
-        // After this, the ConstraintSystem should not have any selectors: `verify` does not need them, and `keygen_pk` regenerates `cs` from scratch anyways.
         let selectors = std::mem::take(&mut assembly.selectors);
         cs.directly_convert_selectors_to_fixed(selectors)
     };
@@ -255,25 +284,19 @@ where
             .map(|poly| domain.lagrange_from_vec(poly)),
     );
 
-    #[cfg(feature = "profile")]
-    let permutation_vk_time = start_timer!(|| "build permutation vk");
     let permutation_vk = assembly
         .permutation
-        .build_vk(params, &domain, &cs.permutation);
-    #[cfg(feature = "profile")]
-    end_timer!(permutation_vk_time);
+        .build_vk(params, &domain, cs.permutation());
 
-    #[cfg(feature = "profile")]
-    let fixed_commit_time = start_timer!(|| "fixed commit_lagrange");
+    // GPU MSM commitment per fixed/selector column.
     let fixed_commitments = fixed
         .iter()
         .map(|poly| params.commit_lagrange(poly, Blind::default()).to_affine())
         .collect();
-    #[cfg(feature = "profile")]
-    end_timer!(fixed_commit_time);
 
+    let vk_domain = halo2_axiom::poly::EvaluationDomain::new(degree as u32, params.k());
     Ok(VerifyingKey::from_parts(
-        domain,
+        vk_domain,
         fixed_commitments,
         permutation_vk,
         cs,
@@ -282,28 +305,30 @@ where
     ))
 }
 
-/// Generate a `ProvingKey` from a `VerifyingKey` and an instance of `Circuit`.
+/// Generate a [`ProvingKey`] from a [`VerifyingKey`] and an instance of
+/// [`Circuit`].
 pub fn keygen_pk<'params, C, P, ConcreteCircuit>(
     params: &P,
     vk: VerifyingKey<C>,
     circuit: &ConcreteCircuit,
-) -> Result<ProvingKey<C>, Error>
+) -> Result<ProvingKey<C>, GpuError>
 where
     C: CurveAffine,
     C::Scalar: FromUniformBytes<64>,
     P: Params<'params, C> + Sync,
     ConcreteCircuit: Circuit<C::Scalar>,
 {
-    let compress_selectors = vk.compress_selectors;
+    let compress_selectors = vk.compress_selectors();
     keygen_pk_impl(params, Some(vk), circuit, compress_selectors)
 }
 
-/// Generate a `ProvingKey` from an instance of `Circuit`. `VerifyingKey` is generated in the process.
+/// Generate a [`ProvingKey`] from an instance of [`Circuit`]. A
+/// [`VerifyingKey`] is generated in the process.
 pub fn keygen_pk2<'params, C, P, ConcreteCircuit>(
     params: &P,
     circuit: &ConcreteCircuit,
     compress_selectors: bool,
-) -> Result<ProvingKey<C>, Error>
+) -> Result<ProvingKey<C>, GpuError>
 where
     C: CurveAffine,
     C::Scalar: FromUniformBytes<64>,
@@ -313,15 +338,14 @@ where
     keygen_pk_impl(params, None, circuit, compress_selectors)
 }
 
-/// Generate a `ProvingKey` from either a precalculated `VerifyingKey` and an instance of `Circuit`, or
-/// just a `Circuit`, in which case a new `VerifyingKey` is generated. The latter is more efficient because
-/// it does fixed column FFTs only once.
-pub fn keygen_pk_impl<'params, C, P, ConcreteCircuit>(
+/// Shared body for `keygen_pk`/`keygen_pk2`: builds the canonical `ProvingKey`
+/// from either a precomputed `VerifyingKey` or a freshly-generated one.
+fn keygen_pk_impl<'params, C, P, ConcreteCircuit>(
     params: &P,
     vk: Option<VerifyingKey<C>>,
     circuit: &ConcreteCircuit,
     compress_selectors: bool,
-) -> Result<ProvingKey<C>, Error>
+) -> Result<ProvingKey<C>, GpuError>
 where
     C: CurveAffine,
     C::Scalar: FromUniformBytes<64>,
@@ -333,35 +357,41 @@ where
         #[cfg(feature = "circuit-params")]
         circuit.params(),
     );
+    let degree = cs.degree();
 
     if (params.n() as usize) < cs.minimum_rows() {
-        return Err(Error::not_enough_rows_available(params.k()));
+        return Err(GpuError::not_enough_rows_available(params.k()));
     }
 
+    #[cfg(feature = "profile")]
+    let assembly_time = start_timer!(|| "create assembly object");
     let mut assembly: Assembly<C::Scalar> = Assembly {
         k: params.k(),
-        fixed: vec![domain.empty_lagrange_assigned(); cs.num_fixed_columns],
-        permutation: permutation::keygen::Assembly::new(params.n() as usize, &cs.permutation),
-        selectors: vec![vec![false; params.n() as usize]; cs.num_selectors],
+        fixed: vec![domain.empty_lagrange_assigned(); cs.num_fixed_columns()],
+        permutation: permutation::keygen::Assembly::new(params.n() as usize, cs.permutation()),
+        selectors: vec![vec![false; params.n() as usize]; cs.num_selectors()],
         usable_rows: 0..params.n() as usize - (cs.blinding_factors() + 1),
-        _marker: std::marker::PhantomData,
+        _marker: PhantomData,
     };
+    #[cfg(feature = "profile")]
+    end_timer!(assembly_time);
 
     #[cfg(feature = "profile")]
-    let keygen_pk_synthesize_time = start_timer!(|| "keygen_pk_synthesize");
-    // Synthesize the circuit to obtain URS
+    let synthesize_time = start_timer!(|| "synthesize");
     ConcreteCircuit::FloorPlanner::synthesize(
         &mut assembly,
         circuit,
         config,
-        cs.constants.clone(),
+        cs.constants().clone(),
     )?;
     #[cfg(feature = "profile")]
-    end_timer!(keygen_pk_synthesize_time);
+    end_timer!(synthesize_time);
 
     #[cfg(feature = "profile")]
-    let batch_invert_assigned_time = start_timer!(|| "batch_invert_assigned_time");
-    let mut fixed = batch_invert_assigned(assembly.fixed);
+    let batch_invert_time = start_timer!(|| "batch invert fixed columns");
+    let mut fixed = batch_invert_fixed::<C::Scalar>(&assembly.fixed);
+    #[cfg(feature = "profile")]
+    end_timer!(batch_invert_time);
     let (cs, selector_polys) = if compress_selectors {
         cs.compress_selectors(assembly.selectors.clone())
     } else {
@@ -373,28 +403,29 @@ where
             .into_iter()
             .map(|poly| domain.lagrange_from_vec(poly)),
     );
-    #[cfg(feature = "profile")]
-    end_timer!(batch_invert_assigned_time);
 
-    let permutation_pk = assembly
-        .permutation
-        .clone()
-        .build_pk(params, &domain, &cs.permutation)?;
+    let permutation_pk =
+        assembly
+            .permutation
+            .clone()
+            .build_pk(params, &domain, cs.permutation())?;
 
     let vk = match vk {
         Some(vk) => vk,
         None => {
             let permutation_vk = assembly
                 .permutation
-                .build_vk(params, &domain, &cs.permutation);
+                .build_vk(params, &domain, cs.permutation());
 
+            // GPU MSM commitment per fixed/selector column.
             let fixed_commitments = fixed
                 .iter()
                 .map(|poly| params.commit_lagrange(poly, Blind::default()).to_affine())
                 .collect();
 
+            let vk_domain = halo2_axiom::poly::EvaluationDomain::new(degree as u32, params.k());
             VerifyingKey::from_parts(
-                domain,
+                vk_domain,
                 fixed_commitments,
                 permutation_vk,
                 cs,
@@ -404,32 +435,28 @@ where
         }
     };
 
-    #[cfg(feature = "profile")]
-    let fixed_polys_time = start_timer!(|| "fixed_polys iFFT");
-    let fixed_polys = vk.domain.lagrange_to_coeff_many(&fixed)?;
-    #[cfg(feature = "profile")]
-    end_timer!(fixed_polys_time);
+    let fixed_polys = domain.lagrange_to_coeff_many(&fixed)?;
 
-    // Compute l_0(X)
-    let mut l0 = vk.domain.empty_lagrange();
+    let blinding_factors = vk.cs().blinding_factors();
+
+    // l_0(X): 1 on row 0.
+    let mut l0 = domain.empty_lagrange();
     l0[0] = C::Scalar::ONE;
-    let l0 = vk.domain.lagrange_to_coeff(l0)?;
+    let l0 = domain.lagrange_to_coeff(l0)?;
 
-    // Compute l_blind(X) which evaluates to 1 for each blinding factor row
-    // and 0 otherwise over the domain.
-    let mut l_blind = vk.domain.empty_lagrange();
-    for evaluation in l_blind[..].iter_mut().rev().take(vk.cs.blinding_factors()) {
+    // l_blind(X): 1 on each blinding-factor row.
+    let mut l_blind = domain.empty_lagrange();
+    for evaluation in l_blind[..].iter_mut().rev().take(blinding_factors) {
         *evaluation = C::Scalar::ONE;
     }
 
-    // Compute l_last(X) which evaluates to 1 on the first inactive row (just
-    // before the blinding factors) and 0 otherwise over the domain
-    let mut l_last = vk.domain.empty_lagrange();
-    l_last[params.n() as usize - vk.cs.blinding_factors() - 1] = C::Scalar::ONE;
+    // l_last(X): 1 on the first inactive row.
+    let mut l_last = domain.empty_lagrange();
+    l_last[params.n() as usize - blinding_factors - 1] = C::Scalar::ONE;
 
-    // Compute l_active_row(X)
+    // l_active_row(X) = 1 - (l_last + l_blind).
     let one = C::Scalar::ONE;
-    let mut l_active_row = vk.domain.empty_lagrange();
+    let mut l_active_row = domain.empty_lagrange();
     parallelize(&mut l_active_row, |values, start| {
         for (i, value) in values.iter_mut().enumerate() {
             let idx = i + start;
@@ -437,26 +464,28 @@ where
         }
     });
 
-    let l_last = vk.domain.lagrange_to_coeff(l_last)?;
-    let l_active_row = vk.domain.lagrange_to_coeff(l_active_row)?;
+    let l_last = domain.lagrange_to_coeff(l_last)?;
+    let l_active_row = domain.lagrange_to_coeff(l_active_row)?;
 
-    // Compute the optimized evaluation data structure
-    let ev = Evaluator::new(&vk.cs);
-
-    Ok(ProvingKey {
+    Ok(ProvingKey::from_parts(
         vk,
         l0,
         l_last,
         l_active_row,
-        fixed_values: fixed,
+        fixed,
         fixed_polys,
-        permutation: permutation_pk,
-        ev,
-        fixed_polys_device: once_cell::sync::OnceCell::new(),
-        fixed_values_device: once_cell::sync::OnceCell::new(),
-        permutation_polys_device: once_cell::sync::OnceCell::new(),
-        l0_device: once_cell::sync::OnceCell::new(),
-        l_last_device: once_cell::sync::OnceCell::new(),
-        l_active_row_device: once_cell::sync::OnceCell::new(),
-    })
+        permutation_pk,
+    ))
+}
+
+/// Reinterprets the canonical `Assigned` fixed columns as device-repr
+/// `GpuAssigned`, then runs the (CPU) batch inversion.
+fn batch_invert_fixed<F: Field>(
+    fixed: &[Polynomial<Assigned<F>, LagrangeCoeff>],
+) -> Vec<Polynomial<F, LagrangeCoeff>> {
+    let columns: Vec<Vec<GpuAssigned<F>>> = fixed
+        .iter()
+        .map(|poly| poly.iter().map(|a| GpuAssigned::from(*a)).collect())
+        .collect();
+    batch_invert_assigned::<F, _>(columns)
 }

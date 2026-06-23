@@ -3,12 +3,12 @@ use super::{
     msm::DualMSM,
 };
 use crate::{
-    helpers::SerdeCurveAffine,
     plonk::Error,
     poly::{
         commitment::Verifier,
         strategy::{Guard, VerificationStrategy},
     },
+    SerdeCurveAffine,
 };
 use ff::Field;
 use pairing::{Engine, MultiMillerLoop};

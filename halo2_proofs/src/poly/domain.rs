@@ -19,7 +19,7 @@ use crate::cuda::HaloGpuError;
 use crate::{
     cpu::arithmetic::parallelize,
     fft::recursive::FFTData,
-    plonk::{Assigned, Error},
+    plonk::{Assigned, GpuError},
 };
 use openvm_cuda_common::copy::MemCopyH2D;
 use openvm_cuda_common::d_buffer::DeviceBuffer;
@@ -37,7 +37,7 @@ pub trait LagrangeToCoeffManyInput<F: Field>: Sized {
     fn lagrange_to_coeff_many_impl(
         domain: &EvaluationDomain<F>,
         in_many: &[Self],
-    ) -> Result<Vec<Self::Output>, Error>;
+    ) -> Result<Vec<Self::Output>, GpuError>;
 }
 
 impl<F: WithSmallOrderMulGroup<3>> LagrangeToCoeffManyInput<F>
@@ -47,7 +47,7 @@ impl<F: WithSmallOrderMulGroup<3>> LagrangeToCoeffManyInput<F>
     fn lagrange_to_coeff_many_impl(
         domain: &EvaluationDomain<F>,
         in_many: &[Self],
-    ) -> Result<Vec<Self::Output>, Error> {
+    ) -> Result<Vec<Self::Output>, GpuError> {
         crate::cpu::poly::domain::lagrange_to_coeff_many_host(domain, in_many)
     }
 }
@@ -59,7 +59,7 @@ impl<F: WithSmallOrderMulGroup<3>> LagrangeToCoeffManyInput<F>
     fn lagrange_to_coeff_many_impl(
         domain: &EvaluationDomain<F>,
         in_many: &[Self],
-    ) -> Result<Vec<Self::Output>, Error> {
+    ) -> Result<Vec<Self::Output>, GpuError> {
         domain.lagrange_to_coeff_many_device_inputs(in_many)
     }
 }
@@ -72,7 +72,7 @@ pub trait CoeffToExtendedPartManyDeviceInput<F: Field>: Sized {
         domain: &EvaluationDomain<F>,
         in_many: Vec<&Self>,
         extended_omega_factor: F,
-    ) -> Result<Vec<DeviceBuffer<F>>, Error>;
+    ) -> Result<Vec<DeviceBuffer<F>>, GpuError>;
 }
 
 impl<F: WithSmallOrderMulGroup<3>> CoeffToExtendedPartManyDeviceInput<F>
@@ -82,7 +82,7 @@ impl<F: WithSmallOrderMulGroup<3>> CoeffToExtendedPartManyDeviceInput<F>
         domain: &EvaluationDomain<F>,
         in_many: Vec<&Self>,
         extended_omega_factor: F,
-    ) -> Result<Vec<DeviceBuffer<F>>, Error> {
+    ) -> Result<Vec<DeviceBuffer<F>>, GpuError> {
         domain.coeff_to_extended_part_many_device_host_inputs(in_many, extended_omega_factor)
     }
 }
@@ -94,7 +94,7 @@ impl<F: WithSmallOrderMulGroup<3>> CoeffToExtendedPartManyDeviceInput<F>
         domain: &EvaluationDomain<F>,
         in_many: Vec<&Self>,
         extended_omega_factor: F,
-    ) -> Result<Vec<DeviceBuffer<F>>, Error> {
+    ) -> Result<Vec<DeviceBuffer<F>>, GpuError> {
         domain.coeff_to_extended_part_many_device_device_inputs(in_many, extended_omega_factor)
     }
 }
@@ -327,7 +327,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     pub fn extended_from_lagrange_vec_device(
         &self,
         values: Vec<super::MaybeDevice<F, LagrangeCoeff>>,
-    ) -> Result<super::MaybeDevice<F, ExtendedLagrangeCoeff>, Error> {
+    ) -> Result<super::MaybeDevice<F, ExtendedLagrangeCoeff>, GpuError> {
         assert_eq!(values.len(), self.extended_len() >> self.k);
         assert_eq!(values[0].len(), self.n as usize);
 
@@ -341,7 +341,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
                  `vram-fallback` feature"
             );
             if !all_device {
-                return Err(Error::HaloGpu(HaloGpuError::InsufficientGpuMemory {
+                return Err(GpuError::HaloGpu(HaloGpuError::InsufficientGpuMemory {
                     context: "extended_from_lagrange_vec_device.not_all_device",
                     magnitude: values.len() as u64,
                     free_bytes: 0,
@@ -367,7 +367,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
                     needed_bytes = extended_bytes,
                     "VRAM-tight: returning InsufficientGpuMemory (vram-fallback feature disabled)"
                 );
-                return Err(Error::HaloGpu(HaloGpuError::InsufficientGpuMemory {
+                return Err(GpuError::HaloGpu(HaloGpuError::InsufficientGpuMemory {
                     context: "extended_from_lagrange_vec_device.vram_tight",
                     magnitude: extended_bytes as u64,
                     free_bytes: free_bytes as u64,
@@ -396,7 +396,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             DeviceBuffer::<F>::with_capacity_on(self.extended_len(), &HALO2_GPU_CTX);
         let part_refs: Vec<&DeviceBuffer<F>> =
             device_values.iter().map(|p| p.device_buf()).collect();
-        extended_from_lagrange_vec_device(&d_out, &part_refs, self.n).map_err(Error::from)?;
+        extended_from_lagrange_vec_device(&d_out, &part_refs, self.n).map_err(GpuError::from)?;
         drop(device_values);
         Ok(super::MaybeDevice::Device(Polynomial::from_device(d_out)))
     }
@@ -455,7 +455,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     pub fn lagrange_to_coeff(
         &self,
         mut a: Polynomial<F, LagrangeCoeff>,
-    ) -> Result<Polynomial<F, Coeff>, Error> {
+    ) -> Result<Polynomial<F, Coeff>, GpuError> {
         crate::perf_section!("lagrange_to_coeff");
         assert_eq!(a.len(), 1 << self.k);
 
@@ -470,7 +470,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         &self,
         a: &Polynomial<F, LagrangeCoeff>,
         omega_extend_part: F,
-    ) -> Result<Polynomial<F, ExtendedLagrangeCoeff>, Error> {
+    ) -> Result<Polynomial<F, ExtendedLagrangeCoeff>, GpuError> {
         assert_eq!(a.len(), 1 << self.k);
 
         let log_n = self.k;
@@ -500,7 +500,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     pub fn lagrange_to_coeff_many<P>(
         &self,
         in_many: &[P],
-    ) -> Result<Vec<<P as LagrangeToCoeffManyInput<F>>::Output>, Error>
+    ) -> Result<Vec<<P as LagrangeToCoeffManyInput<F>>::Output>, GpuError>
     where
         P: LagrangeToCoeffManyInput<F>,
     {
@@ -518,7 +518,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     pub(crate) fn lagrange_to_coeff_many_device_inputs(
         &self,
         in_many: &[Polynomial<F, LagrangeCoeff, Device>],
-    ) -> Result<Vec<Polynomial<F, Coeff, Device>>, Error> {
+    ) -> Result<Vec<Polynomial<F, Coeff, Device>>, GpuError> {
         crate::perf_section!("domain.lagrange_to_coeff_many_device_inputs");
         log::info!(
             "using lagrange_to_coeff_many_device_inputs: vec_num[{}]",
@@ -547,7 +547,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
                     batch_len = in_many.len(),
                     "VRAM-tight: returning InsufficientGpuMemory (vram-fallback feature disabled)"
                 );
-                return Err(Error::HaloGpu(HaloGpuError::InsufficientGpuMemory {
+                return Err(GpuError::HaloGpu(HaloGpuError::InsufficientGpuMemory {
                     context: "lagrange_to_coeff_many_device_inputs.vram_tight",
                     magnitude: total_bytes as u64,
                     free_bytes: free_bytes as u64,
@@ -569,7 +569,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             .map(|p| FFITraitObject::new(p.device_buf().as_raw_ptr() as usize))
             .collect();
         let out_bufs = ifft_many_device::<F>(in_objs, self.k, self.omega_inv, self.ifft_divisor)
-            .map_err(Error::HaloGpu)?;
+            .map_err(GpuError::HaloGpu)?;
         Ok(out_bufs.into_iter().map(Polynomial::from_device).collect())
     }
 
@@ -588,7 +588,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     pub fn lagrange_to_coeff_device(
         &self,
         a: Polynomial<F, LagrangeCoeff>,
-    ) -> Result<Polynomial<F, Coeff, Device>, Error> {
+    ) -> Result<Polynomial<F, Coeff, Device>, GpuError> {
         crate::perf_section!("domain.lagrange_to_coeff_device");
         assert_eq!(a.len(), 1 << self.k);
 
@@ -604,7 +604,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
                     needed_bytes = n_bytes,
                     "VRAM-tight: returning InsufficientGpuMemory (vram-fallback feature disabled)"
                 );
-                return Err(Error::HaloGpu(HaloGpuError::InsufficientGpuMemory {
+                return Err(GpuError::HaloGpu(HaloGpuError::InsufficientGpuMemory {
                     context: "lagrange_to_coeff_device.vram_tight",
                     magnitude: n_bytes as u64,
                     free_bytes: free_bytes as u64,
@@ -619,7 +619,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         }
 
         let outs = ifft_many_h2d::<F>(&[a], self.k, self.omega_inv, self.ifft_divisor)
-            .map_err(Error::HaloGpu)?;
+            .map_err(GpuError::HaloGpu)?;
         let mut outs = outs;
         let out = outs.pop().expect("ifft_many_h2d returned empty vec");
         Ok(out)
@@ -642,7 +642,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     pub fn lagrange_to_coeff_device_input(
         &self,
         a: Polynomial<F, LagrangeCoeff, Device>,
-    ) -> Result<Polynomial<F, Coeff, Device>, Error> {
+    ) -> Result<Polynomial<F, Coeff, Device>, GpuError> {
         crate::perf_section!("domain.lagrange_to_coeff_device_input");
         assert_eq!(a.len(), 1 << self.k);
 
@@ -658,7 +658,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
                     needed_bytes = n_bytes,
                     "VRAM-tight: returning InsufficientGpuMemory (vram-fallback feature disabled)"
                 );
-                return Err(Error::HaloGpu(HaloGpuError::InsufficientGpuMemory {
+                return Err(GpuError::HaloGpu(HaloGpuError::InsufficientGpuMemory {
                     context: "lagrange_to_coeff_device_input.vram_tight",
                     magnitude: n_bytes as u64,
                     free_bytes: free_bytes as u64,
@@ -674,7 +674,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
 
         let in_objs = vec![FFITraitObject::new(a.device_buf().as_raw_ptr() as usize)];
         let out_bufs = ifft_many_device::<F>(in_objs, self.k, self.omega_inv, self.ifft_divisor)
-            .map_err(Error::HaloGpu)?;
+            .map_err(GpuError::HaloGpu)?;
         let mut out_bufs = out_bufs;
         let out = out_bufs.pop().expect("ifft_many_device returned empty vec");
         Ok(Polynomial::from_device(out))
@@ -693,7 +693,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     pub fn lagrange_to_coeff_many_device(
         &self,
         in_many: &[Polynomial<F, LagrangeCoeff>],
-    ) -> Result<Vec<Polynomial<F, Coeff, Device>>, Error> {
+    ) -> Result<Vec<Polynomial<F, Coeff, Device>>, GpuError> {
         crate::perf_section!("domain.lagrange_to_coeff_many_device");
         log::info!(
             "using lagrange_to_coeff_many_device: vec_num[{}]",
@@ -716,7 +716,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
                     batch_len = in_many.len(),
                     "VRAM-tight: returning InsufficientGpuMemory (vram-fallback feature disabled)"
                 );
-                return Err(Error::HaloGpu(HaloGpuError::InsufficientGpuMemory {
+                return Err(GpuError::HaloGpu(HaloGpuError::InsufficientGpuMemory {
                     context: "lagrange_to_coeff_many_device.vram_tight",
                     magnitude: total_bytes as u64,
                     free_bytes: free_bytes as u64,
@@ -733,7 +733,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             }
         }
         let outs = ifft_many_h2d::<F>(in_many, self.k, self.omega_inv, self.ifft_divisor)
-            .map_err(Error::HaloGpu)?;
+            .map_err(GpuError::HaloGpu)?;
         Ok(outs)
     }
 
@@ -743,7 +743,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     pub fn coeff_to_extended(
         &self,
         a: &Polynomial<F, Coeff>,
-    ) -> Result<Polynomial<F, ExtendedLagrangeCoeff>, Error> {
+    ) -> Result<Polynomial<F, ExtendedLagrangeCoeff>, GpuError> {
         crate::perf_section!("coeff_to_extended");
         assert_eq!(a.len(), 1 << self.k);
         let mut b: Vec<F> = Vec::with_capacity(self.extended_len());
@@ -773,7 +773,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     pub fn coeff_to_extended_parts(
         &self,
         a: &Polynomial<F, Coeff>,
-    ) -> Result<Vec<Polynomial<F, LagrangeCoeff>>, Error> {
+    ) -> Result<Vec<Polynomial<F, LagrangeCoeff>>, GpuError> {
         assert_eq!(a.len(), 1 << self.k);
 
         let num_parts = self.extended_len() >> self.k;
@@ -798,7 +798,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     pub fn batched_coeff_to_extended_parts(
         &self,
         a: &[Polynomial<F, Coeff>],
-    ) -> Result<Vec<Vec<Polynomial<F, LagrangeCoeff>>>, Error> {
+    ) -> Result<Vec<Vec<Polynomial<F, LagrangeCoeff>>>, GpuError> {
         assert_eq!(a[0].len(), 1 << self.k);
 
         let mut extended_omega_factor = F::ONE;
@@ -825,7 +825,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         &self,
         mut a: Polynomial<F, Coeff>,
         extended_omega_factor: F,
-    ) -> Result<Polynomial<F, LagrangeCoeff>, Error> {
+    ) -> Result<Polynomial<F, LagrangeCoeff>, GpuError> {
         crate::perf_section!("coeff_to_extended_part");
         assert_eq!(a.len(), 1 << self.k);
 
@@ -858,7 +858,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         &self,
         in_many: Vec<&P>,
         extended_omega_factor: F,
-    ) -> Result<Vec<DeviceBuffer<F>>, Error>
+    ) -> Result<Vec<DeviceBuffer<F>>, GpuError>
     where
         P: CoeffToExtendedPartManyDeviceInput<F>,
     {
@@ -869,7 +869,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         &self,
         in_many: Vec<&Polynomial<F, Coeff>>,
         extended_omega_factor: F,
-    ) -> Result<Vec<DeviceBuffer<F>>, Error> {
+    ) -> Result<Vec<DeviceBuffer<F>>, GpuError> {
         crate::perf_section!("coeff_to_extended_part_many_device");
         if in_many.is_empty() {
             return Ok(vec![]);
@@ -899,7 +899,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         &self,
         in_many: Vec<&Polynomial<F, Coeff, Device>>,
         extended_omega_factor: F,
-    ) -> Result<Vec<DeviceBuffer<F>>, Error> {
+    ) -> Result<Vec<DeviceBuffer<F>>, GpuError> {
         crate::perf_section!("domain.coeff_to_extended_part_many_device_device_inputs");
         if in_many.is_empty() {
             return Ok(vec![]);
@@ -924,7 +924,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         &self,
         in_many: Vec<&Polynomial<F, Coeff>>,
         extended_omega_factor: F,
-    ) -> Result<Vec<Polynomial<F, LagrangeCoeff>>, Error> {
+    ) -> Result<Vec<Polynomial<F, LagrangeCoeff>>, GpuError> {
         crate::perf_section!("coeff_to_extended_part_many");
         log::info!(
             "using coeff_to_extended_part_many: vec_num[{}]",
@@ -952,7 +952,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     pub fn coeff_to_extended_many<PR>(
         &self,
         in_many: &[PR],
-    ) -> Result<Vec<Polynomial<F, ExtendedLagrangeCoeff>>, Error>
+    ) -> Result<Vec<Polynomial<F, ExtendedLagrangeCoeff>>, GpuError>
     where
         PR: Deref<Target = [F]> + Send + Sync,
     {
@@ -1006,7 +1006,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     pub fn extended_to_coeff(
         &self,
         mut a: Polynomial<F, ExtendedLagrangeCoeff, Host>,
-    ) -> Result<Polynomial<F, Coeff, Host>, Error> {
+    ) -> Result<Polynomial<F, Coeff, Host>, GpuError> {
         crate::perf_section!("extended_to_coeff");
         assert_eq!(a.len(), self.extended_len());
 
@@ -1031,7 +1031,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     pub fn extended_to_coeff_device(
         &self,
         a: Polynomial<F, ExtendedLagrangeCoeff, Device>,
-    ) -> Result<Polynomial<F, Coeff, Device>, Error> {
+    ) -> Result<Polynomial<F, Coeff, Device>, GpuError> {
         crate::perf_section!("domain.extended_to_coeff_device");
         assert_eq!(a.len(), self.extended_len());
 
@@ -1048,7 +1048,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             self.extended_ifft_divisor,
         )?;
         let coset_powers = [self.g_coset_inv, self.g_coset];
-        distribute_powers_zeta_device(&d_buf, &coset_powers).map_err(Error::HaloGpu)?;
+        distribute_powers_zeta_device(&d_buf, &coset_powers).map_err(GpuError::HaloGpu)?;
 
         if target_len == extended_len {
             Ok(Polynomial::<F, Coeff, Device>::from_device(d_buf))
@@ -1065,7 +1065,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
                     &HALO2_GPU_CTX,
                 )
                 .map_err(HaloGpuError::from)
-                .map_err(Error::from)?;
+                .map_err(GpuError::from)?;
             }
             Ok(Polynomial::<F, Coeff, Device>::from_device(dst))
         }
@@ -1075,7 +1075,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     pub fn divide_by_vanishing_poly(
         &self,
         mut a: Polynomial<F, ExtendedLagrangeCoeff, Host>,
-    ) -> Result<Polynomial<F, ExtendedLagrangeCoeff, Host>, Error> {
+    ) -> Result<Polynomial<F, ExtendedLagrangeCoeff, Host>, GpuError> {
         crate::perf_section!("divide_by_vanishing_poly");
         assert_eq!(a.len(), self.extended_len());
 
@@ -1092,7 +1092,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     pub fn divide_by_vanishing_poly_device(
         &self,
         a: Polynomial<F, ExtendedLagrangeCoeff, Device>,
-    ) -> Result<Polynomial<F, ExtendedLagrangeCoeff, Device>, Error> {
+    ) -> Result<Polynomial<F, ExtendedLagrangeCoeff, Device>, GpuError> {
         crate::perf_section!("domain.divide_by_vanishing_poly_device");
         assert_eq!(a.len(), self.extended_len());
 
@@ -1101,9 +1101,9 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             .as_slice()
             .to_device_on(&HALO2_GPU_CTX)
             .map_err(HaloGpuError::from)
-            .map_err(Error::from)?;
+            .map_err(GpuError::from)?;
         let d_buf = a.into_device_buf();
-        divide_by_vanishing_poly_device::<F>(&d_buf, &t_dev).map_err(Error::from)?;
+        divide_by_vanishing_poly_device::<F>(&d_buf, &t_dev).map_err(GpuError::from)?;
         Ok(Polynomial::<F, ExtendedLagrangeCoeff, Device>::from_device(
             d_buf,
         ))

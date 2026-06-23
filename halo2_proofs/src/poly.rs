@@ -2,11 +2,8 @@
 //! various forms, including computing commitments to them and provably opening
 //! the committed polynomials at arbitrary points.
 
-use crate::helpers::SerdePrimeField;
-use crate::plonk::Assigned;
-use crate::SerdeFormat;
+use crate::plonk::GpuAssigned;
 
-use std::io;
 use std::mem;
 
 use group::ff::Field;
@@ -361,41 +358,6 @@ impl<F> DeviceChunks<F> for Polynomial<F, Coeff, Device> {
     }
 }
 
-/// Length-prefixed polynomial serialization, matching the wire format of the
-/// CPU crate's `pub(crate)` `read`/`write`. Deserialization yields a host
-/// polynomial; cross to device explicitly via [`HostPolyExt::to_device_on`].
-pub(crate) trait PolyIo<F, B> {
-    /// Reads a polynomial via `SerdePrimeField::read`. Named `read_poly` (not
-    /// `read`) to avoid shadowing the CPU crate's `pub(crate)` inherent `read`.
-    fn read_poly<R: io::Read>(reader: &mut R, format: SerdeFormat) -> Self;
-
-    /// Writes a polynomial using `SerdePrimeField::write`. Named `write_poly`
-    /// for the same reason as [`PolyIo::read_poly`].
-    fn write_poly<W: io::Write>(&self, writer: &mut W, format: SerdeFormat);
-}
-
-impl<F: SerdePrimeField, B> PolyIo<F, B> for Polynomial<F, B, Host> {
-    fn read_poly<R: io::Read>(reader: &mut R, format: SerdeFormat) -> Self {
-        let mut poly_len = [0u8; 4];
-        reader.read_exact(&mut poly_len).unwrap();
-        let poly_len = u32::from_be_bytes(poly_len);
-        let values: Vec<F> = (0..poly_len)
-            .map(|_| F::read(reader, format).unwrap())
-            .collect();
-        Polynomial::new(values)
-    }
-
-    fn write_poly<W: io::Write>(&self, writer: &mut W, format: SerdeFormat) {
-        let values = self.values();
-        writer
-            .write_all(&(values.len() as u32).to_be_bytes())
-            .unwrap();
-        for value in values.iter() {
-            value.write(writer, format).unwrap();
-        }
-    }
-}
-
 /// Device batch-inversion of per-cell denominators: each column's
 /// `numerator * inv_denom` is reduced into a `DeviceBuffer<F>` (one
 /// `Polynomial<_, LagrangeCoeff, Device>` per column), all on the shared stream.
@@ -403,7 +365,7 @@ pub(crate) fn batch_invert_assigned_device<F: Field, PR>(
     assigned: impl AsRef<[PR]>,
 ) -> Result<Vec<Polynomial<F, LagrangeCoeff, Device>>, HaloGpuError>
 where
-    PR: AsRef<[Assigned<F>]> + Send + Sync,
+    PR: AsRef<[GpuAssigned<F>]> + Send + Sync,
 {
     let assigned = assigned.as_ref();
     if assigned.is_empty() {
@@ -475,7 +437,7 @@ mod tests {
                 .map(|j| {
                     let num = Fr::from(1_u64);
                     let denom = Fr::from(j as u64);
-                    Assigned::from((num, denom))
+                    GpuAssigned::from((num, denom))
                 })
                 .collect::<Vec<_>>();
             let poly = Polynomial::<_, LagrangeCoeff>::new(assigned);
@@ -571,7 +533,7 @@ mod tests {
                 .map(|j| {
                     let num = Fr::from(1_u64);
                     let denom = Fr::from(j as u64 + 1);
-                    Assigned::from((num, denom))
+                    GpuAssigned::from((num, denom))
                 })
                 .collect::<Vec<_>>();
             let poly = Polynomial::<_, LagrangeCoeff>::new(assigned);
@@ -616,11 +578,11 @@ mod tests {
             let n: usize = 1usize << log_n;
             // Every 3rd element is Zero / Trivial / Rational, with a salt that
             // shifts the pattern so consecutive columns sample different orders.
-            let column: Vec<Assigned<Fr>> = (0..n)
+            let column: Vec<GpuAssigned<Fr>> = (0..n)
                 .map(|j| match (j + 7) % 3 {
-                    0 => Assigned::Zero,
-                    1 => Assigned::Trivial(Fr::random(OsRng)),
-                    _ => Assigned::Rational(Fr::random(OsRng), Fr::random(OsRng)),
+                    0 => GpuAssigned::Zero,
+                    1 => GpuAssigned::Trivial(Fr::random(OsRng)),
+                    _ => GpuAssigned::Rational(Fr::random(OsRng), Fr::random(OsRng)),
                 })
                 .collect();
 
@@ -684,24 +646,24 @@ mod tests {
             let n: usize = 1usize << log_n;
             let n_cols: usize = 3;
 
-            let columns: Vec<Vec<Assigned<Fr>>> = (0..n_cols)
+            let columns: Vec<Vec<GpuAssigned<Fr>>> = (0..n_cols)
                 .map(|col_idx| {
                     (0..n)
                         .map(|j| match (col_idx + j) % 3 {
-                            0 => Assigned::Zero,
-                            1 => Assigned::Trivial(Fr::random(OsRng)),
+                            0 => GpuAssigned::Zero,
+                            1 => GpuAssigned::Trivial(Fr::random(OsRng)),
                             _ => {
                                 let num = Fr::random(OsRng);
                                 let denom = Fr::random(OsRng);
-                                Assigned::from((num, denom))
+                                GpuAssigned::from((num, denom))
                             }
                         })
                         .collect()
                 })
                 .collect();
 
-            let host_input: Vec<Vec<Assigned<Fr>>> = columns.clone();
-            let device_input: Vec<Vec<Assigned<Fr>>> = columns;
+            let host_input: Vec<Vec<GpuAssigned<Fr>>> = columns.clone();
+            let device_input: Vec<Vec<GpuAssigned<Fr>>> = columns;
 
             let host_polys: Vec<Polynomial<Fr, LagrangeCoeff>> =
                 batch_invert_assigned_gpu(host_input).expect("host-output batch_invert failed");

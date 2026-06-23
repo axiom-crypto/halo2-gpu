@@ -6,7 +6,7 @@ use crate::multicore;
 use super::arithmetic::quotient_lookups_cpu;
 use crate::cpu::arithmetic::parallelize;
 use crate::plonk::evaluation::{get_rotation_idx, Evaluator, EvaluatorVkView};
-use crate::plonk::{lookup, permutation, Any};
+use crate::plonk::{lookup, permutation, GpuAny};
 use crate::{
     arithmetic::{best_fft, CurveAffine},
     poly::{
@@ -165,7 +165,7 @@ pub(crate) fn evaluate_h_inner<C: CurveAffine>(
     theta: C::ScalarExt,
     lookups: &[Vec<lookup::prover::Committed<C>>],
     permutations: &[permutation::prover::Committed<C>],
-) -> Result<crate::poly::Polynomial<C::ScalarExt, ExtendedLagrangeCoeff>, crate::plonk::Error>
+) -> Result<crate::poly::Polynomial<C::ScalarExt, ExtendedLagrangeCoeff>, crate::plonk::GpuError>
 where
     C::ScalarExt: WithSmallOrderMulGroup<3>,
 {
@@ -186,7 +186,7 @@ where
         .map(
             |_i| -> Result<
                 crate::poly::Polynomial<C::ScalarExt, LagrangeCoeff>,
-                crate::plonk::Error,
+                crate::plonk::GpuError,
             > {
                 // Pure-CPU per-part cosetFFT, one logical group at a time.
                 // Outputs are host-resident so every downstream consumer
@@ -286,9 +286,9 @@ where
                             .columns
                             .iter()
                             .map(|column| match column.column_type() {
-                                Any::Advice(_) => advice[column.index()].values(),
-                                Any::Fixed => fixed[column.index()].values(),
-                                Any::Instance => instance[column.index()].values(),
+                                GpuAny::Advice(_) => advice[column.index()].values(),
+                                GpuAny::Fixed => fixed[column.index()].values(),
+                                GpuAny::Instance => instance[column.index()].values(),
                             })
                             .collect();
 
@@ -475,8 +475,10 @@ mod test_eval {
 
     use crate::cuda::utils::HALO2_GPU_CTX;
     use crate::plonk::{
-        lookup, permutation, AdviceQuery, Any, Column, ConstraintSystem, Expression, FirstPhase,
-        FixedQuery, Gate, InstanceQuery,
+        lookup, permutation, GpuAdviceQuery as AdviceQuery, GpuAny as Any, GpuColumn as Column,
+        GpuConstraintSystem as ConstraintSystem, GpuExpression as Expression,
+        GpuFirstPhase as FirstPhase, GpuFixedQuery as FixedQuery, GpuGate as Gate,
+        GpuInstanceQuery as InstanceQuery,
     };
     use crate::poly::{
         Coeff, Device, DevicePolyExt, EvaluationDomain, ExtendedLagrangeCoeff, HostPolyExt,

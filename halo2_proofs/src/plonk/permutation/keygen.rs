@@ -1,20 +1,21 @@
 use ff::{Field, PrimeField};
 use group::Curve;
-
 use rayon::prelude::*;
 
-use super::{Argument, ProvingKey, VerifyingKey};
-use crate::{
-    arithmetic::CurveAffine,
-    cpu::arithmetic::parallelize,
-    plonk::{Any, Column, Error},
-    poly::{
-        commitment::{Blind, Params},
-        EvaluationDomain,
-    },
+// Keygen consumes the halo2-axiom constraint system, so the permutation
+// argument and its `Any`/`Column` types are the halo2-axiom ones, not the GPU
+// fork's `permutation::Argument`.
+use crate::arithmetic::CurveAffine;
+use crate::cpu::arithmetic::parallelize;
+use crate::plonk::{Any, Column, GpuError};
+use crate::poly::{
+    commitment::{Blind, Params},
+    EvaluationDomain, LagrangeCoeff, Polynomial,
 };
+use halo2_axiom::plonk::permutation::Argument;
 
-/// Struct that accumulates all the necessary data in order to construct the permutation argument.
+/// Accumulates copy-constraint data; produces the canonical halo2-axiom permutation
+/// pk/vk via [`build_pk`]/[`build_vk`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Assembly {
     /// Columns that participate on the copy permutation argument.
@@ -29,22 +30,24 @@ pub struct Assembly {
 
 impl Assembly {
     pub(crate) fn new(n: usize, p: &Argument) -> Self {
-        // Initialize the copy vector to keep track of copy constraints in all
-        // the permutation arguments.
-        let mut columns = vec![];
-        for i in 0..p.columns.len() {
-            // Computes [(i, 0), (i, 1), ..., (i, n - 1)]
-            columns.push((0..n).map(|j| (i, j)).collect());
+        // Upstream `columns` is private; use the `get_columns()` accessor.
+        let perm_columns = p.get_columns();
+        let num_columns = perm_columns.len();
+
+        let mut mapping = vec![];
+        for i in 0..num_columns {
+            // [(i, 0), (i, 1), ..., (i, n - 1)]
+            mapping.push((0..n).map(|j| (i, j)).collect());
         }
 
         // Before any equality constraints are applied, every cell in the permutation is
         // in a 1-cycle; therefore mapping and aux are identical, because every cell is
         // its own distinguished element.
         Assembly {
-            columns: p.columns.clone(),
-            mapping: columns.clone(),
-            aux: columns,
-            sizes: vec![vec![1usize; n]; p.columns.len()],
+            columns: perm_columns,
+            aux: mapping.clone(),
+            mapping,
+            sizes: vec![vec![1usize; n]; num_columns],
         }
     }
 
@@ -54,23 +57,29 @@ impl Assembly {
         left_row: usize,
         right_column: Column<Any>,
         right_row: usize,
-    ) -> Result<(), Error> {
-        let left_column = self
-            .columns
-            .iter()
-            .position(|c| c == &left_column)
-            .ok_or(Error::ColumnNotInPermutation(left_column))?;
-        let right_column = self
-            .columns
-            .iter()
-            .position(|c| c == &right_column)
-            .ok_or(Error::ColumnNotInPermutation(right_column))?;
+    ) -> Result<(), GpuError> {
+        let left_column =
+            self.columns
+                .iter()
+                .position(|c| c == &left_column)
+                .ok_or(GpuError::Canonical(
+                    halo2_axiom::plonk::Error::ColumnNotInPermutation(left_column),
+                ))?;
+        let right_column =
+            self.columns
+                .iter()
+                .position(|c| c == &right_column)
+                .ok_or(GpuError::Canonical(
+                    halo2_axiom::plonk::Error::ColumnNotInPermutation(right_column),
+                ))?;
 
         // Check bounds
         if left_row >= self.mapping[left_column].len()
             || right_row >= self.mapping[right_column].len()
         {
-            return Err(Error::BoundsFailure);
+            return Err(GpuError::Canonical(
+                halo2_axiom::plonk::Error::BoundsFailure,
+            ));
         }
 
         // See book/src/design/permutation.md for a description of this algorithm.
@@ -105,27 +114,31 @@ impl Assembly {
         Ok(())
     }
 
+    /// Returns columns that participate in the permutation argument.
+    pub fn columns(&self) -> &[Column<Any>] {
+        &self.columns
+    }
+
+    /// Builds the canonical permutation [`VerifyingKey`] (σ-column commitments)
+    /// via GPU MSM.
     pub(crate) fn build_vk<'params, C: CurveAffine, P: Params<'params, C>>(
         self,
         params: &P,
         domain: &EvaluationDomain<C::Scalar>,
         p: &Argument,
-    ) -> VerifyingKey<C> {
+    ) -> halo2_axiom::plonk::permutation::VerifyingKey<C> {
         build_vk(params, domain, p, |i, j| self.mapping[i][j])
     }
 
+    /// Builds the canonical permutation [`ProvingKey`] (σ-polys in Lagrange +
+    /// Coeff form) via GPU iFFT.
     pub(crate) fn build_pk<'params, C: CurveAffine, P: Params<'params, C>>(
         self,
         params: &P,
         domain: &EvaluationDomain<C::Scalar>,
         p: &Argument,
-    ) -> Result<ProvingKey<C>, crate::plonk::Error> {
+    ) -> Result<halo2_axiom::plonk::permutation::ProvingKey<C>, GpuError> {
         build_pk(params, domain, p, |i, j| self.mapping[i][j])
-    }
-
-    /// Returns columns that participate in the permutation argument.
-    pub fn columns(&self) -> &[Column<Any>] {
-        &self.columns
     }
 
     /// Returns mappings of the copies.
@@ -136,13 +149,56 @@ impl Assembly {
     }
 }
 
+/// Computes the σ-permutation polynomials (Lagrange basis) from the copy
+/// `mapping`, then GPU-iFFTs them to Coeff form for the halo2-axiom
+/// permutation `ProvingKey`.
 pub(crate) fn build_pk<'params, C: CurveAffine, P: Params<'params, C>>(
     params: &P,
     domain: &EvaluationDomain<C::Scalar>,
     p: &Argument,
     mapping: impl Fn(usize, usize) -> (usize, usize) + Sync,
-) -> Result<ProvingKey<C>, crate::plonk::Error> {
-    // Compute [omega^0, omega^1, ..., omega^{params.n - 1}]
+) -> Result<halo2_axiom::plonk::permutation::ProvingKey<C>, GpuError> {
+    let permutations = permutation_lagrange_polys::<C, P>(params, domain, p, mapping);
+    // GPU iFFT. NOTE: do not interleave parallelize() with GPU fft() — risks GPU OOM.
+    let polys = domain.lagrange_to_coeff_many(&permutations)?;
+    Ok(halo2_axiom::plonk::permutation::ProvingKey::from_parts(
+        permutations,
+        polys,
+    ))
+}
+
+/// Computes the σ-permutation polynomials and their GPU-MSM commitments for the
+/// halo2-axiom permutation `VerifyingKey`.
+pub(crate) fn build_vk<'params, C: CurveAffine, P: Params<'params, C>>(
+    params: &P,
+    domain: &EvaluationDomain<C::Scalar>,
+    p: &Argument,
+    mapping: impl Fn(usize, usize) -> (usize, usize) + Sync,
+) -> halo2_axiom::plonk::permutation::VerifyingKey<C> {
+    let permutations = permutation_lagrange_polys::<C, P>(params, domain, p, mapping);
+    // GPU MSM commitment per σ-column.
+    let commitments = permutations
+        .iter()
+        .map(|permutation| {
+            params
+                .commit_lagrange(permutation, Blind::default())
+                .to_affine()
+        })
+        .collect();
+    halo2_axiom::plonk::permutation::VerifyingKey::from_commitments(commitments)
+}
+
+/// Shared σ-polynomial construction: `permutation_poly[col][row] =
+/// δ^{permuted_col} · ω^{permuted_row}` per the copy `mapping`.
+fn permutation_lagrange_polys<'params, C: CurveAffine, P: Params<'params, C>>(
+    params: &P,
+    domain: &EvaluationDomain<C::Scalar>,
+    p: &Argument,
+    mapping: impl Fn(usize, usize) -> (usize, usize) + Sync,
+) -> Vec<Polynomial<C::Scalar, LagrangeCoeff>> {
+    let num_columns = p.get_columns().len();
+
+    // [omega^0, omega^1, ..., omega^{n - 1}]
     let mut omega_powers = vec![C::Scalar::ZERO; params.n() as usize];
     {
         let omega = domain.get_omega();
@@ -155,8 +211,8 @@ pub(crate) fn build_pk<'params, C: CurveAffine, P: Params<'params, C>>(
         })
     }
 
-    // Compute [omega_powers * \delta^0, omega_powers * \delta^1, ..., omega_powers * \delta^m]
-    let mut deltaomega = vec![omega_powers; p.columns.len()];
+    // [omega_powers * delta^0, omega_powers * delta^1, ..., omega_powers * delta^m]
+    let mut deltaomega = vec![omega_powers; num_columns];
     {
         parallelize(&mut deltaomega, |o, start| {
             let mut cur = C::Scalar::DELTA.pow_vartime([start as u64]);
@@ -169,8 +225,7 @@ pub(crate) fn build_pk<'params, C: CurveAffine, P: Params<'params, C>>(
         });
     }
 
-    // Compute permutation polynomials, convert to coset form.
-    let mut permutations = vec![domain.empty_lagrange(); p.columns.len()];
+    let mut permutations = vec![domain.empty_lagrange(); num_columns];
     {
         parallelize(&mut permutations, |o, start| {
             for (x, permutation_poly) in o.iter_mut().enumerate() {
@@ -183,76 +238,5 @@ pub(crate) fn build_pk<'params, C: CurveAffine, P: Params<'params, C>>(
         });
     }
 
-    // GPU
-    // note: Do not use parallelize() and GPU fft() at the same time.
-    //       This may cause an out of GPU memory error.
-    let polys = domain.lagrange_to_coeff_many(&permutations)?;
-
-    Ok(ProvingKey {
-        permutations,
-        polys,
-        permutations_device: once_cell::sync::OnceCell::new(),
-    })
-}
-
-pub(crate) fn build_vk<'params, C: CurveAffine, P: Params<'params, C>>(
-    params: &P,
-    domain: &EvaluationDomain<C::Scalar>,
-    p: &Argument,
-    mapping: impl Fn(usize, usize) -> (usize, usize) + Sync,
-) -> VerifyingKey<C> {
-    // Compute [omega^0, omega^1, ..., omega^{params.n - 1}]
-    let mut omega_powers = vec![C::Scalar::ZERO; params.n() as usize];
-    {
-        let omega = domain.get_omega();
-        parallelize(&mut omega_powers, |o, start| {
-            let mut cur = omega.pow_vartime([start as u64]);
-            for v in o.iter_mut() {
-                *v = cur;
-                cur *= &omega;
-            }
-        })
-    }
-
-    // Compute [omega_powers * \delta^0, omega_powers * \delta^1, ..., omega_powers * \delta^m]
-    let mut deltaomega = vec![omega_powers; p.columns.len()];
-    {
-        parallelize(&mut deltaomega, |o, start| {
-            let mut cur = C::Scalar::DELTA.pow_vartime([start as u64]);
-            for omega_powers in o.iter_mut() {
-                for v in omega_powers {
-                    *v *= &cur;
-                }
-                cur *= &<C::Scalar as PrimeField>::DELTA;
-            }
-        });
-    }
-
-    // Computes the permutation polynomial based on the permutation
-    // description in the assembly.
-    let mut permutations = vec![domain.empty_lagrange(); p.columns.len()];
-    {
-        parallelize(&mut permutations, |o, start| {
-            for (x, permutation_poly) in o.iter_mut().enumerate() {
-                let i = start + x;
-                for (j, p) in permutation_poly.iter_mut().enumerate() {
-                    let (permuted_i, permuted_j) = mapping(i, j);
-                    *p = deltaomega[permuted_i][permuted_j];
-                }
-            }
-        });
-    }
-
-    // Pre-compute commitments for the URS.
-    let mut commitments = Vec::with_capacity(p.columns.len());
-    for permutation in &permutations {
-        // Compute commitment to permutation polynomial
-        commitments.push(
-            params
-                .commit_lagrange(permutation, Blind::default())
-                .to_affine(),
-        );
-    }
-
-    VerifyingKey { commitments }
+    permutations
 }

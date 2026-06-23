@@ -19,7 +19,8 @@
 // #![deny(unsafe_code)]
 
 pub mod arithmetic;
-pub mod circuit;
+/// Frontend circuit API, re-exported from the canonical `halo2-axiom` crate.
+pub use halo2_axiom::circuit;
 pub use halo2curves;
 /// Test-oracle and runtime-fallback CPU implementations corresponding to GPU
 /// primitives elsewhere in the crate. This module is `pub` only to let
@@ -29,11 +30,12 @@ pub use halo2curves;
 #[doc(hidden)]
 pub mod cpu;
 pub mod cuda;
-pub mod dev;
+/// Circuit development tooling (MockProver etc.), re-exported from canonical `halo2-axiom`.
+pub use halo2_axiom::dev;
 pub mod fft;
-mod helpers;
 mod multicore;
 pub mod plonk;
 pub mod poly;
-pub mod transcript;
-pub use helpers::SerdeFormat;
+pub use halo2_axiom::transcript;
+pub use halo2_axiom::SerdeFormat;
+pub(crate) use halo2_axiom::{CurveRead, SerdeCurveAffine, SerdePrimeField};

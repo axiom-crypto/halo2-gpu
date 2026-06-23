@@ -6,7 +6,7 @@ use group::ff::{BatchInvert, Field};
 use itertools::Itertools;
 use rayon::prelude::*;
 
-use crate::plonk::Assigned;
+use crate::plonk::GpuAssigned;
 use crate::poly::{LagrangeCoeff, Polynomial};
 
 #[cfg(test)]
@@ -16,11 +16,13 @@ use crate::cuda::HaloGpuError;
 
 pub(crate) mod domain;
 
+// CPU batch-inversion: used by keygen's fixed-column path and as the reference
+// for the device batch-inversion equivalence tests.
 pub(crate) fn batch_invert_assigned<F: Field, PR>(
     assigned: impl AsRef<[PR]>,
 ) -> Vec<Polynomial<F, LagrangeCoeff>>
 where
-    PR: Deref<Target = [Assigned<F>]> + Send + Sync,
+    PR: Deref<Target = [GpuAssigned<F>]> + Send + Sync,
 {
     batch_invert_assigned_par(assigned)
 }
@@ -29,7 +31,7 @@ pub(crate) fn batch_invert_assigned_par<F: Field, PR>(
     assigned: impl AsRef<[PR]>,
 ) -> Vec<Polynomial<F, LagrangeCoeff>>
 where
-    PR: Deref<Target = [Assigned<F>]> + Send + Sync,
+    PR: Deref<Target = [GpuAssigned<F>]> + Send + Sync,
 {
     let assigned = assigned.as_ref();
     if assigned.is_empty() {
@@ -84,9 +86,9 @@ where
         .collect()
 }
 
-// currently, the host overhead for processing Assigned<F> is huge
+// currently, the host overhead for processing GpuAssigned<F> is huge
 // the e2e time of batch_invert_gpu() is a very small percentage of the total time
-// benchmarking found it's better to just not process the slice of `Assigned<F>` and just use gpu to invert it ALL
+// benchmarking found it's better to just not process the slice of `GpuAssigned<F>` and just use gpu to invert it ALL
 //
 // Host-output sibling retained under `#[cfg(test)]` only: production callers
 // use the device-output sibling `batch_invert_assigned_device`. The
@@ -96,7 +98,7 @@ pub(crate) fn batch_invert_assigned_gpu<F: Field, PR>(
     assigned: impl AsRef<[PR]>,
 ) -> Result<Vec<Polynomial<F, LagrangeCoeff>>, HaloGpuError>
 where
-    PR: Deref<Target = [Assigned<F>]> + Send + Sync,
+    PR: Deref<Target = [GpuAssigned<F>]> + Send + Sync,
 {
     #[cfg(feature = "profile")]
     let time = std::time::Instant::now();

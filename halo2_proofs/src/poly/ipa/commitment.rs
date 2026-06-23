@@ -5,10 +5,10 @@
 
 use crate::arithmetic::{best_multiexp, g_to_lagrange, CurveAffine, CurveExt};
 use crate::cpu::arithmetic::parallelize;
-use crate::helpers::CurveRead;
 use crate::poly::commitment::{Blind, CommitmentScheme, Params, ParamsProver, ParamsVerifier};
 use crate::poly::ipa::msm::MSMIPA;
 use crate::poly::{Coeff, LagrangeCoeff, Polynomial};
+use crate::CurveRead;
 
 use group::{Curve, Group};
 use std::marker::PhantomData;

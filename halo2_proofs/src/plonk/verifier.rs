@@ -4,7 +4,7 @@ use std::iter;
 
 use super::{
     vanishing, ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX, ChallengeY, Error,
-    VerifyingKey,
+    GpuVerifyingKey, VerifyingKey,
 };
 use crate::arithmetic::compute_inner_product;
 use crate::poly::commitment::{CommitmentScheme, Verifier};
@@ -33,6 +33,11 @@ pub fn verify_proof<
 where
     Scheme::Scalar: WithSmallOrderMulGroup<3> + FromUniformBytes<64>,
 {
+    // The verifier's methods attach to the GPU-crate forks, so rebuild the GPU
+    // verifying key from the canonical vk (pure host) and shadow `vk`.
+    let gpu_vk = GpuVerifyingKey::<Scheme::Curve>::from_host(vk);
+    let vk = &gpu_vk;
+
     for instances in instances.iter() {
         if instances.len() != vk.cs.num_instance_columns {
             return Err(Error::InvalidInstances);

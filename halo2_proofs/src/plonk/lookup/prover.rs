@@ -1,6 +1,6 @@
 use super::super::{
-    circuit::Expression, ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX, Error,
-    ProvingKey,
+    circuit::GpuExpression, ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX, GpuError,
+    GpuProvingKey,
 };
 use super::Argument;
 use crate::cuda::funcs::{
@@ -81,7 +81,7 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
     /// The Permuted<C> struct is used to update the Lookup, and is then returned.
     pub(in crate::plonk) fn commit_permuted<'a, 'params: 'a, C, P: Params<'params, C>>(
         &self,
-        pk: &ProvingKey<C>,
+        pk: &GpuProvingKey<'_, C>,
         params: &P,
         domain: &EvaluationDomain<C::Scalar>,
         theta: ChallengeTheta<C>,
@@ -90,7 +90,7 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
         instance_values_device: &'a [Polynomial<C::Scalar, LagrangeCoeff, Device>],
         challenges: &'a [C::Scalar],
         column_pool: Option<&ColumnPool<C::Scalar>>,
-    ) -> Result<(Permuted<C>, C, C), Error>
+    ) -> Result<(Permuted<C>, C, C), GpuError>
     where
         F: Hash,
         C: CurveAffine<ScalarExt = F>,
@@ -101,7 +101,7 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
         // or its lazy upload failed VRAM gating). Materialises the
         // device-resident advice / instance columns on the host on demand;
         // the device-arm common path does not enter this closure.
-        let compress_expressions_host = |expressions: &[Expression<C::Scalar>]| {
+        let compress_expressions_host = |expressions: &[GpuExpression<C::Scalar>]| {
             let advice_values_host: Vec<Polynomial<C::Scalar, LagrangeCoeff>> =
                 advice_values_device.iter().map(|p| p.to_host()).collect();
             let instance_values_host: Vec<Polynomial<C::Scalar, LagrangeCoeff>> =
@@ -109,7 +109,7 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
             let compressed_expression = expressions
                 .iter()
                 .map(|expression| {
-                    pk.vk.domain.lagrange_from_vec(evaluate(
+                    pk.domain.lagrange_from_vec(evaluate(
                         expression,
                         params.n() as usize,
                         1,
@@ -129,7 +129,7 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
         // pool is available. Falls back to the CPU closure on pool miss
         // (the caller may pass `None` when VRAM gating failed at pool
         // init).
-        let compress_expressions = |expressions: &[Expression<C::Scalar>]| {
+        let compress_expressions = |expressions: &[GpuExpression<C::Scalar>]| {
             if let Some(pool) = column_pool {
                 if pool.is_initialized() {
                     match compress_expressions_device::<C>(
@@ -140,7 +140,7 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
                         pool,
                         challenges,
                     ) {
-                        Ok(values) => return pk.vk.domain.lagrange_from_vec(values),
+                        Ok(values) => return pk.domain.lagrange_from_vec(values),
                         Err(e) => {
                             log::warn!(
                                 "compress_expressions_device failed ({:?}); host-arm fallback",
@@ -161,7 +161,7 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
         // end so `commit_product` and `params.commit_lagrange` consume the
         // same host slices they do today.
         let n = params.n() as usize;
-        let usable_rows = n - (pk.vk.cs.blinding_factors() + 1);
+        let usable_rows = n - (pk.cs.blinding_factors() + 1);
         let fused_device = column_pool
             .filter(|pool| pool.is_initialized())
             .and_then(|pool| {
@@ -228,8 +228,8 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
                 .to_host_sync()
                 .map_err(HaloGpuError::from)?;
             (
-                pk.vk.domain.lagrange_from_vec(compressed_input_host),
-                pk.vk.domain.lagrange_from_vec(compressed_table_host),
+                pk.domain.lagrange_from_vec(compressed_input_host),
+                pk.domain.lagrange_from_vec(compressed_table_host),
                 MaybeDevice::Device(Polynomial::<C::Scalar, LagrangeCoeff, Device>::from_device(
                     d_pi,
                 )),
@@ -312,14 +312,14 @@ impl<C: CurveAffine> Permuted<C> {
     /// added to the Lookup and finally returned by the method.
     pub(in crate::plonk) fn commit_product<'params, P: Params<'params, C>, R: RngCore>(
         self,
-        pk: &ProvingKey<C>,
+        pk: &GpuProvingKey<'_, C>,
         params: &P,
         beta: ChallengeBeta<C>,
         gamma: ChallengeGamma<C>,
         mut rng: R,
-    ) -> Result<(Committed<C>, C), Error> {
+    ) -> Result<(Committed<C>, C), GpuError> {
         crate::perf_section!("lookup_commit_product");
-        let blinding_factors = pk.vk.cs.blinding_factors();
+        let blinding_factors = pk.cs.blinding_factors();
         // Goal is to compute the products of fractions
         //
         // Numerator: (\theta^{m-1} a_0(\omega^i) + \theta^{m-2} a_1(\omega^i) + ... + \theta a_{m-2}(\omega^i) + a_{m-1}(\omega^i) + \beta)
@@ -451,7 +451,7 @@ impl<C: CurveAffine> Permuted<C> {
         let product_commitment = params
             .commit_lagrange_device(&z, Blind::default())
             .to_affine();
-        let product_poly = pk.vk.domain.lagrange_to_coeff_device_input(z)?;
+        let product_poly = pk.domain.lagrange_to_coeff_device_input(z)?;
 
         Ok((
             Committed::<C> {
@@ -467,11 +467,11 @@ impl<C: CurveAffine> Permuted<C> {
 impl<C: CurveAffine> CommittedUnpacked<C> {
     pub(in crate::plonk) fn evaluate<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
         self,
-        pk: &ProvingKey<C>,
+        pk: &GpuProvingKey<'_, C>,
         x: ChallengeX<C>,
         transcript: &mut T,
-    ) -> Result<Evaluated<C>, Error> {
-        let domain = &pk.vk.domain;
+    ) -> Result<Evaluated<C>, GpuError> {
+        let domain = &pk.domain;
         let x_inv = domain.rotate_omega(*x, Rotation::prev());
         let x_next = domain.rotate_omega(*x, Rotation::next());
 
@@ -525,11 +525,11 @@ impl<C: CurveAffine> CommittedUnpacked<C> {
 impl<C: CurveAffine> Evaluated<C> {
     pub(in crate::plonk) fn open<'a>(
         &'a self,
-        pk: &'a ProvingKey<C>,
+        pk: &'a GpuProvingKey<'_, C>,
         x: ChallengeX<C>,
     ) -> impl Iterator<Item = ProverQuery<'a, C>> + Clone {
-        let x_inv = pk.vk.domain.rotate_omega(*x, Rotation::prev());
-        let x_next = pk.vk.domain.rotate_omega(*x, Rotation::next());
+        let x_inv = pk.domain.rotate_omega(*x, Rotation::prev());
+        let x_next = pk.domain.rotate_omega(*x, Rotation::next());
 
         iter::empty()
             // Open lookup product commitments at x
@@ -570,8 +570,8 @@ impl<C: CurveAffine> Evaluated<C> {
 fn run_compress_permute_device<C: CurveAffine>(
     pool: &ColumnPool<C::Scalar>,
     theta: C::Scalar,
-    input_expressions: &[Expression<C::Scalar>],
-    table_expressions: &[Expression<C::Scalar>],
+    input_expressions: &[GpuExpression<C::Scalar>],
+    table_expressions: &[GpuExpression<C::Scalar>],
     n: usize,
     usable_rows: usize,
     challenges: &[C::Scalar],
@@ -654,16 +654,16 @@ type ExpressionPair<F> = (Polynomial<F, LagrangeCoeff>, Polynomial<F, LagrangeCo
 ///
 /// This method returns (A', S') if no errors are encountered.
 fn permute_expression_pair<'params, C: CurveAffine, P: Params<'params, C>>(
-    pk: &ProvingKey<C>,
+    pk: &GpuProvingKey<'_, C>,
     params: &P,
     domain: &EvaluationDomain<C::Scalar>,
     input_expression: &Polynomial<C::Scalar, LagrangeCoeff>,
     table_expression: &Polynomial<C::Scalar, LagrangeCoeff>,
-) -> Result<ExpressionPair<C::Scalar>, Error>
+) -> Result<ExpressionPair<C::Scalar>, GpuError>
 where
     C::Scalar: Hash,
 {
-    let usable_rows = params.n() as usize - (pk.vk.cs.blinding_factors() + 1);
+    let usable_rows = params.n() as usize - (pk.cs.blinding_factors() + 1);
 
     #[cfg(feature = "permute_par")]
     let (permuted_input_expression, permuted_table_coeffs) = permute_expression_pair_par::<C>(
@@ -850,7 +850,10 @@ fn permute_expression_pair_seq<C: CurveAffine>(
                     None
                 } else {
                     // Return error if input_value not found
-                    panic!("{:?}", Error::ConstraintSystemFailure);
+                    panic!(
+                        "{:?}",
+                        GpuError::Canonical(halo2_axiom::plonk::Error::ConstraintSystemFailure)
+                    );
                 }
                 // If input value is repeated
             } else {
@@ -905,7 +908,7 @@ mod tests {
     fn permute_expression_pair_par_scroll<C: CurveAffine>(
         permuted_input_expression: &mut [C::Scalar],
         table_expression: &Polynomial<C::Scalar, LagrangeCoeff>,
-    ) -> Result<Vec<C::Scalar>, Error> {
+    ) -> Result<Vec<C::Scalar>, GpuError> {
         let usable_rows = permuted_input_expression.len();
 
         // Sort input lookup expression values
@@ -995,7 +998,9 @@ mod tests {
                     }
                     if not_found {
                         // Return error if input_value not found
-                        Some(Err(Error::ConstraintSystemFailure))
+                        Some(Err(GpuError::Canonical(
+                            halo2_axiom::plonk::Error::ConstraintSystemFailure,
+                        )))
                     } else {
                         None
                     }

@@ -4,7 +4,7 @@ use ff::Field;
 
 use crate::{
     arithmetic::CurveAffine,
-    plonk::{Error, VerifyingKey},
+    plonk::{Error, GpuVerifyingKey},
     poly::{
         commitment::{Params, MSM},
         VerifierQuery,
@@ -58,7 +58,7 @@ impl<C: CurveAffine> Committed<C> {
         T: TranscriptRead<C, E>,
     >(
         self,
-        vk: &VerifyingKey<C>,
+        vk: &GpuVerifyingKey<C>,
         transcript: &mut T,
     ) -> Result<Constructed<C>, Error> {
         // Obtain a commitment to h(X) in the form of multiple pieces of degree n - 1

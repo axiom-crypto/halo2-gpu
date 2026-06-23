@@ -1,5 +1,5 @@
 #![allow(clippy::type_complexity)]
-use ff::{Field, WithSmallOrderMulGroup};
+use ff::{Field, FromUniformBytes, WithSmallOrderMulGroup};
 use group::Curve;
 use log::info;
 use rand_core::RngCore;
@@ -11,19 +11,18 @@ use std::ops::RangeTo;
 use std::{collections::HashMap, iter};
 
 use super::{
-    circuit::{
-        sealed::{self},
-        Advice, Any, Assignment, Challenge, Circuit, Column, ConstraintSystem, Fixed, FloorPlanner,
-        Instance, Selector,
-    },
+    circuit::sealed::{self},
     lookup, permutation, vanishing, ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX,
-    ChallengeY, Error, ProvingKey,
+    ChallengeY, GpuError, GpuProvingKey, ProvingKey,
 };
 use crate::{
     arithmetic::CurveAffine,
     circuit::Value,
     cuda::funcs::batch_eval_polynomial_d2h,
-    plonk::{evaluation, Assigned},
+    plonk::{
+        evaluation, Advice, Any, Assigned, Assignment, Challenge, Circuit, Column,
+        ConstraintSystem, Fixed, FloorPlanner, GpuAssigned, Instance, Selector,
+    },
     poly::{
         commitment::{Blind, CommitmentScheme, Params, Prover},
         Coeff, EvaluationDomain, LagrangeCoeff, Polynomial, ProverQuery,
@@ -62,31 +61,38 @@ pub fn create_proof<
     instances: &[&'a [&'a [Scheme::Scalar]]],
     mut rng: R,
     mut transcript: &'a mut T,
-) -> Result<(), Error>
+) -> Result<(), GpuError>
 where
-    Scheme::Scalar: Hash + WithSmallOrderMulGroup<3>,
-    // GPU prover spawns a scoped thread that borrows `params`, so it needs Sync.
-    // The ParamsProver trait itself does not require Sync (to match CPU halo2's API),
-    // but the GPU create_proof function does.
+    // `FromUniformBytes<64>` is needed to build the GPU proving-key view via
+    // `GpuProvingKey::from_host_ref` → `ProvingKey::get_vk`.
+    Scheme::Scalar: Hash + WithSmallOrderMulGroup<3> + FromUniformBytes<64>,
+    // The prover spawns a scoped thread that borrows `params`, so it needs Sync
+    // (the `ParamsProver` trait itself does not, to match CPU halo2's API).
     Scheme::ParamsProver: Sync,
 {
-    // Resets the GPU memory peak so the reported peak is per-proof rather than
-    // process-lifetime. Must run before any early-return path so all work is
-    // attributed to this span.
+    // Resets the GPU memory peak so the reported peak is per-proof. Must run
+    // before any early-return path.
     crate::perf_section_root!("create_proof");
 
     assert_eq!(circuits.len(), instances.len());
     assert!(!circuits.is_empty());
 
-    let num_instance = pk.vk.cs.num_instance_columns;
+    // Build the GPU proving-key view by borrowing the canonical key (no host-poly
+    // clone; device mirrors stay lazy).
+    let gpu_pk = GpuProvingKey::from_host_ref(pk);
+    let pk = &gpu_pk;
+
+    let num_instance = pk.cs.num_instance_columns;
     for instance in instances.iter() {
         if instance.len() != num_instance {
-            return Err(Error::InvalidInstances);
+            return Err(GpuError::Canonical(
+                halo2_axiom::plonk::Error::InvalidInstances,
+            ));
         }
     }
-    pk.vk.hash_into(transcript)?;
+    pk.hash_into(transcript)?;
 
-    let domain = &pk.vk.domain;
+    let domain = &pk.domain;
     #[cfg(feature = "profile")]
     info!("extended_k: {}", domain.extended_k());
     let mut meta = ConstraintSystem::default();
@@ -95,9 +101,12 @@ where
     #[cfg(not(feature = "circuit-params"))]
     let config = ConcreteCircuit::configure(&mut meta);
 
-    // Selector optimizations cannot be applied here; use the ConstraintSystem
-    // from the verification key.
-    let meta = &pk.vk.cs;
+    // Capture the constant columns from the freshly-configured canonical cs
+    // (which `FloorPlanner::synthesize` needs as `Vec<Column<Fixed>>`) before
+    // shadowing `meta` with `pk.cs`. Selector compression never alters the
+    // constant columns, so they match by construction.
+    let constants = meta.constants().clone();
+    let meta = &pk.cs;
 
     #[derive(Default)]
     struct InstanceSingle<C: CurveAffine> {
@@ -132,7 +141,11 @@ where
         num_instance_columns: usize,
         #[allow(dead_code)]
         num_advice_columns: usize,
-        pub advice: Vec<Assigned<C::Scalar>>,
+        // Advice cells in device-repr `GpuAssigned` so the per-phase
+        // `batch_invert_assigned_device` upload borrows each column directly. The
+        // canonical `Assigned` from `assign_advice` is reinterpreted from these
+        // bytes (layouts checked by `assert_canonical_assigned_matches_gpu_layout`).
+        pub advice: Vec<GpuAssigned<C::Scalar>>,
         challenges: &'b mut HashMap<usize, C::Scalar>,
         instances: &'a [&'a [C::Scalar]],
         usable_rows: RangeTo<usize>,
@@ -166,7 +179,12 @@ where
 
         fn exit_region(&mut self) {}
 
-        fn enable_selector<A, AR>(&mut self, _: A, _: &Selector, _: usize) -> Result<(), Error>
+        fn enable_selector<A, AR>(
+            &mut self,
+            _: A,
+            _: &Selector,
+            _: usize,
+        ) -> Result<(), halo2_axiom::plonk::Error>
         where
             A: FnOnce() -> AR,
             AR: Into<String>,
@@ -181,16 +199,23 @@ where
         {
         }
 
-        fn query_instance(&self, column: Column<Instance>, row: usize) -> Result<Value<F>, Error> {
+        fn query_instance(
+            &self,
+            column: Column<Instance>,
+            row: usize,
+        ) -> Result<Value<F>, halo2_axiom::plonk::Error> {
             if !self.usable_rows.contains(&row) {
-                return Err(Error::not_enough_rows_available(self.params.k()));
+                // Build the canonical error variant directly (its constructor is `pub(crate)`).
+                return Err(halo2_axiom::plonk::Error::NotEnoughRowsAvailable {
+                    current_k: self.params.k(),
+                });
             }
 
             self.instances
                 .get(column.index())
                 .and_then(|column| column.get(row))
                 .map(|v| Value::known(*v))
-                .ok_or(Error::BoundsFailure)
+                .ok_or(halo2_axiom::plonk::Error::BoundsFailure)
         }
 
         fn assign_advice<'v>(
@@ -202,7 +227,7 @@ where
             debug_assert!(
                 self.usable_rows.contains(&row),
                 "{:?}",
-                Error::not_enough_rows_available(self.params.k())
+                GpuError::not_enough_rows_available(self.params.k())
             );
 
             // 3-4% witness-gen speedup vs `get_mut` + bounds checks.
@@ -210,10 +235,18 @@ where
                 self.advice
                     .get_unchecked_mut(column.index() * self.params_n + row)
             };
-            *advice_get_mut = to
-                .assign()
-                .expect("No Value::unknown() in advice column allowed during create_proof");
-            let immutable_raw_ptr = advice_get_mut as *const Assigned<F>;
+            // `Value::assign()` is `pub(crate)`; extract the known `Assigned` via
+            // the public `map`, preserving the panic-on-unknown contract.
+            let mut assigned = None;
+            to.map(|v| assigned = Some(v));
+            *advice_get_mut = GpuAssigned::from(
+                assigned.expect("No Value::unknown() in advice column allowed during create_proof"),
+            );
+            // The contract returns `Value<&Assigned<F>>`. The stored cell is
+            // reinterpreted in place (layouts coincide per
+            // `assert_canonical_assigned_matches_gpu_layout`); the reference stays
+            // valid because `advice` is pre-sized and never reallocated.
+            let immutable_raw_ptr = advice_get_mut as *const GpuAssigned<F> as *const Assigned<F>;
             Value::known(unsafe { &*immutable_raw_ptr })
         }
 
@@ -226,7 +259,7 @@ where
             _: Column<Fixed>,
             _: usize,
             _: Value<Assigned<F>>,
-        ) -> Result<(), Error> {
+        ) -> Result<(), halo2_axiom::plonk::Error> {
             Ok(())
         }
 
@@ -271,7 +304,7 @@ where
                         debug_assert_eq!(poly.len(), self.params.n() as usize);
                         debug_assert!(
                             values.len() <= self.unusable_rows_start,
-                            "Error: InstanceTooLarge"
+                            "GpuError: InstanceTooLarge"
                         );
                         poly.values_mut()
                             .par_iter_mut()
@@ -288,12 +321,10 @@ where
 
             #[cfg(feature = "profile")]
             let bf_time = start_timer!(|| "add blinding factors");
-            // Write blinding-factor cells into the `Vec<Assigned<F>>`
-            // tail of each phase column BEFORE the device batch_invert.
-            // The synthesizer leaves these rows at `Assigned::Zero`;
-            // `Assigned::Trivial(F::random)` round-trips through
-            // batch_invert with denominator None (inv_denom = 1), so
-            // the device-output cells receive the random value directly.
+            // Write blinding-factor cells into each phase column's tail before the
+            // device batch_invert. `Trivial(F::random)` round-trips through
+            // batch_invert (denominator None), so the device cells get the value
+            // directly.
             let column_indices_for_phase = self
                 .column_indices
                 .get(phase)
@@ -304,7 +335,7 @@ where
                 let blind_start = col_start + self.unusable_rows_start;
                 let col_end = col_start + self.params_n;
                 for cell in &mut self.advice[blind_start..col_end] {
-                    *cell = Assigned::Trivial(F::random(&mut self.rng));
+                    *cell = GpuAssigned::Trivial(F::random(&mut self.rng));
                 }
             }
             #[cfg(feature = "profile")]
@@ -312,7 +343,8 @@ where
 
             #[cfg(feature = "profile")]
             let batch_invert_time = start_timer!(|| "batch invert witness assignment");
-            // `Assignment::next_phase` returns `()`, so errors must `expect` rather than `?`.
+            // Advice cells are already device-repr `GpuAssigned`, handed to the upload
+            // kernel by borrow.
             let advice_values = batch_invert_assigned_device(
                 column_indices_for_phase
                     .iter()
@@ -320,7 +352,7 @@ where
                         &self.advice
                             [*column_index * self.params_n..(*column_index + 1) * self.params_n]
                     })
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<&[GpuAssigned<C::Scalar>]>>(),
             )
             .expect("batch_invert_assigned_device (CUDA) failed inside Assignment::next_phase");
             #[cfg(feature = "profile")]
@@ -399,7 +431,7 @@ where
             Vec<Polynomial<C::Scalar, Coeff, Device>>,
             Vec<C>,
         ),
-        Error,
+        GpuError,
     >
     where
         Scheme: CommitmentScheme<Curve = C, Scalar = C::ScalarExt>,
@@ -447,10 +479,7 @@ where
             instance_polys.extend(batch_polys);
         }
 
-        // Device-resident advice iFFT: `lagrange_to_coeff_many_device_inputs`
-        // consumes the device-resident `advice_values` produced upstream and
-        // returns device-resident `advice_polys` that feed the downstream
-        // cosetFFT directly.
+        // Device-resident advice iFFT: `advice_values` → `advice_polys`.
         #[cfg(feature = "profile")]
         let advice_ifft_time =
             start_timer!(|| format!("{} advice ifft (device)", advice_values.len()));
@@ -465,7 +494,7 @@ where
             crate::perf_section!("new_gpu_thread.instance_to_device");
             instance_values
                 .iter()
-                .map(|p| -> Result<_, Error> {
+                .map(|p| -> Result<_, GpuError> {
                     let d_buf = p
                         .values()
                         .to_device_on(&HALO2_GPU_CTX)
@@ -509,7 +538,7 @@ where
             let mut instance = Vec::with_capacity(instances.len());
 
             let unusable_rows_start = params.n() as usize - (meta.blinding_factors() + 1);
-            let phases = pk.vk.cs.phases().collect::<Vec<_>>();
+            let phases = pk.cs.phases().collect::<Vec<_>>();
             let num_phases = phases.len();
             // WARNING: this will currently not work if `circuits` has more than 1 circuit
             // because the original API squeezes the challenges for a phase after running all circuits
@@ -525,6 +554,10 @@ where
             let mut challenges =
                 HashMap::<usize, Scheme::Scalar>::with_capacity(meta.num_challenges);
 
+            // Soundness guard for the `assign_advice` reinterpret of `GpuAssigned`
+            // as canonical `Assigned`; verifies the layouts coincide.
+            crate::plonk::assert_canonical_assigned_matches_gpu_layout::<Scheme::Scalar>();
+
             for (circuit, instances) in circuits.iter().zip(instances) {
                 #[cfg(feature = "profile")]
                 let start = std::time::Instant::now();
@@ -536,7 +569,7 @@ where
                     current_phase: phases[0],
                     num_instance_columns: num_instance,
                     num_advice_columns: meta.num_advice_columns,
-                    advice: vec![Assigned::Zero; params.n() as usize * meta.num_advice_columns],
+                    advice: vec![GpuAssigned::Zero; params.n() as usize * meta.num_advice_columns],
                     instances,
                     challenges: &mut challenges,
                     usable_rows: ..unusable_rows_start,
@@ -560,14 +593,14 @@ where
 
                 #[cfg(feature = "profile")]
                 let witness_assign_time = start_timer!(|| "synthesize + next phase calls");
-                // Loop covers legacy circuits that don't use the `next_phase` API; new
+                // Loop covers legacy circuits that don't use `next_phase`; new
                 // circuits run synthesize once.
                 while witness.current_phase.to_u8() < num_phases as u8 {
                     ConcreteCircuit::FloorPlanner::synthesize(
                         &mut witness,
                         circuit,
                         config.clone(),
-                        meta.constants.clone(),
+                        constants.clone(),
                     )
                     .expect("synthesize failed");
                     if witness.current_phase.to_u8() < num_phases as u8 {
@@ -611,27 +644,20 @@ where
     let (lookups, beta, gamma) = {
         crate::perf_section!("phase2");
 
-        info!("{} lookups (A', S') ifft/msm", pk.vk.cs.lookups.len());
-        // Single-stream sequential commit: a previous worker-thread + channel
-        // pipeline pretended the MSMs could overlap across GPUs, but with one
-        // stream they can't, so the channel hops were pure overhead.
-        //
-        // Build a per-prove `ColumnPool` once for each
-        // (instance, advice) tuple and reuse it across the N lookups.
-        // The pool uploads fixed/advice/instance columns to device
-        // memory exactly once and hands device pointers to
-        // `compress_expressions_device` via the
-        // `_halo2_quotient_device_columns` FFI. VRAM gating happens
-        // lazily inside `try_init`; on failure the caller falls back
-        // to the CPU `compress_expressions` closure.
+        info!("{} lookups (A', S') ifft/msm", pk.cs.lookups.len());
+        // Build a per-prove `ColumnPool` once per (instance, advice) tuple and
+        // reuse it across the N lookups. The pool uploads fixed/advice/instance
+        // columns to device memory once and hands device pointers to
+        // `compress_expressions_device`. VRAM gating happens lazily in `try_init`;
+        // on failure the caller falls back to the CPU `compress_expressions`.
         let lookups: Vec<Vec<lookup::prover::Permuted<Scheme::Curve>>> = instance
             .iter()
             .zip(advice.iter())
-            .map(|(instance, advice)| -> Result<_, Error> {
+            .map(|(instance, advice)| -> Result<_, GpuError> {
                 let mut pool = ColumnPool::<Scheme::Scalar>::new(params.n() as usize);
-                if !pk.vk.cs.lookups.is_empty() {
+                if !pk.cs.lookups.is_empty() {
                     let fixed_slices: Vec<&[Scheme::Scalar]> =
-                        pk.fixed_values.iter().map(|p| p.values()).collect();
+                        pk.inner.fixed_values().iter().map(|p| p.values()).collect();
                     let pk_fixed_mirror = pk.fixed_values_device();
                     if let Err(e) = pool.try_init_device(
                         pk_fixed_mirror,
@@ -643,19 +669,18 @@ where
                     }
                 }
                 let pool_ref = pool.is_initialized().then_some(&pool);
-                pk.vk
-                    .cs
+                pk.cs
                     .lookups
                     .iter()
                     .map(
-                        |lookup| -> Result<lookup::prover::Permuted<Scheme::Curve>, Error> {
+                        |lookup| -> Result<lookup::prover::Permuted<Scheme::Curve>, GpuError> {
                             let (permuted, input_c, table_c) = lookup.commit_permuted(
                                 pk,
                                 params,
                                 domain,
                                 theta,
                                 &advice.advice_values,
-                                &pk.fixed_values,
+                                pk.inner.fixed_values(),
                                 &instance.instance_values,
                                 &challenges,
                                 pool_ref,
@@ -665,9 +690,9 @@ where
                             Ok(permuted)
                         },
                     )
-                    .collect::<Result<Vec<_>, Error>>()
+                    .collect::<Result<Vec<_>, GpuError>>()
             })
-            .collect::<Result<Vec<_>, Error>>()?;
+            .collect::<Result<Vec<_>, GpuError>>()?;
 
         let beta: ChallengeBeta<_> = transcript.squeeze_challenge_scalar();
         let gamma: ChallengeGamma<_> = transcript.squeeze_challenge_scalar();
@@ -683,18 +708,17 @@ where
             instance
                 .iter()
                 .zip(advice.iter())
-                .map(|(instance, advice)| -> Result<_, Error> {
-                    let fixed_values_device = pk.fixed_values_device().ok_or(Error::HaloGpu(
+                .map(|(instance, advice)| -> Result<_, GpuError> {
+                    let fixed_values_device = pk.fixed_values_device().ok_or(GpuError::HaloGpu(
                         crate::cuda::HaloGpuError::InsufficientGpuMemory {
                             context: "plonk::prover: pk.fixed_values_device() unavailable",
-                            magnitude: pk.fixed_values.len() as u64,
+                            magnitude: pk.inner.fixed_values().len() as u64,
                             free_bytes: 0,
                         },
                     ))?;
-                    let (committed, commitments) = pk.vk.cs.permutation.commit(
+                    let (committed, commitments) = pk.cs.permutation.commit(
                         params,
                         pk,
-                        &pk.permutation,
                         &advice.advice_values,
                         fixed_values_device,
                         &instance.instance_values,
@@ -714,11 +738,11 @@ where
             crate::perf_section!("phase3b");
             lookups
                 .into_iter()
-                .map(|lookups| -> Result<Vec<_>, Error> {
+                .map(|lookups| -> Result<Vec<_>, GpuError> {
                     lookups
                         .into_iter()
                         .map(
-                            |lookup| -> Result<lookup::prover::Committed<Scheme::Curve>, Error> {
+                            |lookup| -> Result<lookup::prover::Committed<Scheme::Curve>, GpuError> {
                                 let (committed, commitment) =
                                     lookup.commit_product(pk, params, beta, gamma, &mut rng)?;
                                 transcript.write_point(commitment)?;
@@ -745,14 +769,13 @@ where
 
     info!("num_advice: {}", advice[0].advice_polys.len());
     info!("instance: {}", instance[0].instance_polys.len());
-    info!("fixed: {}", pk.fixed_polys.len());
+    info!("fixed: {}", pk.inner.fixed_polys().len());
     info!("lookup: {}", lookups[0].len());
     info!("permutation: {}", permutations[0].sets.len());
     info!("cals: {:?}", pk.ev.custom_gates.calculations.len());
     info!(
         "num_of_gates: {}",
-        pk.vk
-            .cs
+        pk.cs
             .gates
             .iter()
             .map(|gate| gate.polynomials().len())
@@ -870,8 +893,7 @@ where
                     .iter()
                     .map(|(c, at)| (c.index(), *at))
                     .collect();
-                // Device-input batch evaluation: per-query DeviceBuffer
-                // references are borrowed from `advice.advice_polys`.
+                // Per-query DeviceBuffer references borrowed from `advice_polys`.
                 let d_polys: Vec<&DeviceBuffer<Scheme::Scalar>> = queries_idx
                     .iter()
                     .map(|(col_idx, _)| advice.advice_polys[*col_idx].device_buf())
@@ -889,8 +911,8 @@ where
 
             let batch_size = meta.fixed_queries.len();
             info!("fixed batch size: {}", batch_size);
-            info!("    pk.fixed_polys.len: {}", pk.fixed_polys.len());
-            if batch_size > 0 && !pk.fixed_polys.is_empty() {
+            info!("    pk.fixed_polys.len: {}", pk.inner.fixed_polys().len());
+            if batch_size > 0 && !pk.inner.fixed_polys().is_empty() {
                 let queries_idx: Vec<_> = meta
                     .fixed_queries
                     .iter()
@@ -914,16 +936,15 @@ where
 
         let vanishing = vanishing.evaluate(x, xn, domain, transcript)?;
 
-        pk.permutation.evaluate(x, transcript)?;
+        pk.evaluate_permutation(x, transcript)?;
 
         let permutations: Vec<permutation::prover::Evaluated<Scheme::Curve>> = permutations
             .into_iter()
             .map(|permutation| permutation.construct().evaluate(pk, x, transcript).unwrap())
             .collect();
 
-        // Opening prep: per-poly iFFT on GPU. Each `lagrange_to_coeff` call
-        // dispatches `_halo2_fft_normal` (iFFT mode) on `HALO2_GPU_CTX.stream`;
-        // one dispatch per permuted poly per `Committed`.
+        // Opening prep: per-poly iFFT on GPU, one dispatch per permuted poly per
+        // `Committed`.
         #[cfg(feature = "profile")]
         let unpack_timer = start_timer!(|| "lagrange_to_coeff_timer");
         let lookups = lookups
@@ -933,10 +954,8 @@ where
                     lookups
                         .into_iter()
                         .map(|p| {
-                            // Device-output iFFT for the lookup permuted
-                            // polys; they then flow into multiopen via
-                            // `ProverQuery`, which dispatches on the
-                            // host/device storage tag inside `get_eval`.
+                            // Device-output iFFT for the lookup permuted polys,
+                            // which then flow into multiopen via `ProverQuery`.
                             let permuted_input_poly = domain.lagrange_to_coeff_device(
                                 p.permuted_input_expression.into_host_polynomial(),
                             )?;
@@ -952,7 +971,7 @@ where
                         .collect::<Result<Vec<_>, _>>()
                 },
             )
-            .collect::<Result<Vec<_>, Error>>()?;
+            .collect::<Result<Vec<_>, GpuError>>()?;
         #[cfg(feature = "profile")]
         end_timer!(unpack_timer);
 
@@ -968,10 +987,8 @@ where
         #[cfg(feature = "profile")]
         end_timer!(eval_polys_timer);
 
-        // If the PK device-resident Coeff mirrors of `fixed_polys` and
-        // `permutation.polys` are populated (lazy first-touch + VRAM
-        // gate succeeded), build `PolyRef::Device` references; otherwise
-        // fall back to `PolyRef::Host` over the host slices.
+        // Use `PolyRef::Device` when the PK Coeff device mirrors are populated,
+        // else fall back to `PolyRef::Host` over the host slices.
         let fixed_polys_device_opt = pk.fixed_polys_device();
         if fixed_polys_device_opt.is_none() {
             tracing::warn!(
@@ -988,60 +1005,62 @@ where
                 "VRAM fallback fired: PK permutation_polys device mirror absent; ProverQuery routes through host slice"
             );
         }
-        let permutation_host_polys = pk.permutation.polys();
-        let instances =
-            instance
-                .iter()
-                .zip(advice.iter())
-                .zip(permutations.iter())
-                .zip(lookups.iter())
-                .flat_map(|(((instance, advice), permutation), lookups)| {
-                    iter::empty()
-                        .chain(
-                            P::QUERY_INSTANCE
-                                .then_some(pk.vk.cs.instance_queries.iter().map(
-                                    move |&(column, at)| ProverQuery {
-                                        point: domain.rotate_omega(*x, at),
-                                        poly: (&instance.instance_polys[column.index()]).into(),
-                                    },
-                                ))
-                                .into_iter()
-                                .flatten(),
-                        )
-                        .chain(pk.vk.cs.advice_queries.iter().map(move |&(column, at)| {
-                            ProverQuery {
+        let permutation_host_polys = pk.inner.permutation().polys();
+        let instances = instance
+            .iter()
+            .zip(advice.iter())
+            .zip(permutations.iter())
+            .zip(lookups.iter())
+            .flat_map(|(((instance, advice), permutation), lookups)| {
+                iter::empty()
+                    .chain(
+                        P::QUERY_INSTANCE
+                            .then_some(pk.cs.instance_queries.iter().map(move |&(column, at)| {
+                                ProverQuery {
+                                    point: domain.rotate_omega(*x, at),
+                                    poly: (&instance.instance_polys[column.index()]).into(),
+                                }
+                            }))
+                            .into_iter()
+                            .flatten(),
+                    )
+                    .chain(
+                        pk.cs
+                            .advice_queries
+                            .iter()
+                            .map(move |&(column, at)| ProverQuery {
                                 point: domain.rotate_omega(*x, at),
                                 poly: (&advice.advice_polys[column.index()]).into(),
-                            }
-                        }))
-                        .chain(permutation.open(pk, x))
-                        .chain(lookups.iter().flat_map(move |p| p.open(pk, x)))
-                })
-                .chain(pk.vk.cs.fixed_queries.iter().map(|&(column, at)| {
-                    let poly = match fixed_polys_device_opt {
-                        Some(d) => crate::poly::PolyRef::Device(&d[column.index()]),
-                        None => crate::poly::PolyRef::Host(&pk.fixed_polys[column.index()]),
-                    };
-                    ProverQuery {
-                        point: domain.rotate_omega(*x, at),
-                        poly,
-                    }
-                }))
-                .chain((0..permutation_host_polys.len()).map(|idx| {
-                    let poly = match permutation_polys_device_opt {
-                        Some(d) => crate::poly::PolyRef::Device(&d[idx]),
-                        None => crate::poly::PolyRef::Host(&permutation_host_polys[idx]),
-                    };
-                    ProverQuery { point: *x, poly }
-                }))
-                .chain(vanishing.open(x));
+                            }),
+                    )
+                    .chain(permutation.open(pk, x))
+                    .chain(lookups.iter().flat_map(move |p| p.open(pk, x)))
+            })
+            .chain(pk.cs.fixed_queries.iter().map(|&(column, at)| {
+                let poly = match fixed_polys_device_opt {
+                    Some(d) => crate::poly::PolyRef::Device(&d[column.index()]),
+                    None => crate::poly::PolyRef::Host(&pk.inner.fixed_polys()[column.index()]),
+                };
+                ProverQuery {
+                    point: domain.rotate_omega(*x, at),
+                    poly,
+                }
+            }))
+            .chain((0..permutation_host_polys.len()).map(|idx| {
+                let poly = match permutation_polys_device_opt {
+                    Some(d) => crate::poly::PolyRef::Device(&d[idx]),
+                    None => crate::poly::PolyRef::Host(&permutation_host_polys[idx]),
+                };
+                ProverQuery { point: *x, poly }
+            }))
+            .chain(vanishing.open(x));
 
         let prover = P::new(params);
         #[cfg(feature = "profile")]
         let multiopen_timer = start_timer!(|| "phase5 multiopen");
         let multiopen_res = prover
             .create_proof(rng, transcript, instances)
-            .map_err(|_| Error::ConstraintSystemFailure);
+            .map_err(|_| GpuError::Canonical(halo2_axiom::plonk::Error::ConstraintSystemFailure));
         #[cfg(feature = "profile")]
         end_timer!(multiopen_timer);
 

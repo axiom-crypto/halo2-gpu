@@ -1,12 +1,12 @@
 use std::iter;
 
 use super::super::{
-    circuit::Expression, ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX,
+    circuit::GpuExpression, ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX,
 };
 use super::Argument;
 use crate::{
     arithmetic::CurveAffine,
-    plonk::{Error, VerifyingKey},
+    plonk::{Error, GpuVerifyingKey},
     poly::{commitment::MSM, Rotation, VerifierQuery},
     transcript::{EncodedChallenge, TranscriptRead},
 };
@@ -114,7 +114,7 @@ impl<C: CurveAffine> Evaluated<C> {
                 * &(self.permuted_input_eval + &*beta)
                 * &(self.permuted_table_eval + &*gamma);
 
-            let compress_expressions = |expressions: &[Expression<C::Scalar>]| {
+            let compress_expressions = |expressions: &[GpuExpression<C::Scalar>]| {
                 expressions
                     .iter()
                     .map(|expression| {
@@ -170,7 +170,7 @@ impl<C: CurveAffine> Evaluated<C> {
 
     pub(in crate::plonk) fn queries<'r, M: MSM<C> + 'r>(
         &'r self,
-        vk: &'r VerifyingKey<C>,
+        vk: &'r GpuVerifyingKey<C>,
         x: ChallengeX<C>,
     ) -> impl Iterator<Item = VerifierQuery<'r, C, M>> + Clone {
         let x_inv = vk.domain.rotate_omega(*x, Rotation::prev());

@@ -13,7 +13,7 @@ use crate::cuda::utils::{
 use crate::cuda::HaloGpuError;
 use crate::plonk::{
     assert_assigned_kernel_field_is_bn256_fr, assigned_layout_offsets, verify_assigned_layout,
-    Assigned,
+    GpuAssigned,
 };
 use ff::Field;
 use openvm_cuda_common::copy::{cuda_memcpy_on, MemCopyH2D};
@@ -668,15 +668,15 @@ pub fn poly_sub_scalar_at_zero_device<F: Field>(
     Ok(())
 }
 
-/// Decode a host `&[Assigned<F>]` into two fresh device buffers — the
+/// Decode a host `&[GpuAssigned<F>]` into two fresh device buffers — the
 /// per-element numerators (Zero→0, Trivial(x)→x, Rational(n,_)→n) and
 /// denominators (Zero/Trivial→1, Rational(_,d)→d) — via a single GPU
 /// kernel.
 ///
-/// The host `&[Assigned<F>]` is uploaded with a single bytewise H2D
+/// The host `&[GpuAssigned<F>]` is uploaded with a single bytewise H2D
 /// (`to_device_on` — no enum-decode iteration); the kernel reads each
 /// element's discriminant + payload bytes at the offsets pinned by
-/// `#[repr(C, u8)]` on `Assigned<F>` and emits the SoA numerator /
+/// `#[repr(C, u8)]` on `GpuAssigned<F>` and emits the SoA numerator /
 /// denominator pair, avoiding the host enum-decode passes
 /// (`par_iter().map(|v| v.numerator())` / `denominator()`) that would
 /// otherwise dominate `witness.next_phase`.
@@ -685,7 +685,7 @@ pub fn poly_sub_scalar_at_zero_device<F: Field>(
 /// - **Field**: the CUDA decoder is hardwired to `bn256::Fr`; non-Fr
 ///   `F` panics before the FFI launch
 ///   (`assert_assigned_kernel_field_is_bn256_fr`).
-/// - **Layout**: relies on `#[repr(C, u8)]` on `Assigned<F>`; a runtime
+/// - **Layout**: relies on `#[repr(C, u8)]` on `GpuAssigned<F>`; a runtime
 ///   `verify_assigned_layout::<F>()` probe self-check runs once per call.
 /// - **Sync**: H2D + kernel enqueue on `HALO2_GPU_CTX.stream`; function
 ///   returns before the kernel completes. Same-stream subsequent device
@@ -693,7 +693,7 @@ pub fn poly_sub_scalar_at_zero_device<F: Field>(
 /// - **Edge case**: an empty input returns two empty `DeviceBuffer<F>`s
 ///   without launching the kernel.
 pub fn decode_assigned_to_num_denom_device<F: Field>(
-    column: &[Assigned<F>],
+    column: &[GpuAssigned<F>],
 ) -> Result<(DeviceBuffer<F>, DeviceBuffer<F>), HaloGpuError> {
     crate::perf_section!("decode_assigned_to_num_denom_device");
     let n = column.len();
@@ -740,7 +740,7 @@ pub fn decode_assigned_to_num_denom_device<F: Field>(
 /// Returns the freshly-allocated `DeviceBuffer<F>` of decoded numerators
 /// for `column`.
 pub fn decode_assigned_into_denom_slice_device<F: Field>(
-    column: &[Assigned<F>],
+    column: &[GpuAssigned<F>],
     d_denoms_concat: &DeviceBuffer<F>,
     denom_dst_offset: usize,
 ) -> Result<DeviceBuffer<F>, HaloGpuError> {

@@ -3,7 +3,6 @@ use crate::arithmetic::powers;
 use crate::cpu::arithmetic::kate_division;
 use crate::cuda::funcs::multiopen_poly_calculation_gpu;
 use crate::cuda::utils::FFITraitObject;
-use crate::helpers::SerdeCurveAffine;
 use crate::poly::commitment::ParamsProver;
 use crate::poly::commitment::Prover;
 use crate::poly::kzg::commitment::{KZGCommitmentScheme, ParamsKZG};
@@ -11,6 +10,7 @@ use crate::poly::query::ProverQuery;
 use crate::poly::Coeff;
 use crate::poly::{commitment::Blind, PolyRef, Polynomial};
 use crate::transcript::{EncodedChallenge, TranscriptWrite};
+use crate::SerdeCurveAffine;
 
 #[cfg(feature = "profile")]
 use ark_std::{end_timer, start_timer};
