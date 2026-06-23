@@ -40,10 +40,10 @@ use std::borrow::Cow;
 use std::io;
 
 // Canonical proving/verifying keys; the GPU prover/verifier rebuild their
-// `Gpu*` forks from these. See `ARCHITECTURE.md`.
+// `Gpu*` forks from these.
 pub use halo2_axiom::plonk::{ProvingKey, VerifyingKey};
 
-// Canonical synthesis frontend. See `ARCHITECTURE.md`.
+// Canonical synthesis frontend.
 pub use halo2_axiom::plonk::{
     Advice, AdviceQuery, Any, Assigned, Assignment, Challenge, Circuit, Column, ColumnType,
     Constraint, ConstraintSystem, Constraints, Error, Expression, FirstPhase, Fixed, FixedQuery,

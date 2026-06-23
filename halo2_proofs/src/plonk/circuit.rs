@@ -2230,10 +2230,10 @@ impl<'a, F: Field> GpuVirtualCells<'a, F> {
 }
 
 // Conversions from the canonical halo2-axiom constraint-system types into the
-// GPU-crate forks (see ARCHITECTURE.md). Equivalence-critical: a bug here
-// silently desyncs the rebuilt GPU cs/Evaluator/Arguments from what keygen
-// produced. Query `index` is set to `None` (not readable from halo2-axiom and
-// unread by the GPU prover) and backfilled below for the verifier path.
+// GPU-crate forks. Equivalence-critical: a bug here silently desyncs the
+// rebuilt GPU cs/Evaluator/Arguments from what keygen produced. Query `index`
+// is set to `None` (not readable from halo2-axiom and unread by the GPU prover)
+// and backfilled below for the verifier path.
 
 impl<F: Field> From<&halo2_axiom::plonk::Expression<F>> for GpuExpression<F> {
     fn from(e: &halo2_axiom::plonk::Expression<F>) -> Self {
