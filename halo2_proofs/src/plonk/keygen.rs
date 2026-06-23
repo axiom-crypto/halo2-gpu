@@ -1,10 +1,7 @@
-//! GPU-local key generation.
-//!
-//! Takes a GPU [`Params`](crate::poly::commitment::Params) and a canonical
-//! [`Circuit`](crate::plonk::Circuit), returns the canonical halo2-axiom
-//! [`ProvingKey`]/[`VerifyingKey`]. GPU acceleration: fixed/selector
-//! commitments via GPU MSM, fixed/σ polynomials via GPU iFFT, permutation
-//! vk/pk via [`permutation::keygen::Assembly`].
+//! GPU-local key generation. Takes a GPU [`Params`](crate::poly::commitment::Params)
+//! and a canonical [`Circuit`](crate::plonk::Circuit); returns the canonical
+//! [`ProvingKey`]/[`VerifyingKey`]. Fixed/selector commitments use GPU MSM, σ
+//! polynomials GPU iFFT.
 
 use std::marker::PhantomData;
 use std::ops::Range;
@@ -56,8 +53,7 @@ where
     (domain, cs, config)
 }
 
-/// Assembly accumulator for keygen synthesis. Implements the canonical
-/// `Assignment` trait, so it is driven by `Circuit::synthesize`.
+/// Assembly accumulator for keygen synthesis; implements the canonical `Assignment` trait.
 struct Assembly<F: Field> {
     k: u32,
     /// Converted to the device-repr `GpuAssigned` at the batch-inversion

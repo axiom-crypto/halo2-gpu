@@ -1240,7 +1240,7 @@ impl<F: Field> Mul<F> for GpuExpression<F> {
 /// Populated for structural parity with the canonical `VirtualCell`; the GPU
 /// quotient evaluator drives off `GpuGate::polys`, so these fields are unread.
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
+#[allow(dead_code, reason = "structural parity with canonical VirtualCell")]
 pub struct GpuVirtualCell {
     pub(crate) column: GpuColumn<GpuAny>,
     pub(crate) rotation: Rotation,
@@ -1380,11 +1380,16 @@ pub struct GpuGate<F: Field> {
     pub(crate) name: String,
     pub(crate) constraint_names: Vec<String>,
     pub(crate) polys: Vec<GpuExpression<F>>,
-    /// Queried selectors, tracked separately for gate debug checks. Kept for
-    /// parity with the canonical `Gate`; the GPU evaluator does not read them.
-    #[allow(dead_code)]
+    /// Queried selectors/cells, kept for parity with the canonical `Gate`.
+    #[allow(
+        dead_code,
+        reason = "parity with canonical Gate; evaluator reads only polys"
+    )]
     pub(crate) queried_selectors: Vec<GpuSelector>,
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "parity with canonical Gate; evaluator reads only polys"
+    )]
     pub(crate) queried_cells: Vec<GpuVirtualCell>,
 }
 
@@ -1404,12 +1409,12 @@ impl<F: Field> GpuGate<F> {
         &self.polys
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "parity with canonical Gate; no GPU consumer")]
     pub(crate) fn queried_selectors(&self) -> &[GpuSelector] {
         &self.queried_selectors
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "parity with canonical Gate; no GPU consumer")]
     pub(crate) fn queried_cells(&self) -> &[GpuVirtualCell] {
         &self.queried_cells
     }

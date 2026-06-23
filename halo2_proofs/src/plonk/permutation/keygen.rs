@@ -14,9 +14,8 @@ use crate::poly::{
 };
 use halo2_axiom::plonk::permutation::Argument;
 
-/// Accumulates the copy-constraint data needed to construct the permutation
-/// argument. Produces the canonical halo2-axiom permutation pk/vk via
-/// [`build_pk`]/[`build_vk`].
+/// Accumulates copy-constraint data; produces the canonical halo2-axiom permutation
+/// pk/vk via [`build_pk`]/[`build_vk`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Assembly {
     /// Columns that participate on the copy permutation argument.
@@ -31,7 +30,7 @@ pub struct Assembly {
 
 impl Assembly {
     pub(crate) fn new(n: usize, p: &Argument) -> Self {
-        // Upstream `columns` is private, so use the public `get_columns()` accessor.
+        // Upstream `columns` is private; use the `get_columns()` accessor.
         let perm_columns = p.get_columns();
         let num_columns = perm_columns.len();
 

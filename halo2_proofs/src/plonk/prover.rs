@@ -77,8 +77,8 @@ where
     assert_eq!(circuits.len(), instances.len());
     assert!(!circuits.is_empty());
 
-    // Build the GPU proving-key view by borrowing the canonical key (no clone of
-    // the host polynomials; device mirrors stay lazy), then shadow `pk`.
+    // Build the GPU proving-key view by borrowing the canonical key (no host-poly
+    // clone; device mirrors stay lazy).
     let gpu_pk = GpuProvingKey::from_host_ref(pk);
     let pk = &gpu_pk;
 
@@ -205,8 +205,7 @@ where
             row: usize,
         ) -> Result<Value<F>, halo2_axiom::plonk::Error> {
             if !self.usable_rows.contains(&row) {
-                // The `not_enough_rows_available` constructor is `pub(crate)`, so
-                // build the public canonical variant directly.
+                // Build the canonical error variant directly (its constructor is `pub(crate)`).
                 return Err(halo2_axiom::plonk::Error::NotEnoughRowsAvailable {
                     current_k: self.params.k(),
                 });
@@ -344,9 +343,8 @@ where
 
             #[cfg(feature = "profile")]
             let batch_invert_time = start_timer!(|| "batch invert witness assignment");
-            // `next_phase` returns `()`, so errors `expect` rather than `?`. Advice
-            // cells are already device-repr `GpuAssigned`, so each column is handed
-            // to the upload kernel by borrow.
+            // Advice cells are already device-repr `GpuAssigned`, handed to the upload
+            // kernel by borrow.
             let advice_values = batch_invert_assigned_device(
                 column_indices_for_phase
                     .iter()
@@ -481,8 +479,7 @@ where
             instance_polys.extend(batch_polys);
         }
 
-        // Device-resident advice iFFT, consuming the upstream `advice_values` and
-        // returning `advice_polys` that feed the downstream cosetFFT directly.
+        // Device-resident advice iFFT: `advice_values` → `advice_polys`.
         #[cfg(feature = "profile")]
         let advice_ifft_time =
             start_timer!(|| format!("{} advice ifft (device)", advice_values.len()));

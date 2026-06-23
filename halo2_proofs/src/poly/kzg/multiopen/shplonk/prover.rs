@@ -14,12 +14,12 @@ use crate::cuda::funcs::{
     poly_sub_scalar_at_zero_device, poly_sub_short_out_of_place_device, GPU_MSM_THRESHOLD,
 };
 use crate::cuda::utils::HALO2_GPU_CTX;
-use crate::helpers::SerdeCurveAffine;
 use crate::poly::commitment::{Blind, ParamsProver, Prover};
 use crate::poly::kzg::commitment::{KZGCommitmentScheme, ParamsKZG};
 use crate::poly::query::{PolynomialPointer, ProverQuery};
 use crate::poly::{Coeff, Device, DevicePolyExt, PolyRef, Polynomial};
 use crate::transcript::{EncodedChallenge, TranscriptWrite};
+use crate::SerdeCurveAffine;
 use openvm_cuda_common::copy::{MemCopyD2H, MemCopyH2D};
 use openvm_cuda_common::d_buffer::DeviceBuffer;
 

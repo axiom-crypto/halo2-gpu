@@ -8,9 +8,9 @@ use group::ff::FromUniformBytes;
 
 use crate::arithmetic::CurveAffine;
 use crate::cuda::utils::{query_device_free_bytes_for_chunking, HALO2_GPU_CTX};
-use crate::helpers::{SerdeCurveAffine, SerdePrimeField};
 use crate::poly::{Coeff, DevicePolyExt, EvaluationDomain, HostPolyExt, LagrangeCoeff, Polynomial};
 use crate::transcript::{ChallengeScalar, EncodedChallenge, Transcript, TranscriptWrite};
+use crate::{SerdeCurveAffine, SerdePrimeField};
 use once_cell::sync::OnceCell;
 use openvm_cuda_common::copy::MemCopyH2D;
 
@@ -141,8 +141,7 @@ pub struct GpuProvingKey<'a, C: CurveAffine> {
 }
 
 impl<'a, C: CurveAffine> Clone for GpuProvingKey<'a, C> {
-    /// Clones `inner` and the GPU composing types but empties the device
-    /// `OnceCell` mirrors, so the clone regenerates them lazily on first use.
+    /// Empties the device `OnceCell` mirrors so the clone regenerates them lazily.
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -355,9 +354,7 @@ impl<'a, C: CurveAffine> GpuProvingKey<'a, C> {
 // are CPU/GPU-identical.
 impl<'a, C> GpuProvingKey<'a, C>
 where
-    // `SerdeCurveAffine`/`SerdePrimeField` are the canonical halo2-axiom serde
-    // traits (re-exported by `crate::helpers`); this bound is what the delegated
-    // `inner.write`/`inner.read` require.
+    // Canonical halo2-axiom serde bounds required by the delegated `inner.write`/`inner.read`.
     C: SerdeCurveAffine,
     C::Scalar: SerdePrimeField + FromUniformBytes<64>,
 {

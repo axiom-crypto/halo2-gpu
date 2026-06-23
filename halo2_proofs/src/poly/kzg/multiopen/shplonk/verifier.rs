@@ -6,7 +6,6 @@ use super::{construct_intermediate_sets, ChallengeU, ChallengeV};
 use crate::arithmetic::{
     eval_polynomial, evaluate_vanishing_polynomial, lagrange_interpolate, powers,
 };
-use crate::helpers::SerdeCurveAffine;
 use crate::poly::commitment::Verifier;
 use crate::poly::commitment::MSM;
 use crate::poly::kzg::commitment::{KZGCommitmentScheme, ParamsKZG};
@@ -16,6 +15,7 @@ use crate::poly::kzg::strategy::GuardKZG;
 use crate::poly::query::{CommitmentReference, VerifierQuery};
 use crate::poly::Error;
 use crate::transcript::{EncodedChallenge, TranscriptRead};
+use crate::SerdeCurveAffine;
 use ff::Field;
 use pairing::{Engine, MultiMillerLoop};
 use std::ops::MulAssign;

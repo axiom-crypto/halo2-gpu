@@ -9,9 +9,8 @@ use crate::cuda::HaloGpuError;
 /// An error that could occur during proving or circuit synthesis.
 #[derive(Debug)]
 pub enum GpuError {
-    /// An error from the canonical halo2-axiom proving/synthesis stack, already
-    /// typed as [`halo2_axiom::plonk::Error`]. Wrapping keeps the variants and
-    /// their `Display` in lockstep with upstream.
+    /// An error from the canonical halo2-axiom proving/synthesis stack, typed as
+    /// [`halo2_axiom::plonk::Error`].
     Canonical(halo2_axiom::plonk::Error),
     /// A CUDA FFI call returned a non-zero status.
     Cuda(CudaError),

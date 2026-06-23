@@ -4,9 +4,9 @@ use crate::cuda::funcs::{
     multiexp_gpu_device_bases, multiexp_gpu_device_scalars_device_bases, GPU_MSM_THRESHOLD,
 };
 use crate::cuda::utils::HALO2_GPU_CTX;
-use crate::helpers::SerdeCurveAffine;
 use crate::poly::commitment::{Blind, CommitmentScheme, Params, ParamsProver, ParamsVerifier};
 use crate::poly::{Coeff, DevicePolyExt, LagrangeCoeff, Polynomial};
+use crate::SerdeCurveAffine;
 use crate::SerdeFormat;
 
 use ff::{Field, PrimeField};
