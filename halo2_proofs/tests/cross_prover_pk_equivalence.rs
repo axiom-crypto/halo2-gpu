@@ -279,16 +279,12 @@ fn cross_prover_pk_bytes_equivalence() {
     // 4. Read the CPU-serialized pk back into a canonical ProvingKey, then
     //    prove + verify on the GPU.
     let inner = {
-        #[cfg(feature = "circuit-params")]
+        // halo2-axiom is always built with `circuit-params`, so `read` takes the
+        // `ConcreteCircuit::Params` arg; the no-`circuit-params` build doesn't compile.
         let pk = halo2_axiom::plonk::ProvingKey::<G1Affine>::read::<_, cpu::MulCircuit>(
             &mut &bytes[..],
             fmt,
             (),
-        );
-        #[cfg(not(feature = "circuit-params"))]
-        let pk = halo2_axiom::plonk::ProvingKey::<G1Affine>::read::<_, cpu::MulCircuit>(
-            &mut &bytes[..],
-            fmt,
         );
         pk.expect("read canonical ProvingKey from CPU-serialized bytes")
     };
