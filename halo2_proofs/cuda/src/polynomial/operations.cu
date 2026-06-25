@@ -22,12 +22,18 @@ extern "C" RustError _halo2_batch_invert(
     if (field_type != 0 && field_type != 1) {
         return RustError(cudaErrorInvalidValue, "Invalid scalar type");
     }
+    // batch_invert computes `block_num = ceil_div(length, inverse_per_block)`;
+    // length == 0 yields a zero-block <<<0, ...>>> launch which is invalid.
+    if (length == 0) {
+        return RustError(cudaErrorInvalidValue, "_halo2_batch_invert: length must be >= 1\r\n");
+    }
 
     try {
         if (field_type == 0)
             zkpcuda::operation::batch_invert<0 /*fr*/>(stream, (uint64_t*)d_data, length);
         else if (field_type == 1)
             zkpcuda::operation::batch_invert<1 /*fp*/>(stream, (uint64_t*)d_data, length);
+        CUDA_OK(cudaGetLastError());
     } catch (const cuda_error& error) {
         return RustError(error.code(), error.what());
     };

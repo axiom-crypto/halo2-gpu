@@ -176,7 +176,7 @@ enum CalcDegree {
 /// ```text
 ///   bit  0..3   src   : 4-bit tag    (Fixed=0, Instance=1, Advice=2,
 ///                                     Intermediate=3, Constant=4,
-///                                     Challenge=5)
+///                                     Challenge=5, Dummy=6)
 ///   bit  4..23  idx   : 20-bit column / intermediate / constant index
 ///   bit 24..38  rot   : 15-bit absolute rotation value
 ///   bit 39      sign  : 1-bit rotation sign (1 = negative)
@@ -267,7 +267,7 @@ impl Calculation {
     }
 
     fn encode(&self, rotations: &[i32]) -> CalcRule {
-        let dummy_var = 1_u64;
+        let dummy_var = 6;
         let combines = [
             CombineType::Zero,
             CombineType::One,

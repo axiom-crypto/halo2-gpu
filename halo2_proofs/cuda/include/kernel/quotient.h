@@ -18,6 +18,7 @@ namespace quotient {
     //  intermediates: 3         || interm[idx]   || interm[idx]
     //    constant:    4         || constant[idx] || constant[idx]
     //    challenge:   5         || challenge[idx]|| challenge[idx]
+    //    dummy:       6         || unused
 
     // the rule denote an expression of the form
     //        (C1*a + C2*b)*(D ? 1 : b)
@@ -324,14 +325,14 @@ namespace quotient {
     // 5. l0(X)*(1 - Z(X)) = 0
     template <uint32_t TILE_SIZE>
     __global__ static void cuda_kernel_quotient_lookups(
-        scalar_t* d_values,                 // N(X)
-        scalar_t* d_table_values,           // (A(X)+beta)*(S(X)+gamma)
-        scalar_t* d_product_coset,          // Z(X)
-        scalar_t* d_permuted_input_coset,   // A'(X)
-        scalar_t* d_permuted_table_coset,   // S'(X)
-        scalar_t* d_l0,                     // l0(X)
-        scalar_t* d_l_last,                 // l_last(X)
-        scalar_t* d_l_active_row,           // l_active(X)
+        scalar_t* d_values, // N(X)
+        scalar_t* d_table_values, // (A(X)+beta)*(S(X)+gamma)
+        scalar_t* d_product_coset, // Z(X)
+        scalar_t* d_permuted_input_coset, // A'(X)
+        scalar_t* d_permuted_table_coset, // S'(X)
+        scalar_t* d_l0, // l0(X)
+        scalar_t* d_l_last, // l_last(X)
+        scalar_t* d_l_active_row, // l_active(X)
         scalar_t* d_beta,
         scalar_t* d_gamma,
         scalar_t* d_y,

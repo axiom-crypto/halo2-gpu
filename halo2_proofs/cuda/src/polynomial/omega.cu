@@ -32,6 +32,11 @@ extern "C" RustError _halo2_power_of_omega(
     uint64_t scratch_bytes,
     cudaStream_t stream)
 {
+    // `func_compute_power_of_omega` indexes `d_omega_lut[floor_log2(pow) + 1]`
+    // with LUT length `log_n + 1`; `pow >= (1 << log_n)` reads past the LUT.
+    if (log_n >= 32 || pow >= (1u << log_n)) {
+        return RustError(cudaErrorInvalidValue, "_halo2_power_of_omega: pow must be < (1 << log_n) and log_n < 32\r\n");
+    }
     ScratchSpan span { (uint8_t*)scratch, (size_t)scratch_bytes };
     uint64_t* d_omega = (uint64_t*)span.take(Scalar::ELT_BYTES);
     uint64_t* d_omega_lut = (uint64_t*)span.take((log_n + 1) * Scalar::ELT_BYTES);
@@ -103,6 +108,12 @@ extern "C" RustError _halo2_generate_omega_lut(
     uint64_t scratch_bytes,
     cudaStream_t stream)
 {
+    // LutOmegaPowersGenerator sizes the sparse LUT as `1 << (log_n - DENSE_POWER_DEGREE)`;
+    // reject log_n outside [DENSE_POWER_DEGREE, DENSE_POWER_DEGREE + 32) so the
+    // shift neither underflows nor exceeds the 32-bit int operand's width.
+    if (log_n < DENSE_POWER_DEGREE || log_n >= DENSE_POWER_DEGREE + 32) {
+        return RustError(cudaErrorInvalidValue, "_halo2_generate_omega_lut: log_n must be in [DENSE_POWER_DEGREE, DENSE_POWER_DEGREE + 32)\r\n");
+    }
     ScratchSpan span { (uint8_t*)scratch, (size_t)scratch_bytes };
     LutOmegaPowersGenerator<Scalar> generator(log_n);
     uint64_t lut_memory_size = generator.get_lut_memory_size();
@@ -159,6 +170,13 @@ extern "C" RustError _halo2_generate_omegadelta(
     uint64_t scratch_bytes,
     cudaStream_t stream)
 {
+    // OmegaDeltaGenerator instantiates LutOmegaPowersGenerator(log_n); reject log_n
+    // outside [DENSE_POWER_DEGREE, DENSE_POWER_DEGREE + 32) so the inner
+    // `1 << (log_n - DENSE_POWER_DEGREE)` neither underflows nor exceeds the
+    // 32-bit int operand's width.
+    if (log_n < DENSE_POWER_DEGREE || log_n >= DENSE_POWER_DEGREE + 32) {
+        return RustError(cudaErrorInvalidValue, "_halo2_generate_omegadelta: log_n must be in [DENSE_POWER_DEGREE, DENSE_POWER_DEGREE + 32)\r\n");
+    }
     ScratchSpan span { (uint8_t*)scratch, (size_t)scratch_bytes };
     OmegaDeltaGenerator<Scalar> generator(log_n, omega_start, omega_end, colunm_num, colunm_offset);
 
