@@ -2211,6 +2211,7 @@ mod tests {
                 3 => intermediates[idx as usize],
                 4 => constants[idx as usize],
                 5 => challenges.get(idx as usize).copied().unwrap_or(oob),
+                6 => F::ZERO,
                 _ => unreachable!(),
             }
         };
@@ -2301,8 +2302,8 @@ mod tests {
             let (a, _, _, b, _) = split_calc_rule(rule.0);
             let (src_a, _, _) = decode_value_source(a);
             let (src_b, _, _) = decode_value_source(b);
-            assert!(src_a <= 5);
-            assert!(src_b <= 5);
+            assert!(src_a <= 6);
+            assert!(src_b <= 6);
         }
         // All value-part refs must resolve to Intermediate or Constant.
         assert_eq!(vp_rules.len(), 1);

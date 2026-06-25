@@ -1,8 +1,5 @@
 #include <assert.h>
-#include <chrono>
-#include <map>
-#include <string>
-#include <vector>
+#include <cstdint>
 
 #include "common/exception.h"
 #include "common/halo2_ffi.h"
@@ -22,6 +19,13 @@ extern "C" uint64_t _halo2_power_of_omega_workspace_size(uint32_t log_n)
         + align_up((uint64_t)Scalar::ELT_BYTES, 32);
 }
 
+uint32_t bit_width(uint32_t x)
+{
+    if (x == 0)
+        return 0;
+    return 32 - __builtin_clz(x);
+}
+
 extern "C" RustError _halo2_power_of_omega(
     Scalar* res,
     Scalar* omega_lut,
@@ -34,7 +38,7 @@ extern "C" RustError _halo2_power_of_omega(
 {
     // `func_compute_power_of_omega` indexes `d_omega_lut[floor_log2(pow) + 1]`
     // with LUT length `log_n + 1`; `pow >= (1 << log_n)` reads past the LUT.
-    if (log_n >= 32 || pow >= (1u << log_n)) {
+    if (log_n >= 32 || bit_width(pow) > log_n) {
         return RustError(cudaErrorInvalidValue, "_halo2_power_of_omega: pow must be < (1 << log_n) and log_n < 32\r\n");
     }
     ScratchSpan span { (uint8_t*)scratch, (size_t)scratch_bytes };
@@ -72,7 +76,7 @@ extern "C" uint64_t _halo2_generate_omega_powers_workspace_size(uint32_t log_n)
 
 extern "C" RustError _halo2_generate_omega_powers(
     void* d_omega_powers, // device pointer; caller-allocated result buffer
-    const void* d_omega,  // device pointer; caller-staged 32-byte omega scalar
+    const void* d_omega, // device pointer; caller-staged 32-byte omega scalar
     uint32_t log_n,
     void* scratch,
     uint64_t scratch_bytes,
@@ -157,10 +161,10 @@ extern "C" uint64_t _halo2_generate_omegadelta_workspace_size(
 }
 
 extern "C" RustError _halo2_generate_omegadelta(
-    void* omegadelta,         // device out
-    const void* mapping,      // device in
-    const void* omega_host,   // host in
-    const void* delta_host,   // host in
+    void* omegadelta, // device out
+    const void* mapping, // device in
+    const void* omega_host, // host in
+    const void* delta_host, // host in
     uint32_t log_n,
     uint32_t omega_start,
     uint32_t omega_end,

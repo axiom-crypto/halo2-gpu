@@ -1615,7 +1615,7 @@ mod tests {
         let log_n = 31;
         let mut rng = thread_rng();
         let omega = Scalar::random(&mut rng);
-        let pow = u32::MAX; //34895;
+        let pow = u32::MAX >> 1; //34895;
         println!("omega = {:?}", omega);
         let pow_of_omega_cpu = omega.pow_vartime([pow as u64, 0, 0, 0]);
         let mut omega_lut_cpu = vec![Scalar::one(); (log_n + 1) as usize];
