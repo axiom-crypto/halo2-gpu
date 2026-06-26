@@ -251,7 +251,7 @@ RustError run_fft(
             auto threads = std::min(length, 1024);
             auto blocks = (length + threads - 1) / threads;
 
-            zkpcuda::omega::mult_power_of_omega<<<blocks, threads, 0, stream>>>((scalar_t*)d_data, (scalar_t*)d_omega_lut, 1 << log_n);
+            zkpcuda::omega::mult_power_of_omega<<<blocks, threads, 0, stream>>>((scalar_t*)d_data, (scalar_t*)d_omega_lut, length);
             zkpcuda::common::revbin(stream, (scalar_t*)d_data, log_n);
 #include "ntt_combine.h"
             zkpcuda::ntt::dit_module(log_n, batch_size, log_n % batch_size, combine_size_1, combine_size_2, is_twiddle_dense, (const scalar_t*)d_twiddle, (scalar_t*)d_data, stream);
@@ -322,7 +322,7 @@ RustError run_fft_many(
             auto length = 1 << log_n;
             auto threads = std::min(length, 1024);
             auto blocks = (length + threads - 1) / threads;
-            zkpcuda::omega::mult_power_of_omega<<<blocks, threads, 0, stream>>>((scalar_t*)d_data, (scalar_t*)d_omega_lut, 1 << log_n);
+            zkpcuda::omega::mult_power_of_omega<<<blocks, threads, 0, stream>>>((scalar_t*)d_data, (scalar_t*)d_omega_lut, length);
             zkpcuda::common::revbin(stream, (scalar_t*)d_data, log_n);
 #include "ntt_combine.h"
             zkpcuda::ntt::dit_module(log_n, batch_size, log_n % batch_size, combine_size_1, combine_size_2, is_twiddle_dense, (const scalar_t*)d_twiddle, (scalar_t*)d_data, stream);

@@ -19,7 +19,7 @@ extern "C" uint64_t _halo2_power_of_omega_workspace_size(uint32_t log_n)
         + align_up((uint64_t)Scalar::ELT_BYTES, 32);
 }
 
-uint32_t bit_width(uint32_t x)
+static uint32_t bit_width(uint32_t x)
 {
     if (x == 0)
         return 0;
