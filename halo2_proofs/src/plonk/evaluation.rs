@@ -176,7 +176,7 @@ enum CalcDegree {
 /// ```text
 ///   bit  0..3   src   : 4-bit tag    (Fixed=0, Instance=1, Advice=2,
 ///                                     Intermediate=3, Constant=4,
-///                                     Challenge=5)
+///                                     Challenge=5, Dummy=6)
 ///   bit  4..23  idx   : 20-bit column / intermediate / constant index
 ///   bit 24..38  rot   : 15-bit absolute rotation value
 ///   bit 39      sign  : 1-bit rotation sign (1 = negative)
@@ -267,7 +267,7 @@ impl Calculation {
     }
 
     fn encode(&self, rotations: &[i32]) -> CalcRule {
-        let dummy_var = 1_u64;
+        let dummy_var = 6;
         let combines = [
             CombineType::Zero,
             CombineType::One,
@@ -2211,6 +2211,7 @@ mod tests {
                 3 => intermediates[idx as usize],
                 4 => constants[idx as usize],
                 5 => challenges.get(idx as usize).copied().unwrap_or(oob),
+                6 => F::ZERO,
                 _ => unreachable!(),
             }
         };
@@ -2301,8 +2302,8 @@ mod tests {
             let (a, _, _, b, _) = split_calc_rule(rule.0);
             let (src_a, _, _) = decode_value_source(a);
             let (src_b, _, _) = decode_value_source(b);
-            assert!(src_a <= 5);
-            assert!(src_b <= 5);
+            assert!(src_a <= 6);
+            assert!(src_b <= 6);
         }
         // All value-part refs must resolve to Intermediate or Constant.
         assert_eq!(vp_rules.len(), 1);

@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <assert.h>
 #include <chrono>
 #include <map>
@@ -246,7 +247,11 @@ RustError run_fft(
             if (needs_input_copy)
                 CUDA_OK(cudaMemcpyAsync(d_data, input, Scalar::ELT_BYTES << log_n, input_kind, stream));
             zkpcuda::omega::generate_omega_log_lut<<<1, 1, 0, stream>>>((scalar_t*)d_omega_lut, (scalar_t*)d_divisor, log_n);
-            zkpcuda::omega::mult_power_of_omega<<<512, 256, 0, stream>>>((scalar_t*)d_data, (scalar_t*)d_omega_lut, 1 << log_n);
+            auto length = 1 << log_n;
+            auto threads = std::min(length, 1024);
+            auto blocks = (length + threads - 1) / threads;
+
+            zkpcuda::omega::mult_power_of_omega<<<blocks, threads, 0, stream>>>((scalar_t*)d_data, (scalar_t*)d_omega_lut, length);
             zkpcuda::common::revbin(stream, (scalar_t*)d_data, log_n);
 #include "ntt_combine.h"
             zkpcuda::ntt::dit_module(log_n, batch_size, log_n % batch_size, combine_size_1, combine_size_2, is_twiddle_dense, (const scalar_t*)d_twiddle, (scalar_t*)d_data, stream);
@@ -313,7 +318,11 @@ RustError run_fft_many(
             CUDA_OK(cudaMemcpyAsync(d_divisor, h_divisor, Scalar::ELT_BYTES, cudaMemcpyHostToDevice, stream));
             CUDA_OK(cudaMemcpyAsync(d_data, input, Scalar::ELT_BYTES << log_n, input_kind, stream));
             zkpcuda::omega::generate_omega_log_lut<<<1, 1, 0, stream>>>((scalar_t*)d_omega_lut, (scalar_t*)d_divisor, log_n);
-            zkpcuda::omega::mult_power_of_omega<<<512, 256, 0, stream>>>((scalar_t*)d_data, (scalar_t*)d_omega_lut, 1 << log_n);
+
+            auto length = 1 << log_n;
+            auto threads = std::min(length, 1024);
+            auto blocks = (length + threads - 1) / threads;
+            zkpcuda::omega::mult_power_of_omega<<<blocks, threads, 0, stream>>>((scalar_t*)d_data, (scalar_t*)d_omega_lut, length);
             zkpcuda::common::revbin(stream, (scalar_t*)d_data, log_n);
 #include "ntt_combine.h"
             zkpcuda::ntt::dit_module(log_n, batch_size, log_n % batch_size, combine_size_1, combine_size_2, is_twiddle_dense, (const scalar_t*)d_twiddle, (scalar_t*)d_data, stream);
@@ -366,6 +375,10 @@ extern "C" RustError _halo2_fft_normal(
 {
     if (ntt_type == iFFT_cosetFFT) {
         return RustError(-1, "iFFT_cosetFFT not supported\r\n");
+    }
+    // Dense twiddle sizing uses `log_n - 1`; reject log_n == 0 before it underflows.
+    if (log_n == 0) {
+        return RustError(cudaErrorInvalidValue, "_halo2_fft_normal: log_n must be >= 1\r\n");
     }
 
     // All Rust call sites pass host-borrowed pointers for all four params.
@@ -478,6 +491,10 @@ extern "C" RustError _halo2_fft_normal_to_device(
         && ntt_type != NTT_TYPE::CosetFFT_Part) {
         return RustError(cudaErrorInvalidValue, "_halo2_fft_normal_to_device supports only FFT, iFFT, CosetFFT_Part\r\n");
     }
+    // Dense twiddle sizing uses `log_n - 1`; reject log_n == 0 before it underflows.
+    if (log_n == 0) {
+        return RustError(cudaErrorInvalidValue, "_halo2_fft_normal_to_device: log_n must be >= 1\r\n");
+    }
 
     CudaFFTNormalInfo fft_info(
         ntt_type,
@@ -536,6 +553,12 @@ extern "C" RustError _halo2_cosetfft(
     void* scratch, uint64_t scratch_bytes,
     cudaStream_t stream)
 {
+    // Dense twiddle sizing on the active log uses `log - 1`; reject the
+    // size-one case (cosetFFT/icosetFFT pick `extend_log_n`; others pick
+    // `log_n`) before it underflows.
+    if (log_n == 0 || extend_log_n == 0) {
+        return RustError(cudaErrorInvalidValue, "_halo2_cosetfft: log_n and extend_log_n must be >= 1\r\n");
+    }
     // All Rust call sites pass host-borrowed pointers.
     (void)divisor; // divisor unused in this entry point's body
 
@@ -771,6 +794,11 @@ extern "C" RustError _halo2_fft_many(
     if (ntt_type == icosetFFT) {
         return RustError(2, "icosetFFT not supported now");
     }
+    // Dense twiddle sizing on the active log uses `log - 1`; reject the
+    // size-one case before it underflows.
+    if (log_n == 0 || extend_log_n == 0) {
+        return RustError(cudaErrorInvalidValue, "_halo2_fft_many: log_n and extend_log_n must be >= 1\r\n");
+    }
 
     uint64_t* fft_gpu_mem = nullptr;
     uint64_t* fft_data = nullptr;
@@ -851,6 +879,11 @@ extern "C" RustError _halo2_fft_many_to_device(
 
     if (ntt_type == icosetFFT) {
         return RustError(2, "icosetFFT not supported now");
+    }
+    // Dense twiddle sizing on the active log uses `log - 1`; reject the
+    // size-one case before it underflows.
+    if (log_n == 0 || extend_log_n == 0) {
+        return RustError(cudaErrorInvalidValue, "_halo2_fft_many_to_device: log_n and extend_log_n must be >= 1\r\n");
     }
 
     CudaFFTManyInfo fft_info(ntt_type, log_n, extend_log_n);
