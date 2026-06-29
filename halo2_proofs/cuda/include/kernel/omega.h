@@ -258,7 +258,7 @@ public:
     // Pure host arithmetic for use in `_halo2_<kernel>_workspace_size`.
     static uint64_t get_run_scratch_size(uint64_t log_n)
     {
-        return align_up(Scalar::ELT_BYTES * (log_n + 1), 32);
+        return align_up(Scalar::ELT_BYTES * (log_n + 2), 32);
     }
 
     // `d_omega` is device-resident (one 32-byte scalar). `span` carries
@@ -271,7 +271,7 @@ public:
         uint64_t log_n,
         ScratchSpan& span)
     {
-        uint64_t* d_powers_lut = (uint64_t*)span.take(Scalar::ELT_BYTES * (log_n + 1));
+        uint64_t* d_powers_lut = (uint64_t*)span.take(Scalar::ELT_BYTES * (log_n + 2));
         try {
             // Seed d_powers_lut[0] with caller's omega so generate_omega's
             // first kernel reads it as the recurrence base.
@@ -316,7 +316,7 @@ public:
     static uint64_t get_run_scratch_size(uint64_t log_n)
     {
         return align_up((uint64_t)Scalar::ELT_BYTES, 32)
-            + align_up((uint64_t)Scalar::ELT_BYTES * (log_n + 1), 32);
+            + align_up((uint64_t)Scalar::ELT_BYTES * (log_n + 2), 32);
     }
 
     // `d_omega_in` is device-resident (one 32-byte scalar): the root of unity
@@ -329,7 +329,7 @@ public:
         ScratchSpan& span)
     {
         uint64_t* d_omega = (uint64_t*)span.take(Scalar::ELT_BYTES);
-        uint64_t* d_omega_lut = (uint64_t*)span.take(Scalar::ELT_BYTES * (log_n + 1));
+        uint64_t* d_omega_lut = (uint64_t*)span.take(Scalar::ELT_BYTES * (log_n + 2));
         try {
             // Stage caller's omega into the two scratch slots that
             // generate_omega / compute_power_of_omega read from.
