@@ -27,6 +27,12 @@ pub fn grand_product_gpu<F: Field>(
     if poly_len > max_len {
         chunk_size = max_len;
     }
+    if chunk_size == 0 {
+        return Err(HaloGpuError::InvalidParameter {
+            context: "grand_product_gpu",
+            magnitude: poly_len as u64,
+        });
+    }
 
     let mut prefix = prefix;
     let output_obj = FFITraitObject::from_ref(&output[0]);
@@ -37,12 +43,13 @@ pub fn grand_product_gpu<F: Field>(
         unsafe { _halo2_grand_product_workspace_size(chunk_size as u64) } as usize;
     let scratch = DeviceBuffer::<u8>::with_capacity_on(gp_scratch_bytes, &HALO2_GPU_CTX);
     for offset in (0..poly_len).step_by(chunk_size) {
+        let this_len = chunk_size.min(poly_len - offset);
         let status = unsafe {
             _halo2_grand_product(
                 &output_obj,
                 &input_obj,
                 &prefix_obj,
-                chunk_size,
+                this_len,
                 offset,
                 scratch.as_mut_raw_ptr(),
                 gp_scratch_bytes as u64,
@@ -52,8 +59,8 @@ pub fn grand_product_gpu<F: Field>(
         if status.code != 0 {
             return Err(status.into());
         }
-        if offset + chunk_size < poly_len {
-            prefix = output[offset + chunk_size - 1];
+        if offset + this_len < poly_len {
+            prefix = output[offset + this_len - 1];
             // print out this to surpress the compiler warning
             log::debug!("prefix at offset {}: {:?}", offset, prefix);
         }
@@ -94,6 +101,12 @@ pub fn grand_product_device<F: Field>(
     if poly_len > max_len {
         chunk_size = max_len;
     }
+    if chunk_size == 0 {
+        return Err(HaloGpuError::InvalidParameter {
+            context: "grand_product_device",
+            magnitude: poly_len as u64,
+        });
+    }
 
     let mut prefix_host = prefix;
     let mut prefix_device = std::slice::from_ref(&prefix_host).to_device_on(&HALO2_GPU_CTX)?;
@@ -101,11 +114,12 @@ pub fn grand_product_device<F: Field>(
     let prefix_obj = FFITraitObject::new(prefix_device.as_raw_ptr() as usize);
 
     for offset in (0..poly_len).step_by(chunk_size) {
+        let this_len = chunk_size.min(poly_len - offset);
         let status = unsafe {
             _halo2_grand_product_device_inputs(
                 &input_obj,
                 &prefix_obj,
-                chunk_size,
+                this_len,
                 offset,
                 HALO2_GPU_CTX.stream.as_raw(),
             )
@@ -113,12 +127,12 @@ pub fn grand_product_device<F: Field>(
         if status.code != 0 {
             return Err(status.into());
         }
-        if offset + chunk_size < poly_len {
+        if offset + this_len < poly_len {
             // Multi-chunk: pull the last scanned scalar of THIS chunk from
             // device (it becomes the next chunk's running prefix) and
             // re-stage it into the device-side prefix slot. Single-chunk
             // runs (the log_n=22 common case) skip this entirely.
-            let last_idx = offset + chunk_size - 1;
+            let last_idx = offset + this_len - 1;
             let bytes = std::mem::size_of::<F>();
             unsafe {
                 cuda_memcpy_on::<true, false>(

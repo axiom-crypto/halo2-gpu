@@ -490,8 +490,8 @@ extern "C" RustError _halo2_quotient(
         CUDA_OK(cudaMemcpyAsync(d_challenges, challenges, quotient_info.mem_size_challenges, cudaMemcpyHostToDevice, stream));
         CUDA_OK(cudaMemcpyAsync(d_constants, constants.ptr, quotient_info.mem_size_constants, cudaMemcpyHostToDevice, stream));
         CUDA_OK(cudaMemcpyAsync(d_expr_constants, expr_constants.ptr, quotient_info.mem_size_expr_constants, cudaMemcpyHostToDevice, stream));
-        CUDA_OK(cudaMemcpyAsync(d_rules, rules, quotient_info.mem_size_rules, cudaMemcpyHostToDevice, stream));
-        CUDA_OK(cudaMemcpyAsync(d_value_part_rules, value_part_rules, quotient_info.mem_size_value_part_rules, cudaMemcpyHostToDevice, stream));
+        CUDA_OK(cudaMemcpyAsync(d_rules, rules, num_rules * sizeof(uint64_t) * 2, cudaMemcpyHostToDevice, stream));
+        CUDA_OK(cudaMemcpyAsync(d_value_part_rules, value_part_rules, num_vp_rules * sizeof(uint64_t), cudaMemcpyHostToDevice, stream));
         // memset
         CUDA_OK(cudaMemsetAsync(d_intermediates, 0, quotient_info.mem_size_intermediates, stream));
         CUDA_OK(cudaMemsetAsync(d_quotient_poly, 0, quotient_info.mem_size_quotient_poly, stream));
@@ -630,8 +630,8 @@ extern "C" RustError _halo2_quotient_device_columns_device_out(
         CUDA_OK(cudaMemcpyAsync(d_challenges, challenges, quotient_info.mem_size_challenges, cudaMemcpyHostToDevice, stream));
         CUDA_OK(cudaMemcpyAsync(d_constants, constants.ptr, quotient_info.mem_size_constants, cudaMemcpyHostToDevice, stream));
         CUDA_OK(cudaMemcpyAsync(d_expr_constants, expr_constants.ptr, quotient_info.mem_size_expr_constants, cudaMemcpyHostToDevice, stream));
-        CUDA_OK(cudaMemcpyAsync(d_rules, rules, quotient_info.mem_size_rules, cudaMemcpyHostToDevice, stream));
-        CUDA_OK(cudaMemcpyAsync(d_value_part_rules, value_part_rules, quotient_info.mem_size_value_part_rules, cudaMemcpyHostToDevice, stream));
+        CUDA_OK(cudaMemcpyAsync(d_rules, rules, num_rules * sizeof(uint64_t) * 2, cudaMemcpyHostToDevice, stream));
+        CUDA_OK(cudaMemcpyAsync(d_value_part_rules, value_part_rules, num_vp_rules * sizeof(uint64_t), cudaMemcpyHostToDevice, stream));
         CUDA_OK(cudaMemsetAsync(d_intermediates, 0, quotient_info.mem_size_intermediates, stream));
         CUDA_OK(cudaMemsetAsync(d_quotient_poly, 0, quotient_info.mem_size_quotient_poly, stream));
     } catch (const cuda_error& error) {
@@ -772,8 +772,8 @@ extern "C" RustError _halo2_quotient_device_columns(
         CUDA_OK(cudaMemcpyAsync(d_challenges, challenges, quotient_info.mem_size_challenges, cudaMemcpyHostToDevice, stream));
         CUDA_OK(cudaMemcpyAsync(d_constants, constants.ptr, quotient_info.mem_size_constants, cudaMemcpyHostToDevice, stream));
         CUDA_OK(cudaMemcpyAsync(d_expr_constants, expr_constants.ptr, quotient_info.mem_size_expr_constants, cudaMemcpyHostToDevice, stream));
-        CUDA_OK(cudaMemcpyAsync(d_rules, rules, quotient_info.mem_size_rules, cudaMemcpyHostToDevice, stream));
-        CUDA_OK(cudaMemcpyAsync(d_value_part_rules, value_part_rules, quotient_info.mem_size_value_part_rules, cudaMemcpyHostToDevice, stream));
+        CUDA_OK(cudaMemcpyAsync(d_rules, rules, num_rules * sizeof(uint64_t) * 2, cudaMemcpyHostToDevice, stream));
+        CUDA_OK(cudaMemcpyAsync(d_value_part_rules, value_part_rules, num_vp_rules * sizeof(uint64_t), cudaMemcpyHostToDevice, stream));
         CUDA_OK(cudaMemsetAsync(d_intermediates, 0, quotient_info.mem_size_intermediates, stream));
         CUDA_OK(cudaMemsetAsync(d_quotient_poly, 0, quotient_info.mem_size_quotient_poly, stream));
     } catch (const cuda_error& error) {
