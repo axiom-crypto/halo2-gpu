@@ -166,18 +166,14 @@ pub struct GpuAdvice {
 
 impl Default for GpuAdvice {
     fn default() -> GpuAdvice {
-        GpuAdvice {
-            phase: GpuFirstPhase.to_sealed(),
-        }
+        GpuAdvice { phase: GpuFirstPhase.to_sealed() }
     }
 }
 
 impl GpuAdvice {
     /// Returns `GpuAdvice` in given `Phase`
     pub fn new<P: GpuPhase>(phase: P) -> GpuAdvice {
-        GpuAdvice {
-            phase: phase.to_sealed(),
-        }
+        GpuAdvice { phase: phase.to_sealed() }
     }
 
     /// Phase of this column
@@ -283,20 +279,12 @@ impl GpuColumnType for GpuAdvice {
 }
 impl GpuColumnType for GpuFixed {
     fn query_cell<F: Field>(&self, index: usize, at: Rotation) -> GpuExpression<F> {
-        GpuExpression::Fixed(GpuFixedQuery {
-            index: None,
-            column_index: index,
-            rotation: at,
-        })
+        GpuExpression::Fixed(GpuFixedQuery { index: None, column_index: index, rotation: at })
     }
 }
 impl GpuColumnType for GpuInstance {
     fn query_cell<F: Field>(&self, index: usize, at: Rotation) -> GpuExpression<F> {
-        GpuExpression::Instance(GpuInstanceQuery {
-            index: None,
-            column_index: index,
-            rotation: at,
-        })
+        GpuExpression::Instance(GpuInstanceQuery { index: None, column_index: index, rotation: at })
     }
 }
 impl GpuColumnType for GpuAny {
@@ -342,28 +330,19 @@ impl From<GpuInstance> for GpuAny {
 
 impl From<GpuColumn<GpuAdvice>> for GpuColumn<GpuAny> {
     fn from(advice: GpuColumn<GpuAdvice>) -> GpuColumn<GpuAny> {
-        GpuColumn {
-            index: advice.index(),
-            column_type: GpuAny::Advice(advice.column_type),
-        }
+        GpuColumn { index: advice.index(), column_type: GpuAny::Advice(advice.column_type) }
     }
 }
 
 impl From<GpuColumn<GpuFixed>> for GpuColumn<GpuAny> {
     fn from(advice: GpuColumn<GpuFixed>) -> GpuColumn<GpuAny> {
-        GpuColumn {
-            index: advice.index(),
-            column_type: GpuAny::Fixed,
-        }
+        GpuColumn { index: advice.index(), column_type: GpuAny::Fixed }
     }
 }
 
 impl From<GpuColumn<GpuInstance>> for GpuColumn<GpuAny> {
     fn from(advice: GpuColumn<GpuInstance>) -> GpuColumn<GpuAny> {
-        GpuColumn {
-            index: advice.index(),
-            column_type: GpuAny::Instance,
-        }
+        GpuColumn { index: advice.index(), column_type: GpuAny::Instance }
     }
 }
 
@@ -372,10 +351,7 @@ impl TryFrom<GpuColumn<GpuAny>> for GpuColumn<GpuAdvice> {
 
     fn try_from(any: GpuColumn<GpuAny>) -> Result<Self, Self::Error> {
         match any.column_type() {
-            GpuAny::Advice(advice) => Ok(GpuColumn {
-                index: any.index(),
-                column_type: *advice,
-            }),
+            GpuAny::Advice(advice) => Ok(GpuColumn { index: any.index(), column_type: *advice }),
             _ => Err("Cannot convert into GpuColumn<GpuAdvice>"),
         }
     }
@@ -386,10 +362,7 @@ impl TryFrom<GpuColumn<GpuAny>> for GpuColumn<GpuFixed> {
 
     fn try_from(any: GpuColumn<GpuAny>) -> Result<Self, Self::Error> {
         match any.column_type() {
-            GpuAny::Fixed => Ok(GpuColumn {
-                index: any.index(),
-                column_type: GpuFixed,
-            }),
+            GpuAny::Fixed => Ok(GpuColumn { index: any.index(), column_type: GpuFixed }),
             _ => Err("Cannot convert into GpuColumn<GpuFixed>"),
         }
     }
@@ -400,10 +373,7 @@ impl TryFrom<GpuColumn<GpuAny>> for GpuColumn<GpuInstance> {
 
     fn try_from(any: GpuColumn<GpuAny>) -> Result<Self, Self::Error> {
         match any.column_type() {
-            GpuAny::Instance => Ok(GpuColumn {
-                index: any.index(),
-                column_type: GpuInstance,
-            }),
+            GpuAny::Instance => Ok(GpuColumn { index: any.index(), column_type: GpuInstance }),
             _ => Err("Cannot convert into GpuColumn<GpuInstance>"),
         }
     }
@@ -647,10 +617,7 @@ impl<F: Field> GpuExpression<F> {
             }
             GpuExpression::Fixed(query) => {
                 if query.index.is_none() {
-                    let col = GpuColumn {
-                        index: query.column_index,
-                        column_type: GpuFixed,
-                    };
+                    let col = GpuColumn { index: query.column_index, column_type: GpuFixed };
                     cells.queried_cells.push((col, query.rotation).into());
                     query.index = Some(cells.meta.query_fixed_index(col, query.rotation));
                 }
@@ -667,10 +634,7 @@ impl<F: Field> GpuExpression<F> {
             }
             GpuExpression::Instance(query) => {
                 if query.index.is_none() {
-                    let col = GpuColumn {
-                        index: query.column_index,
-                        column_type: GpuInstance,
-                    };
+                    let col = GpuColumn { index: query.column_index, column_type: GpuInstance };
                     cells.queried_cells.push((col, query.rotation).into());
                     query.index = Some(cells.meta.query_instance_index(col, query.rotation));
                 }
@@ -891,11 +855,7 @@ impl<F: Field> GpuExpression<F> {
                 sum(a, b)
             }
             GpuExpression::Product(a, b) => {
-                let (a, b) = if a.complexity() <= b.complexity() {
-                    (a, b)
-                } else {
-                    (b, a)
-                };
+                let (a, b) = if a.complexity() <= b.complexity() { (a, b) } else { (b, a) };
                 let a = a.evaluate_lazy(
                     constant,
                     selector_column,
@@ -953,25 +913,13 @@ impl<F: Field> GpuExpression<F> {
             GpuExpression::Constant(scalar) => write!(writer, "{:?}", scalar),
             GpuExpression::Selector(selector) => write!(writer, "selector[{}]", selector.0),
             GpuExpression::Fixed(query) => {
-                write!(
-                    writer,
-                    "fixed[{}][{}]",
-                    query.column_index, query.rotation.0
-                )
+                write!(writer, "fixed[{}][{}]", query.column_index, query.rotation.0)
             }
             GpuExpression::Advice(query) => {
-                write!(
-                    writer,
-                    "advice[{}][{}]",
-                    query.column_index, query.rotation.0
-                )
+                write!(writer, "advice[{}][{}]", query.column_index, query.rotation.0)
             }
             GpuExpression::Instance(query) => {
-                write!(
-                    writer,
-                    "instance[{}][{}]",
-                    query.column_index, query.rotation.0
-                )
+                write!(writer, "instance[{}][{}]", query.column_index, query.rotation.0)
             }
             GpuExpression::Challenge(challenge) => {
                 write!(writer, "challenge[{}]", challenge.index())
@@ -1060,11 +1008,7 @@ impl<F: Field> GpuExpression<F> {
             (Some(_), Some(_)) => panic!("two simple selectors cannot be in the same expression"),
             _ => None,
         };
-        self.evaluate_selectors(
-            None,
-            &|selector| selector.is_simple().then_some(selector),
-            &op,
-        )
+        self.evaluate_selectors(None, &|selector| selector.is_simple().then_some(selector), &op)
     }
 
     /// Extracts all used instance columns in this expression
@@ -1248,10 +1192,7 @@ pub struct GpuVirtualCell {
 
 impl<Col: Into<GpuColumn<GpuAny>>> From<(Col, Rotation)> for GpuVirtualCell {
     fn from((column, rotation): (Col, Rotation)) -> Self {
-        GpuVirtualCell {
-            column: column.into(),
-            rotation,
-        }
+        GpuVirtualCell { column: column.into(), rotation }
     }
 }
 
@@ -1266,28 +1207,19 @@ pub struct GpuConstraint<F: Field> {
 
 impl<F: Field> From<GpuExpression<F>> for GpuConstraint<F> {
     fn from(poly: GpuExpression<F>) -> Self {
-        GpuConstraint {
-            name: "".to_string(),
-            poly,
-        }
+        GpuConstraint { name: "".to_string(), poly }
     }
 }
 
 impl<F: Field, S: AsRef<str>> From<(S, GpuExpression<F>)> for GpuConstraint<F> {
     fn from((name, poly): (S, GpuExpression<F>)) -> Self {
-        GpuConstraint {
-            name: name.as_ref().to_string(),
-            poly,
-        }
+        GpuConstraint { name: name.as_ref().to_string(), poly }
     }
 }
 
 impl<F: Field> From<GpuExpression<F>> for Vec<GpuConstraint<F>> {
     fn from(poly: GpuExpression<F>) -> Self {
-        vec![GpuConstraint {
-            name: "".to_string(),
-            poly,
-        }]
+        vec![GpuConstraint { name: "".to_string(), poly }]
     }
 }
 
@@ -1338,10 +1270,7 @@ impl<F: Field, C: Into<GpuConstraint<F>>, Iter: IntoIterator<Item = C>> GpuConst
     /// Each constraint `c` in `iterator` will be converted into the constraint
     /// `selector * c`.
     pub fn with_selector(selector: GpuExpression<F>, constraints: Iter) -> Self {
-        GpuConstraints {
-            selector,
-            constraints,
-        }
+        GpuConstraints { selector, constraints }
     }
 }
 
@@ -1349,10 +1278,7 @@ fn apply_selector_to_constraint<F: Field, C: Into<GpuConstraint<F>>>(
     (selector, c): (GpuExpression<F>, C),
 ) -> GpuConstraint<F> {
     let constraint: GpuConstraint<F> = c.into();
-    GpuConstraint {
-        name: constraint.name,
-        poly: selector * constraint.poly,
-    }
+    GpuConstraint { name: constraint.name, poly: selector * constraint.poly }
 }
 
 type ApplySelectorToConstraint<F, C> = fn((GpuExpression<F>, C)) -> GpuConstraint<F>;
@@ -1368,9 +1294,7 @@ impl<F: Field, C: Into<GpuConstraint<F>>, Iter: IntoIterator<Item = C>> IntoIter
     type IntoIter = ConstraintsIterator<F, C, Iter::IntoIter>;
 
     fn into_iter(self) -> Self::IntoIter {
-        std::iter::repeat(self.selector)
-            .zip(self.constraints)
-            .map(apply_selector_to_constraint)
+        std::iter::repeat(self.selector).zip(self.constraints).map(apply_selector_to_constraint)
     }
 }
 
@@ -1381,15 +1305,9 @@ pub struct GpuGate<F: Field> {
     pub(crate) constraint_names: Vec<String>,
     pub(crate) polys: Vec<GpuExpression<F>>,
     /// Queried selectors/cells, kept for parity with the canonical `Gate`.
-    #[allow(
-        dead_code,
-        reason = "parity with canonical Gate; evaluator reads only polys"
-    )]
+    #[allow(dead_code, reason = "parity with canonical Gate; evaluator reads only polys")]
     pub(crate) queried_selectors: Vec<GpuSelector>,
-    #[allow(
-        dead_code,
-        reason = "parity with canonical Gate; evaluator reads only polys"
-    )]
+    #[allow(dead_code, reason = "parity with canonical Gate; evaluator reads only polys")]
     pub(crate) queried_cells: Vec<GpuVirtualCell>,
 }
 
@@ -1534,8 +1452,7 @@ impl<F: Field> GpuConstraintSystem<F> {
             .collect();
         let index = self.lookups.len();
 
-        self.lookups
-            .push(lookup::Argument::new(name.as_ref(), table_map));
+        self.lookups.push(lookup::Argument::new(name.as_ref(), table_map));
 
         index
     }
@@ -1560,8 +1477,7 @@ impl<F: Field> GpuConstraintSystem<F> {
             .collect();
         let index = self.lookups.len();
 
-        self.lookups
-            .push(lookup::Argument::new(name.as_ref(), table_map));
+        self.lookups.push(lookup::Argument::new(name.as_ref(), table_map));
 
         index
     }
@@ -1713,10 +1629,7 @@ impl<F: Field> GpuConstraintSystem<F> {
         let queried_selectors = cells.queried_selectors;
         let queried_cells = cells.queried_cells;
 
-        assert!(
-            !polys.is_empty(),
-            "Gates must contain at least one constraint."
-        );
+        assert!(!polys.is_empty(), "Gates must contain at least one constraint.");
 
         self.gates.push(GpuGate {
             name: name.as_ref().to_string(),
@@ -1760,13 +1673,11 @@ impl<F: Field> GpuConstraintSystem<F> {
                 .into_iter()
                 .zip(degrees)
                 .enumerate()
-                .map(
-                    |(i, (activations, max_degree))| compress_selectors::SelectorDescription {
-                        selector: i,
-                        activations,
-                        max_degree,
-                    },
-                )
+                .map(|(i, (activations, max_degree))| compress_selectors::SelectorDescription {
+                    selector: i,
+                    activations,
+                    max_degree,
+                })
                 .collect(),
             max_degree,
             || {
@@ -1787,14 +1698,9 @@ impl<F: Field> GpuConstraintSystem<F> {
             selector_map[assignment.selector] = Some(new_columns[assignment.combination_index]);
         }
 
-        self.selector_map = selector_map
-            .into_iter()
-            .map(|a| a.unwrap())
-            .collect::<Vec<_>>();
-        let selector_replacements = selector_replacements
-            .into_iter()
-            .map(|a| a.unwrap())
-            .collect::<Vec<_>>();
+        self.selector_map = selector_map.into_iter().map(|a| a.unwrap()).collect::<Vec<_>>();
+        let selector_replacements =
+            selector_replacements.into_iter().map(|a| a.unwrap()).collect::<Vec<_>>();
         self.replace_selectors_with_fixed(&selector_replacements);
 
         (self, polys)
@@ -1812,10 +1718,8 @@ impl<F: Field> GpuConstraintSystem<F> {
         let (polys, selector_replacements): (Vec<_>, Vec<_>) = selectors
             .into_iter()
             .map(|selector| {
-                let poly = selector
-                    .iter()
-                    .map(|b| if *b { F::ONE } else { F::ZERO })
-                    .collect::<Vec<_>>();
+                let poly =
+                    selector.iter().map(|b| if *b { F::ONE } else { F::ZERO }).collect::<Vec<_>>();
                 let column = self.fixed_column();
                 let rotation = Rotation::cur();
                 let expr = GpuExpression::Fixed(GpuFixedQuery {
@@ -1870,10 +1774,7 @@ impl<F: Field> GpuConstraintSystem<F> {
         // Substitute non-simple selectors for the real fixed columns in all
         // lookup expressions
         for expr in self.lookups.iter_mut().flat_map(|lookup| {
-            lookup
-                .input_expressions
-                .iter_mut()
-                .chain(lookup.table_expressions.iter_mut())
+            lookup.input_expressions.iter_mut().chain(lookup.table_expressions.iter_mut())
         }) {
             replace_selectors(expr, selector_replacements, true);
         }
@@ -1899,17 +1800,12 @@ impl<F: Field> GpuConstraintSystem<F> {
 
     /// Allocates a new fixed column that can be used in a lookup table.
     pub fn lookup_table_column(&mut self) -> GpuTableColumn {
-        GpuTableColumn {
-            inner: self.fixed_column(),
-        }
+        GpuTableColumn { inner: self.fixed_column() }
     }
 
     /// Allocate a new fixed column
     pub fn fixed_column(&mut self) -> GpuColumn<GpuFixed> {
-        let tmp = GpuColumn {
-            index: self.num_fixed_columns,
-            column_type: GpuFixed,
-        };
+        let tmp = GpuColumn { index: self.num_fixed_columns, column_type: GpuFixed };
         self.num_fixed_columns += 1;
         tmp
     }
@@ -1929,10 +1825,7 @@ impl<F: Field> GpuConstraintSystem<F> {
             );
         }
 
-        let tmp = GpuColumn {
-            index: self.num_advice_columns,
-            column_type: GpuAdvice { phase },
-        };
+        let tmp = GpuColumn { index: self.num_advice_columns, column_type: GpuAdvice { phase } };
         self.num_advice_columns += 1;
         self.num_advice_queries.push(0);
         self.advice_column_phase.push(phase);
@@ -1941,10 +1834,7 @@ impl<F: Field> GpuConstraintSystem<F> {
 
     /// Allocate a new instance column
     pub fn instance_column(&mut self) -> GpuColumn<GpuInstance> {
-        let tmp = GpuColumn {
-            index: self.num_instance_columns,
-            column_type: GpuInstance,
-        };
+        let tmp = GpuColumn { index: self.num_instance_columns, column_type: GpuInstance };
         self.num_instance_columns += 1;
         tmp
     }
@@ -1957,10 +1847,7 @@ impl<F: Field> GpuConstraintSystem<F> {
             format!("Challenge usable after phase {:?}", phase).as_str(),
         );
 
-        let tmp = GpuChallenge {
-            index: self.num_challenges,
-            phase,
-        };
+        let tmp = GpuChallenge { index: self.num_challenges, phase };
         self.num_challenges += 1;
         self.challenge_phase.push(phase);
         tmp
@@ -1982,12 +1869,8 @@ impl<F: Field> GpuConstraintSystem<F> {
     }
 
     pub(crate) fn phases(&self) -> impl Iterator<Item = sealed::Phase> {
-        let max_phase = self
-            .advice_column_phase
-            .iter()
-            .max()
-            .map(|phase| phase.0)
-            .unwrap_or_default();
+        let max_phase =
+            self.advice_column_phase.iter().max().map(|phase| phase.0).unwrap_or_default();
         (0..=max_phase).map(sealed::Phase)
     }
 
@@ -2002,11 +1885,7 @@ impl<F: Field> GpuConstraintSystem<F> {
         // for.
         degree = std::cmp::max(
             degree,
-            self.lookups
-                .iter()
-                .map(|l| l.required_degree())
-                .max()
-                .unwrap_or(1),
+            self.lookups.iter().map(|l| l.required_degree()).max().unwrap_or(1),
         );
 
         // Account for each gate to ensure our quotient polynomial is the
@@ -2099,10 +1978,7 @@ impl<F: Field> GpuConstraintSystem<F> {
 
     /// Returns phase of advice columns
     pub fn advice_column_phase(&self) -> Vec<u8> {
-        self.advice_column_phase
-            .iter()
-            .map(|phase| phase.0)
-            .collect()
+        self.advice_column_phase.iter().map(|phase| phase.0).collect()
     }
 
     /// Returns phase of challenges
@@ -2162,11 +2038,7 @@ pub struct GpuVirtualCells<'a, F: Field> {
 
 impl<'a, F: Field> GpuVirtualCells<'a, F> {
     fn new(meta: &'a mut GpuConstraintSystem<F>) -> Self {
-        GpuVirtualCells {
-            meta,
-            queried_selectors: vec![],
-            queried_cells: vec![],
-        }
+        GpuVirtualCells { meta, queried_selectors: vec![], queried_cells: vec![] }
     }
 
     /// Query a selector at the current position.
@@ -2284,19 +2156,13 @@ impl<F: Field> From<&halo2_axiom::plonk::Expression<F>> for GpuExpression<F> {
 
 impl From<&halo2_axiom::plonk::Column<halo2_axiom::plonk::Fixed>> for GpuColumn<GpuFixed> {
     fn from(c: &halo2_axiom::plonk::Column<halo2_axiom::plonk::Fixed>) -> Self {
-        GpuColumn {
-            index: c.index(),
-            column_type: GpuFixed,
-        }
+        GpuColumn { index: c.index(), column_type: GpuFixed }
     }
 }
 
 impl From<&halo2_axiom::plonk::Column<halo2_axiom::plonk::Instance>> for GpuColumn<GpuInstance> {
     fn from(c: &halo2_axiom::plonk::Column<halo2_axiom::plonk::Instance>) -> Self {
-        GpuColumn {
-            index: c.index(),
-            column_type: GpuInstance,
-        }
+        GpuColumn { index: c.index(), column_type: GpuInstance }
     }
 }
 
@@ -2304,9 +2170,7 @@ impl From<&halo2_axiom::plonk::Column<halo2_axiom::plonk::Advice>> for GpuColumn
     fn from(c: &halo2_axiom::plonk::Column<halo2_axiom::plonk::Advice>) -> Self {
         GpuColumn {
             index: c.index(),
-            column_type: GpuAdvice {
-                phase: sealed::Phase(c.column_type().phase()),
-            },
+            column_type: GpuAdvice { phase: sealed::Phase(c.column_type().phase()) },
         }
     }
 }
@@ -2314,16 +2178,13 @@ impl From<&halo2_axiom::plonk::Column<halo2_axiom::plonk::Advice>> for GpuColumn
 impl From<&halo2_axiom::plonk::Column<halo2_axiom::plonk::Any>> for GpuColumn<GpuAny> {
     fn from(c: &halo2_axiom::plonk::Column<halo2_axiom::plonk::Any>) -> Self {
         let column_type = match c.column_type() {
-            halo2_axiom::plonk::Any::Advice(a) => GpuAny::Advice(GpuAdvice {
-                phase: sealed::Phase(a.phase()),
-            }),
+            halo2_axiom::plonk::Any::Advice(a) => {
+                GpuAny::Advice(GpuAdvice { phase: sealed::Phase(a.phase()) })
+            }
             halo2_axiom::plonk::Any::Fixed => GpuAny::Fixed,
             halo2_axiom::plonk::Any::Instance => GpuAny::Instance,
         };
-        GpuColumn {
-            index: c.index(),
-            column_type,
-        }
+        GpuColumn { index: c.index(), column_type }
     }
 }
 
@@ -2347,16 +2208,8 @@ impl<F: Field> From<&halo2_axiom::plonk::ConstraintSystem<F>> for GpuConstraintS
             num_instance_columns: cs.num_instance_columns(),
             num_selectors: cs.num_selectors(),
             num_challenges: cs.num_challenges(),
-            advice_column_phase: cs
-                .advice_column_phase()
-                .into_iter()
-                .map(sealed::Phase)
-                .collect(),
-            challenge_phase: cs
-                .challenge_phase()
-                .into_iter()
-                .map(sealed::Phase)
-                .collect(),
+            advice_column_phase: cs.advice_column_phase().into_iter().map(sealed::Phase).collect(),
+            challenge_phase: cs.challenge_phase().into_iter().map(sealed::Phase).collect(),
             selector_map: cs.selector_map().iter().map(GpuColumn::from).collect(),
             gates: cs.gates().iter().map(GpuGate::from).collect(),
             advice_queries: cs
@@ -2411,10 +2264,7 @@ impl<F: Field> From<&halo2_axiom::plonk::ConstraintSystem<F>> for GpuConstraintS
             }
         }
         for lookup in &mut out.lookups {
-            for e in lookup
-                .input_expressions
-                .iter_mut()
-                .chain(lookup.table_expressions.iter_mut())
+            for e in lookup.input_expressions.iter_mut().chain(lookup.table_expressions.iter_mut())
             {
                 assign_expr_query_indices(e, &fq, &aq, &iq);
             }

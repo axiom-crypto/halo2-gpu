@@ -93,10 +93,7 @@ fn plonk_api() {
 
     impl<FF: Field> StandardPlonk<FF> {
         fn new(config: PlonkConfig) -> Self {
-            StandardPlonk {
-                config,
-                _marker: PhantomData,
-            }
+            StandardPlonk { config, _marker: PhantomData }
         }
     }
 
@@ -234,10 +231,7 @@ fn plonk_api() {
         type Params = ();
 
         fn without_witnesses(&self) -> Self {
-            Self {
-                a: Value::unknown(),
-                lookup_table: self.lookup_table.clone(),
-            }
+            Self { a: Value::unknown(), lookup_table: self.lookup_table.clone() }
         }
 
         fn configure(meta: &mut ConstraintSystem<F>) -> PlonkConfig {
@@ -315,19 +309,7 @@ fn plonk_api() {
             meta.enable_equality(sc);
             meta.enable_equality(sp);
 
-            PlonkConfig {
-                a,
-                b,
-                c,
-                d,
-                e,
-                sa,
-                sb,
-                sc,
-                sm,
-                sp,
-                sl,
-            }
+            PlonkConfig { a, b, c, d, e, sa, sb, sc, sm, sp, sl }
         }
 
         fn synthesize(
@@ -348,9 +330,7 @@ fn plonk_api() {
                 })?;
                 let (a1, b1, _) = cs.raw_add(&mut layouter, || {
                     let fin = a_squared + a;
-                    a.zip(a_squared)
-                        .zip(fin)
-                        .map(|((a, a_squared), fin)| (a, a_squared, fin))
+                    a.zip(a_squared).zip(fin).map(|((a, a_squared), fin)| (a, a_squared, fin))
                 })?;
                 cs.copy(&mut layouter, a0, a1)?;
                 cs.copy(&mut layouter, b1, c0)?;
@@ -378,10 +358,7 @@ fn plonk_api() {
         let a = Fr::from(2834758237) * Fr::ZETA;
         let instance = Fr::ONE + Fr::ONE;
         let lookup_table = vec![instance, a, a, Fr::ZERO];
-        let empty_circuit: MyCircuit<Fr> = MyCircuit {
-            a: Value::unknown(),
-            lookup_table,
-        };
+        let empty_circuit: MyCircuit<Fr> = MyCircuit { a: Value::unknown(), lookup_table };
         let vk = keygen_vk(params, &empty_circuit).expect("keygen_vk should not fail");
         keygen_pk(params, vk, &empty_circuit).expect("keygen_pk should not fail")
     }
@@ -404,10 +381,7 @@ fn plonk_api() {
     {
         let (a, instance, lookup_table) = common!(Scheme);
 
-        let circuit: MyCircuit<Scheme::Scalar> = MyCircuit {
-            a: Value::known(a),
-            lookup_table,
-        };
+        let circuit: MyCircuit<Scheme::Scalar> = MyCircuit { a: Value::known(a), lookup_table };
 
         let mut transcript = T::init(vec![]);
 
@@ -475,9 +449,7 @@ fn plonk_api() {
         } else {
             let param = ParamsKZG::new(degree);
             let ofile = File::create(param_path).expect("create param file failed");
-            param
-                .write(&mut BufWriter::new(ofile))
-                .expect("write param file failed");
+            param.write(&mut BufWriter::new(ofile)).expect("write param file failed");
             param
         }
     }

@@ -57,10 +57,7 @@ fn test_eval_polynomial_single_gpu_vs_horner() {
     let point = Fr::random(OsRng);
 
     let gpu = eval_polynomial_gpu(&poly, point).unwrap();
-    let cpu = poly
-        .iter()
-        .rev()
-        .fold(Fr::ZERO, |acc, coeff| acc * point + coeff);
+    let cpu = poly.iter().rev().fold(Fr::ZERO, |acc, coeff| acc * point + coeff);
 
     assert_eq!(gpu, cpu, "GPU polynomial eval disagrees with CPU Horner");
 }
@@ -72,7 +69,8 @@ fn test_generate_omega_powers_single_gpu_vs_cpu() {
     // can assert the kernel writes exactly `output_num` slots and does
     // not touch the tail past the cutoff.
     let log_n = 12u32;
-    let domain = EvaluationDomain::<Fr>::new(1, log_n);
+    let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, log_n);
+    let domain = EvaluationDomain::from_host_domain(&domain);
     let omega = domain.get_omega();
 
     let total = 1usize << log_n;
@@ -111,7 +109,8 @@ fn test_fft_gpu_vs_best_fft() {
     // elsewhere in the prover.
     let log_n = 11u32;
     let n = 1usize << log_n;
-    let domain = EvaluationDomain::<Fr>::new(1, log_n);
+    let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, log_n);
+    let domain = EvaluationDomain::from_host_domain(&domain);
     let omega = domain.get_omega();
     let omega_inv = domain.get_omega_inv();
 
@@ -135,20 +134,18 @@ fn test_fft_many_gpu_vs_best_fft() {
     use crate::cuda::funcs::fft_gpu_many;
     for &log_n in &[10u32, 12, 14] {
         let n = 1usize << log_n;
-        let domain = EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let omega = domain.get_omega();
         let omega_inv = domain.get_omega_inv();
         let num_polys = 3usize;
 
-        let inputs: Vec<Vec<Fr>> = (0..num_polys)
-            .map(|_| (0..n).map(|_| Fr::random(OsRng)).collect())
-            .collect();
+        let inputs: Vec<Vec<Fr>> =
+            (0..num_polys).map(|_| (0..n).map(|_| Fr::random(OsRng)).collect()).collect();
 
         let gpu: Vec<Vec<Fr>> = inputs.clone();
-        let gpu_objs: Vec<FFITraitObject> = gpu
-            .iter()
-            .map(|p| FFITraitObject::new(p.as_ptr() as usize))
-            .collect();
+        let gpu_objs: Vec<FFITraitObject> =
+            gpu.iter().map(|p| FFITraitObject::new(p.as_ptr() as usize)).collect();
         fft_gpu_many(NttType::FFT.into(), gpu_objs, log_n, omega, Fr::ONE).unwrap();
 
         let cpu: Vec<Vec<Fr>> = inputs
@@ -185,7 +182,8 @@ fn test_fft_normal_to_device_vs_cpu() {
 
     for log_n in [12u32, 13, 14] {
         let n = 1usize << log_n;
-        let domain = EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let omega = domain.get_omega();
         let omega_inv = domain.get_omega_inv();
 
@@ -198,22 +196,11 @@ fn test_fft_normal_to_device_vs_cpu() {
         let d_input: DeviceBuffer<Fr> = host_input.as_slice().to_device_on(&HALO2_GPU_CTX).unwrap();
         let d_output: DeviceBuffer<Fr> = DeviceBuffer::<Fr>::with_capacity_on(n, &HALO2_GPU_CTX);
 
-        fft_normal_device(
-            NttType::FFT.into(),
-            log_n,
-            &d_input,
-            &d_output,
-            omega,
-            Fr::ONE,
-        )
-        .unwrap();
+        fft_normal_device(NttType::FFT.into(), log_n, &d_input, &d_output, omega, Fr::ONE).unwrap();
 
         let gpu: Vec<Fr> = d_output.to_host_on(&HALO2_GPU_CTX).unwrap();
 
-        assert_eq!(
-            gpu, cpu,
-            "fft_normal_device disagrees with best_fft at log_n={log_n}"
-        );
+        assert_eq!(gpu, cpu, "fft_normal_device disagrees with best_fft at log_n={log_n}");
     }
 }
 
@@ -230,7 +217,8 @@ fn test_fft_normal_to_device_ifft_vs_cpu() {
 
     for log_n in [12u32, 13, 14] {
         let n = 1usize << log_n;
-        let domain = EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let omega = domain.get_omega();
         let omega_inv = domain.get_omega_inv();
         let n_inv = Fr::from(n as u64).invert().unwrap();
@@ -252,15 +240,8 @@ fn test_fft_normal_to_device_ifft_vs_cpu() {
         let d_input: DeviceBuffer<Fr> = host_input.as_slice().to_device_on(&HALO2_GPU_CTX).unwrap();
         let d_output: DeviceBuffer<Fr> = DeviceBuffer::<Fr>::with_capacity_on(n, &HALO2_GPU_CTX);
 
-        fft_normal_device(
-            NttType::iFFT.into(),
-            log_n,
-            &d_input,
-            &d_output,
-            omega_inv,
-            n_inv,
-        )
-        .unwrap();
+        fft_normal_device(NttType::iFFT.into(), log_n, &d_input, &d_output, omega_inv, n_inv)
+            .unwrap();
 
         let gpu: Vec<Fr> = d_output.to_host_on(&HALO2_GPU_CTX).unwrap();
 
@@ -289,10 +270,11 @@ fn test_fft_normal_to_device_coset_part_vs_cpu() {
 
     for log_n in [12u32, 13, 14] {
         let n = 1usize << log_n;
-        let domain = EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let omega = domain.get_omega();
         let omega_inv = domain.get_omega_inv();
-        let g_coset = domain.g_coset;
+        let g_coset = domain.inner.g_coset;
         // Pick a non-identity extended_omega_factor — `extended_omega^1` is
         // the simplest non-trivial choice and exercises the
         // `distribute_powers(divisor)` shift end-to-end.
@@ -346,36 +328,19 @@ fn test_cosetfft_gpu_roundtrip() {
     // `1/n` divisor applied on the return leg.
     let log_n = 10u32;
     let n = 1usize << log_n;
-    let domain = EvaluationDomain::<Fr>::new(1, log_n);
+    let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, log_n);
+    let domain = EvaluationDomain::from_host_domain(&domain);
     let omega = domain.get_omega();
     let omega_inv = domain.get_omega_inv();
     let n_inv = Fr::from(n as u64).invert().unwrap();
 
     let input: Vec<Fr> = (0..n).map(|_| Fr::random(OsRng)).collect();
     let mut evals = vec![Fr::ZERO; n];
-    cosetfft_gpu(
-        NttType::CosetFFT.into(),
-        &input,
-        &mut evals,
-        log_n,
-        log_n,
-        omega,
-        Fr::ONE,
-    )
-    .unwrap();
-    fft_gpu(
-        NttType::iCosetFFT.into(),
-        &mut evals,
-        log_n,
-        omega_inv,
-        n_inv,
-    )
-    .unwrap();
+    cosetfft_gpu(NttType::CosetFFT.into(), &input, &mut evals, log_n, log_n, omega, Fr::ONE)
+        .unwrap();
+    fft_gpu(NttType::iCosetFFT.into(), &mut evals, log_n, omega_inv, n_inv).unwrap();
 
-    assert_eq!(
-        evals, input,
-        "cosetfft + icosetfft round-trip is not the identity"
-    );
+    assert_eq!(evals, input, "cosetfft + icosetfft round-trip is not the identity");
 }
 
 #[test]
@@ -393,11 +358,7 @@ fn test_multiexp_gpu_vs_cpu() {
     let gpu = multiexp_gpu::<G1Affine>(&coeffs, &bases).unwrap();
     let cpu = best_multiexp_cpu::<G1Affine>(&coeffs, &bases);
 
-    assert_eq!(
-        gpu.to_affine(),
-        cpu.to_affine(),
-        "multiexp_gpu disagrees with best_multiexp_cpu",
-    );
+    assert_eq!(gpu.to_affine(), cpu.to_affine(), "multiexp_gpu disagrees with best_multiexp_cpu",);
 }
 
 #[test]
@@ -418,9 +379,8 @@ fn test_multiexp_gpu_device_bases_vs_cpu() {
     let n = GPU_MSM_THRESHOLD + 1;
     let coeffs_a: Vec<Fr> = (0..n).map(|_| Fr::random(OsRng)).collect();
     let coeffs_b: Vec<Fr> = (0..n).map(|_| Fr::random(OsRng)).collect();
-    let bases_host: Vec<G1Affine> = (0..n)
-        .map(|_| (G1::generator() * Fr::random(OsRng)).to_affine())
-        .collect();
+    let bases_host: Vec<G1Affine> =
+        (0..n).map(|_| (G1::generator() * Fr::random(OsRng)).to_affine()).collect();
     let bases_device: DeviceBuffer<G1Affine> =
         bases_host.as_slice().to_device_on(&HALO2_GPU_CTX).unwrap();
 
@@ -454,9 +414,8 @@ fn test_multiexp_gpu_device_bases_chunked_vs_unchunked() {
     // the rest — exercises the partial-chunk path.
     let n = GPU_MSM_THRESHOLD + 137;
     let coeffs: Vec<Fr> = (0..n).map(|_| Fr::random(OsRng)).collect();
-    let bases_host: Vec<G1Affine> = (0..n)
-        .map(|_| (G1::generator() * Fr::random(OsRng)).to_affine())
-        .collect();
+    let bases_host: Vec<G1Affine> =
+        (0..n).map(|_| (G1::generator() * Fr::random(OsRng)).to_affine()).collect();
     let bases_device: DeviceBuffer<G1Affine> =
         bases_host.as_slice().to_device_on(&HALO2_GPU_CTX).unwrap();
 
@@ -498,9 +457,8 @@ fn test_multiexp_gpu_device_scalars_device_bases_vs_cpu() {
 
     let n = GPU_MSM_THRESHOLD + 1;
     let coeffs: Vec<Fr> = (0..n).map(|_| Fr::random(OsRng)).collect();
-    let bases_host: Vec<G1Affine> = (0..n)
-        .map(|_| (G1::generator() * Fr::random(OsRng)).to_affine())
-        .collect();
+    let bases_host: Vec<G1Affine> =
+        (0..n).map(|_| (G1::generator() * Fr::random(OsRng)).to_affine()).collect();
     let bases_device: DeviceBuffer<G1Affine> =
         bases_host.as_slice().to_device_on(&HALO2_GPU_CTX).unwrap();
     let coeffs_device: DeviceBuffer<Fr> = coeffs.as_slice().to_device_on(&HALO2_GPU_CTX).unwrap();
@@ -540,9 +498,8 @@ fn test_multiexp_gpu_device_scalars_device_bases_chunked() {
 
     let n = GPU_MSM_THRESHOLD + 137;
     let coeffs: Vec<Fr> = (0..n).map(|_| Fr::random(OsRng)).collect();
-    let bases_host: Vec<G1Affine> = (0..n)
-        .map(|_| (G1::generator() * Fr::random(OsRng)).to_affine())
-        .collect();
+    let bases_host: Vec<G1Affine> =
+        (0..n).map(|_| (G1::generator() * Fr::random(OsRng)).to_affine()).collect();
     let bases_device: DeviceBuffer<G1Affine> =
         bases_host.as_slice().to_device_on(&HALO2_GPU_CTX).unwrap();
     let coeffs_device: DeviceBuffer<Fr> = coeffs.as_slice().to_device_on(&HALO2_GPU_CTX).unwrap();
@@ -651,9 +608,8 @@ fn test_poly_scale_and_multiply_add_device() {
     let mut d_acc: DeviceBuffer<Fr> = acc_host.as_slice().to_device_on(&HALO2_GPU_CTX).unwrap();
     let d_in: DeviceBuffer<Fr> = in_host.as_slice().to_device_on(&HALO2_GPU_CTX).unwrap();
     let scale_minus_one = scale - Fr::ONE;
-    let d_scale_minus_one: DeviceBuffer<Fr> = std::slice::from_ref(&scale_minus_one)
-        .to_device_on(&HALO2_GPU_CTX)
-        .unwrap();
+    let d_scale_minus_one: DeviceBuffer<Fr> =
+        std::slice::from_ref(&scale_minus_one).to_device_on(&HALO2_GPU_CTX).unwrap();
     poly_scale_device_with_d_s_minus_one(&mut d_acc, &d_scale_minus_one).unwrap();
     poly_multiply_add_device(&mut d_acc, &d_in, add_scalar).unwrap();
 
@@ -669,10 +625,7 @@ fn test_poly_scale_and_multiply_add_device() {
     }
     HALO2_GPU_CTX.stream.to_host_sync().unwrap();
 
-    assert_eq!(
-        got, acc_ref,
-        "poly_scale + multiply_add device path mismatch"
-    );
+    assert_eq!(got, acc_ref, "poly_scale + multiply_add device path mismatch");
 }
 
 #[test]
@@ -686,7 +639,8 @@ fn test_lagrange_to_coeff_device_vs_host() {
     use openvm_cuda_common::copy::cuda_memcpy_on;
 
     for k in [20u32, 22u32, 23u32] {
-        let domain = EvaluationDomain::<Fr>::new(1, k);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, k);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let n = 1usize << k;
         let host_values: Vec<Fr> = (0..n).map(|_| Fr::random(OsRng)).collect();
         let lagrange_a = domain.lagrange_from_vec(host_values.clone());
@@ -731,41 +685,38 @@ fn test_ifft_gpu_many_device_to_device_vs_host() {
     use openvm_cuda_common::copy::{cuda_memcpy_on, MemCopyH2D};
 
     for k in [20u32, 22u32, 23u32] {
-        let domain = EvaluationDomain::<Fr>::new(1, k);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, k);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let n = 1usize << k;
         let batch_size = 3usize;
         let host_polys: Vec<_> = (0..batch_size)
             .map(|_| (0..n).map(|_| Fr::random(OsRng)).collect::<Vec<Fr>>())
             .collect();
-        let lagrange_polys: Vec<_> = host_polys
-            .iter()
-            .map(|v| domain.lagrange_from_vec(v.clone()))
-            .collect();
+        let lagrange_polys: Vec<_> =
+            host_polys.iter().map(|v| domain.lagrange_from_vec(v.clone())).collect();
 
         // Host-input path (oracle): existing wrapper, hardcoded
         // `input_on_device: false`.
-        let host_input_outs =
-            ifft_many_h2d::<Fr>(&lagrange_polys, k, domain.omega_inv, domain.ifft_divisor).unwrap();
+        let host_input_outs = ifft_many_h2d::<Fr>(
+            &lagrange_polys,
+            k,
+            domain.inner.omega_inv,
+            domain.inner.ifft_divisor,
+        )
+        .unwrap();
 
         // Device-input path: H2D the same inputs first, then run the
         // new device-input wrapper.
-        let in_dbufs: Vec<_> = host_polys
-            .iter()
-            .map(|v| v.as_slice().to_device_on(&HALO2_GPU_CTX).unwrap())
-            .collect();
-        let in_objs: Vec<FFITraitObject> = in_dbufs
-            .iter()
-            .map(|b| FFITraitObject::new(b.as_raw_ptr() as usize))
-            .collect();
+        let in_dbufs: Vec<_> =
+            host_polys.iter().map(|v| v.as_slice().to_device_on(&HALO2_GPU_CTX).unwrap()).collect();
+        let in_objs: Vec<FFITraitObject> =
+            in_dbufs.iter().map(|b| FFITraitObject::new(b.as_raw_ptr() as usize)).collect();
         let dev_input_outs =
-            ifft_many_device::<Fr>(in_objs, k, domain.omega_inv, domain.ifft_divisor).unwrap();
+            ifft_many_device::<Fr>(in_objs, k, domain.inner.omega_inv, domain.inner.ifft_divisor)
+                .unwrap();
 
         assert_eq!(host_input_outs.len(), dev_input_outs.len());
-        for (i, (h, d)) in host_input_outs
-            .iter()
-            .zip(dev_input_outs.iter())
-            .enumerate()
-        {
+        for (i, (h, d)) in host_input_outs.iter().zip(dev_input_outs.iter()).enumerate() {
             let mut h_host: Vec<Fr> = vec![Fr::default(); n];
             let mut d_host: Vec<Fr> = vec![Fr::default(); n];
             unsafe {
@@ -805,25 +756,20 @@ fn test_lagrange_to_coeff_many_device_vs_host() {
     use openvm_cuda_common::copy::cuda_memcpy_on;
 
     for k in [20u32, 22u32, 23u32] {
-        let domain = EvaluationDomain::<Fr>::new(1, k);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, k);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let n = 1usize << k;
         let batch_size = 3;
         let host_polys: Vec<_> = (0..batch_size)
             .map(|_| (0..n).map(|_| Fr::random(OsRng)).collect::<Vec<Fr>>())
             .collect();
-        let lagrange_polys_a: Vec<_> = host_polys
-            .iter()
-            .map(|v| domain.lagrange_from_vec(v.clone()))
-            .collect();
-        let lagrange_polys_b: Vec<_> = host_polys
-            .iter()
-            .map(|v| domain.lagrange_from_vec(v.clone()))
-            .collect();
+        let lagrange_polys_a: Vec<_> =
+            host_polys.iter().map(|v| domain.lagrange_from_vec(v.clone())).collect();
+        let lagrange_polys_b: Vec<_> =
+            host_polys.iter().map(|v| domain.lagrange_from_vec(v.clone())).collect();
 
         let host_outs = domain.lagrange_to_coeff_many(&lagrange_polys_a).unwrap();
-        let dev_outs = domain
-            .lagrange_to_coeff_many_device(&lagrange_polys_b)
-            .unwrap();
+        let dev_outs = domain.lagrange_to_coeff_many_device(&lagrange_polys_b).unwrap();
         assert_eq!(host_outs.len(), dev_outs.len());
         for (i, (h, d)) in host_outs.iter().zip(dev_outs.iter()).enumerate() {
             let dev_buf = d.device_buf();
@@ -867,13 +813,11 @@ fn test_params_kzg_commit_lagrange_cache_cold_warm() {
 
     let k = 15u32;
     let n = 1usize << k;
-    assert!(
-        n > GPU_MSM_THRESHOLD,
-        "test must size strictly above GPU_MSM_THRESHOLD"
-    );
+    assert!(n > GPU_MSM_THRESHOLD, "test must size strictly above GPU_MSM_THRESHOLD");
     let params = ParamsKZG::<Bn256>::setup(k, OsRng);
 
-    let domain = EvaluationDomain::<Fr>::new(1, k);
+    let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, k);
+    let domain = EvaluationDomain::from_host_domain(&domain);
     let mut poly = domain.empty_lagrange();
     for v in poly.iter_mut() {
         *v = Fr::random(OsRng);
@@ -923,21 +867,16 @@ fn test_commit_lagrange_device_vs_host() {
 
     let k = 15u32;
     let n = 1usize << k;
-    assert!(
-        n > GPU_MSM_THRESHOLD,
-        "test must size strictly above GPU_MSM_THRESHOLD"
-    );
+    assert!(n > GPU_MSM_THRESHOLD, "test must size strictly above GPU_MSM_THRESHOLD");
     let params = ParamsKZG::<Bn256>::setup(k, OsRng);
-    let domain = EvaluationDomain::<Fr>::new(1, k);
+    let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, k);
+    let domain = EvaluationDomain::from_host_domain(&domain);
 
     let mut poly_host = domain.empty_lagrange();
     for v in poly_host.iter_mut() {
         *v = Fr::random(OsRng);
     }
-    let d_buf = poly_host
-        .values()
-        .to_device_on(&HALO2_GPU_CTX)
-        .expect("upload poly to device");
+    let d_buf = poly_host.values().to_device_on(&HALO2_GPU_CTX).expect("upload poly to device");
     let poly_device: Polynomial<Fr, crate::poly::LagrangeCoeff, crate::poly::Device> =
         Polynomial::from_device(d_buf);
 
@@ -1064,22 +1003,10 @@ fn test_lookup_product_device_inputs_vs_host() {
         // Device-input arm. Stage each per-poly slice into its own
         // `DeviceBuffer<Fr>`; the wrapper allocates its output buffer
         // internally and returns it device-resident.
-        let d_permuted_input = permuted_input
-            .as_slice()
-            .to_device_on(&HALO2_GPU_CTX)
-            .unwrap();
-        let d_permuted_table = permuted_table
-            .as_slice()
-            .to_device_on(&HALO2_GPU_CTX)
-            .unwrap();
-        let d_compressed_input = compressed_input
-            .as_slice()
-            .to_device_on(&HALO2_GPU_CTX)
-            .unwrap();
-        let d_compressed_table = compressed_table
-            .as_slice()
-            .to_device_on(&HALO2_GPU_CTX)
-            .unwrap();
+        let d_permuted_input = permuted_input.as_slice().to_device_on(&HALO2_GPU_CTX).unwrap();
+        let d_permuted_table = permuted_table.as_slice().to_device_on(&HALO2_GPU_CTX).unwrap();
+        let d_compressed_input = compressed_input.as_slice().to_device_on(&HALO2_GPU_CTX).unwrap();
+        let d_compressed_table = compressed_table.as_slice().to_device_on(&HALO2_GPU_CTX).unwrap();
         let d_out = lookup_product_device(
             &d_permuted_input,
             &d_permuted_table,
@@ -1125,28 +1052,23 @@ fn test_permutation_product_gpu_vs_cpu() {
     let log_n = 6u32;
     let n = 1usize << log_n;
     let num_cols = 2usize;
-    let domain = EvaluationDomain::<Fr>::new(1, log_n);
+    let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, log_n);
+    let domain = EvaluationDomain::from_host_domain(&domain);
     let omega = domain.get_omega();
 
-    let values: Vec<Vec<Fr>> = (0..num_cols)
-        .map(|_| (0..n).map(|_| Fr::random(OsRng)).collect())
-        .collect();
-    let permutations: Vec<Vec<Fr>> = (0..num_cols)
-        .map(|_| (0..n).map(|_| Fr::random(OsRng)).collect())
-        .collect();
+    let values: Vec<Vec<Fr>> =
+        (0..num_cols).map(|_| (0..n).map(|_| Fr::random(OsRng)).collect()).collect();
+    let permutations: Vec<Vec<Fr>> =
+        (0..num_cols).map(|_| (0..n).map(|_| Fr::random(OsRng)).collect()).collect();
     let beta = Fr::random(OsRng);
     let gamma = Fr::random(OsRng);
     let delta = <Fr as PrimeField>::DELTA;
     let deltaomega = Fr::random(OsRng);
 
-    let perms_ffi: Vec<FFITraitObject> = permutations
-        .iter()
-        .map(|p| FFITraitObject::new(p.as_ptr() as usize))
-        .collect();
-    let values_ffi: Vec<FFITraitObject> = values
-        .iter()
-        .map(|v| FFITraitObject::new(v.as_ptr() as usize))
-        .collect();
+    let perms_ffi: Vec<FFITraitObject> =
+        permutations.iter().map(|p| FFITraitObject::new(p.as_ptr() as usize)).collect();
+    let values_ffi: Vec<FFITraitObject> =
+        values.iter().map(|v| FFITraitObject::new(v.as_ptr() as usize)).collect();
 
     let mut gpu = vec![Fr::ONE; n];
     permutation_product_gpu(
@@ -1173,10 +1095,7 @@ fn test_permutation_product_gpu_vs_cpu() {
         deltaomega,
     );
 
-    assert_eq!(
-        gpu, cpu,
-        "permutation_product_gpu disagrees with CPU reference"
-    );
+    assert_eq!(gpu, cpu, "permutation_product_gpu disagrees with CPU reference");
 }
 
 #[test]
@@ -1189,28 +1108,23 @@ fn test_permutation_product_gpu_vs_cpu_chunking() {
     // caller's device slot) are covered.
     for &log_n in &[8u32, 12, 14] {
         let n = 1usize << log_n;
-        let domain = EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let omega = domain.get_omega();
         for &num_cols in &[2usize, 5] {
-            let values: Vec<Vec<Fr>> = (0..num_cols)
-                .map(|_| (0..n).map(|_| Fr::random(OsRng)).collect())
-                .collect();
-            let permutations: Vec<Vec<Fr>> = (0..num_cols)
-                .map(|_| (0..n).map(|_| Fr::random(OsRng)).collect())
-                .collect();
+            let values: Vec<Vec<Fr>> =
+                (0..num_cols).map(|_| (0..n).map(|_| Fr::random(OsRng)).collect()).collect();
+            let permutations: Vec<Vec<Fr>> =
+                (0..num_cols).map(|_| (0..n).map(|_| Fr::random(OsRng)).collect()).collect();
             let beta = Fr::random(OsRng);
             let gamma = Fr::random(OsRng);
             let delta = <Fr as PrimeField>::DELTA;
             let deltaomega = Fr::random(OsRng);
 
-            let perms_ffi: Vec<FFITraitObject> = permutations
-                .iter()
-                .map(|p| FFITraitObject::new(p.as_ptr() as usize))
-                .collect();
-            let values_ffi: Vec<FFITraitObject> = values
-                .iter()
-                .map(|v| FFITraitObject::new(v.as_ptr() as usize))
-                .collect();
+            let perms_ffi: Vec<FFITraitObject> =
+                permutations.iter().map(|p| FFITraitObject::new(p.as_ptr() as usize)).collect();
+            let values_ffi: Vec<FFITraitObject> =
+                values.iter().map(|v| FFITraitObject::new(v.as_ptr() as usize)).collect();
 
             let mut gpu = vec![Fr::ONE; n];
             permutation_product_gpu(
@@ -1256,29 +1170,24 @@ fn test_permutation_product_device_inputs_vs_host_inputs() {
     // `test_permutation_product_gpu_vs_cpu_chunking`).
     for &log_n in &[8u32, 12, 14] {
         let n = 1usize << log_n;
-        let domain = EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let omega = domain.get_omega();
         for &num_cols in &[2usize, 5] {
-            let values: Vec<Vec<Fr>> = (0..num_cols)
-                .map(|_| (0..n).map(|_| Fr::random(OsRng)).collect())
-                .collect();
-            let permutations: Vec<Vec<Fr>> = (0..num_cols)
-                .map(|_| (0..n).map(|_| Fr::random(OsRng)).collect())
-                .collect();
+            let values: Vec<Vec<Fr>> =
+                (0..num_cols).map(|_| (0..n).map(|_| Fr::random(OsRng)).collect()).collect();
+            let permutations: Vec<Vec<Fr>> =
+                (0..num_cols).map(|_| (0..n).map(|_| Fr::random(OsRng)).collect()).collect();
             let beta = Fr::random(OsRng);
             let gamma = Fr::random(OsRng);
             let delta = <Fr as PrimeField>::DELTA;
             let deltaomega = Fr::random(OsRng);
 
             // Host-input arm (baseline).
-            let host_perms_ffi: Vec<FFITraitObject> = permutations
-                .iter()
-                .map(|p| FFITraitObject::new(p.as_ptr() as usize))
-                .collect();
-            let host_values_ffi: Vec<FFITraitObject> = values
-                .iter()
-                .map(|v| FFITraitObject::new(v.as_ptr() as usize))
-                .collect();
+            let host_perms_ffi: Vec<FFITraitObject> =
+                permutations.iter().map(|p| FFITraitObject::new(p.as_ptr() as usize)).collect();
+            let host_values_ffi: Vec<FFITraitObject> =
+                values.iter().map(|v| FFITraitObject::new(v.as_ptr() as usize)).collect();
             let mut host_out = vec![Fr::ONE; n];
             permutation_product_gpu(
                 &mut host_out,
@@ -1300,22 +1209,14 @@ fn test_permutation_product_device_inputs_vs_host_inputs() {
                 .iter()
                 .map(|p| p.as_slice().to_device_on(&HALO2_GPU_CTX).unwrap())
                 .collect();
-            let value_devs: Vec<DeviceBuffer<Fr>> = values
-                .iter()
-                .map(|v| v.as_slice().to_device_on(&HALO2_GPU_CTX).unwrap())
-                .collect();
-            let device_perms_ffi: Vec<FFITraitObject> = perm_devs
-                .iter()
-                .map(|b| FFITraitObject::new(b.as_raw_ptr() as usize))
-                .collect();
-            let device_values_ffi: Vec<FFITraitObject> = value_devs
-                .iter()
-                .map(|b| FFITraitObject::new(b.as_raw_ptr() as usize))
-                .collect();
-            let mut modified_values_device = vec![Fr::ONE; n]
-                .as_slice()
-                .to_device_on(&HALO2_GPU_CTX)
-                .unwrap();
+            let value_devs: Vec<DeviceBuffer<Fr>> =
+                values.iter().map(|v| v.as_slice().to_device_on(&HALO2_GPU_CTX).unwrap()).collect();
+            let device_perms_ffi: Vec<FFITraitObject> =
+                perm_devs.iter().map(|b| FFITraitObject::new(b.as_raw_ptr() as usize)).collect();
+            let device_values_ffi: Vec<FFITraitObject> =
+                value_devs.iter().map(|b| FFITraitObject::new(b.as_raw_ptr() as usize)).collect();
+            let mut modified_values_device =
+                vec![Fr::ONE; n].as_slice().to_device_on(&HALO2_GPU_CTX).unwrap();
             permutation_product_device(
                 &mut modified_values_device,
                 &device_perms_ffi,
@@ -1534,9 +1435,10 @@ fn test_cosetfft_gpu_many_to_device_vs_host_output() {
     let log_n = 10u32;
     let extend_log_n = 10u32;
     let extend_size: usize = 1 << extend_log_n;
-    let domain = EvaluationDomain::<Fr>::new(1, log_n);
+    let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, log_n);
+    let domain = EvaluationDomain::from_host_domain(&domain);
     let omega = domain.get_omega();
-    let omega_part = domain.g_coset; // matches typical cosetfft_part call shape
+    let omega_part = domain.inner.g_coset; // matches typical cosetfft_part call shape
 
     // Three input polys of length 2^log_n, padded to 2^extend_log_n.
     let num_many = 3usize;
@@ -1553,14 +1455,10 @@ fn test_cosetfft_gpu_many_to_device_vs_host_output() {
 
     // Path 1: host-output FFT.
     let mut host_outs: Vec<Vec<Fr>> = (0..num_many).map(|_| vec![Fr::ZERO; extend_size]).collect();
-    let in_objs: Vec<FFITraitObject> = in_polys
-        .iter()
-        .map(|v| FFITraitObject::from_slice(v.as_slice()))
-        .collect();
-    let host_out_objs: Vec<FFITraitObject> = host_outs
-        .iter_mut()
-        .map(|v| FFITraitObject::from_slice(v.as_mut_slice()))
-        .collect();
+    let in_objs: Vec<FFITraitObject> =
+        in_polys.iter().map(|v| FFITraitObject::from_slice(v.as_slice())).collect();
+    let host_out_objs: Vec<FFITraitObject> =
+        host_outs.iter_mut().map(|v| FFITraitObject::from_slice(v.as_mut_slice())).collect();
     cosetfft_gpu_many::<Fr>(
         NttType::CosetFFT_Part.into(),
         in_objs.clone(),
@@ -1601,10 +1499,7 @@ fn test_cosetfft_gpu_many_to_device_vs_host_output() {
     HALO2_GPU_CTX.stream.synchronize().unwrap();
 
     for (i, (h, d)) in host_outs.iter().zip(device_outs.iter()).enumerate() {
-        assert_eq!(
-            h, d,
-            "FFT poly {i}: device-output variant disagrees with host-output variant",
-        );
+        assert_eq!(h, d, "FFT poly {i}: device-output variant disagrees with host-output variant",);
         let _ = omega; // silence unused for this test
     }
 }
@@ -1622,8 +1517,9 @@ fn test_cosetfft_gpu_many_device_to_device_vs_host_output() {
     fn run_one(log_n: u32) {
         let extend_log_n = log_n;
         let extend_size: usize = 1 << extend_log_n;
-        let domain = EvaluationDomain::<Fr>::new(1, log_n);
-        let omega_part = domain.g_coset;
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = EvaluationDomain::from_host_domain(&domain);
+        let omega_part = domain.inner.g_coset;
 
         let num_many = 3usize;
         let in_polys: Vec<Vec<Fr>> = (0..num_many)
@@ -1639,14 +1535,10 @@ fn test_cosetfft_gpu_many_device_to_device_vs_host_output() {
         // Path 1: host-input + host-output (reference).
         let mut host_outs: Vec<Vec<Fr>> =
             (0..num_many).map(|_| vec![Fr::ZERO; extend_size]).collect();
-        let in_objs_host: Vec<FFITraitObject> = in_polys
-            .iter()
-            .map(|v| FFITraitObject::from_slice(v.as_slice()))
-            .collect();
-        let host_out_objs: Vec<FFITraitObject> = host_outs
-            .iter_mut()
-            .map(|v| FFITraitObject::from_slice(v.as_mut_slice()))
-            .collect();
+        let in_objs_host: Vec<FFITraitObject> =
+            in_polys.iter().map(|v| FFITraitObject::from_slice(v.as_slice())).collect();
+        let host_out_objs: Vec<FFITraitObject> =
+            host_outs.iter_mut().map(|v| FFITraitObject::from_slice(v.as_mut_slice())).collect();
         cosetfft_gpu_many::<Fr>(
             NttType::CosetFFT_Part.into(),
             in_objs_host,
@@ -1659,14 +1551,10 @@ fn test_cosetfft_gpu_many_device_to_device_vs_host_output() {
         .unwrap();
 
         // Path 2: pre-upload inputs to device, run device-input + device-output.
-        let in_dbufs: Vec<_> = in_polys
-            .iter()
-            .map(|v| v.as_slice().to_device_on(&HALO2_GPU_CTX).unwrap())
-            .collect();
-        let in_objs_device: Vec<FFITraitObject> = in_dbufs
-            .iter()
-            .map(|b| FFITraitObject::new(b.as_raw_ptr() as usize))
-            .collect();
+        let in_dbufs: Vec<_> =
+            in_polys.iter().map(|v| v.as_slice().to_device_on(&HALO2_GPU_CTX).unwrap()).collect();
+        let in_objs_device: Vec<FFITraitObject> =
+            in_dbufs.iter().map(|b| FFITraitObject::new(b.as_raw_ptr() as usize)).collect();
         let dev_bufs = cosetfft_many_device::<Fr>(
             NttType::CosetFFT_Part.into(),
             in_objs_device,
@@ -1716,7 +1604,8 @@ fn test_quotient_lookups_gpu_vs_cpu() {
 
     fn run_one(log_n: u32) {
         let length = 1usize << log_n;
-        let domain = EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = EvaluationDomain::from_host_domain(&domain);
 
         let make_poly = |n: usize| (0..n).map(|_| Fr::random(OsRng)).collect::<Vec<Fr>>();
 
@@ -1740,7 +1629,7 @@ fn test_quotient_lookups_gpu_vs_cpu() {
         let extended_omega_factor = Fr::random(OsRng);
         // CPU `lagrange_to_extend_part` multiplies by `g_coset` internally;
         // GPU takes the pre-scaled `omega_part`. Both land on the same coset.
-        let omega_part = domain.g_coset * extended_omega_factor;
+        let omega_part = domain.inner.g_coset * extended_omega_factor;
 
         let permuted_input_coset = domain
             .lagrange_to_extend_part(&permuted_input_lagrange, extended_omega_factor)
@@ -1748,9 +1637,8 @@ fn test_quotient_lookups_gpu_vs_cpu() {
         let permuted_table_coset = domain
             .lagrange_to_extend_part(&permuted_table_lagrange, extended_omega_factor)
             .unwrap();
-        let product_coset = domain
-            .coeff_to_extended_part(product_coeff.clone(), extended_omega_factor)
-            .unwrap();
+        let product_coset =
+            domain.coeff_to_extended_part(product_coeff.clone(), extended_omega_factor).unwrap();
 
         let mut values_cpu = values_init.clone();
         quotient_lookups_cpu(
@@ -1777,9 +1665,9 @@ fn test_quotient_lookups_gpu_vs_cpu() {
             gamma,
             y,
             log_n,
-            domain.omega_inv,
-            domain.ifft_divisor,
-            domain.omega,
+            domain.inner.omega_inv,
+            domain.inner.ifft_divisor,
+            domain.inner.omega,
             length,
         );
         gpu.calculate_constraints(
@@ -1794,10 +1682,7 @@ fn test_quotient_lookups_gpu_vs_cpu() {
         gpu.copy_values_back_to_host(&mut values_gpu);
 
         for (i, (g, c)) in values_gpu.iter().zip(values_cpu.iter()).enumerate() {
-            assert_eq!(
-                g, c,
-                "GPU vs CPU mismatch at row {i} (log_n={log_n}, length={length})"
-            );
+            assert_eq!(g, c, "GPU vs CPU mismatch at row {i} (log_n={log_n}, length={length})");
         }
     }
 
@@ -1861,7 +1746,8 @@ fn test_compress_expressions_gpu_vs_cpu() {
 
     fn run_one(log_n: u32) {
         let j: u32 = 4;
-        let domain = EvaluationDomain::<Fr>::new(j, log_n);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(j, log_n);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let n: usize = 1usize << log_n;
 
         let mk_col = || -> crate::poly::Polynomial<Fr, crate::poly::LagrangeCoeff> {
@@ -1915,15 +1801,7 @@ fn test_compress_expressions_gpu_vs_cpu() {
         let host_out: Vec<Fr> = expressions
             .iter()
             .map(|expr| {
-                evaluate(
-                    expr,
-                    n,
-                    1,
-                    &fixed_polys,
-                    &advice_polys,
-                    &instance_polys,
-                    &challenges,
-                )
+                evaluate(expr, n, 1, &fixed_polys, &advice_polys, &instance_polys, &challenges)
             })
             .fold(vec![Fr::ZERO; n], |mut acc, ev| {
                 for (a, e) in acc.iter_mut().zip(ev.iter()) {
@@ -1942,11 +1820,7 @@ fn test_compress_expressions_gpu_vs_cpu() {
             compress_expressions_device::<G1Affine>(&expressions, theta, n, 1, &pool, &challenges)
                 .expect("compress_expressions_device failed");
 
-        assert_eq!(
-            host_out.len(),
-            dev_out.len(),
-            "length mismatch at log_n={log_n}"
-        );
+        assert_eq!(host_out.len(), dev_out.len(), "length mismatch at log_n={log_n}");
         for (i, (h, d)) in host_out.iter().zip(dev_out.iter()).enumerate() {
             assert_eq!(
                 h, d,
@@ -1978,7 +1852,8 @@ fn test_compress_expressions_gpu_inplace_device_vs_host() {
 
     fn run_one(log_n: u32) {
         let j: u32 = 4;
-        let domain = EvaluationDomain::<Fr>::new(j, log_n);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(j, log_n);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let n: usize = 1usize << log_n;
 
         let mk_col = || -> crate::poly::Polynomial<Fr, crate::poly::LagrangeCoeff> {
@@ -2068,10 +1943,7 @@ fn test_compress_expressions_gpu_inplace_device_vs_host() {
             )
             .expect("D2H of compress_expressions_in_place_device result");
         }
-        crate::cuda::utils::HALO2_GPU_CTX
-            .stream
-            .to_host_sync()
-            .expect("stream sync after D2H");
+        crate::cuda::utils::HALO2_GPU_CTX.stream.to_host_sync().expect("stream sync after D2H");
 
         assert_eq!(host_out.len(), dev_out_h.len());
         for (i, (h, d)) in host_out.iter().zip(dev_out_h.iter()).enumerate() {
@@ -2109,14 +1981,8 @@ fn test_column_pool_host_arm_fallback_on_oom() {
     // the FFI reads the slices.
     let empty: [&[Fr]; 0] = [];
     let res = pool.try_init(&empty[..], &empty[..], &empty[..]);
-    assert!(
-        res.is_ok(),
-        "empty inputs should pass the VRAM gate trivially"
-    );
-    assert!(
-        pool.is_initialized(),
-        "empty inputs leave the pool in an initialized state"
-    );
+    assert!(res.is_ok(), "empty inputs should pass the VRAM gate trivially");
+    assert!(pool.is_initialized(), "empty inputs leave the pool in an initialized state");
 
     // Now exercise the actual OOM path: 64 columns of absurd_n.
     let mut pool_oom = ColumnPool::<Fr>::new(absurd_n);
@@ -2126,21 +1992,14 @@ fn test_column_pool_host_arm_fallback_on_oom() {
     let columns: Vec<&[Fr]> = (0..64).map(|_| dummy_col.as_slice()).collect();
     let res = pool_oom.try_init(&columns, &empty[..], &empty[..]);
     match res {
-        Err(HaloGpuError::InsufficientGpuMemory {
-            context,
-            magnitude,
-            free_bytes: _,
-        }) => {
+        Err(HaloGpuError::InsufficientGpuMemory { context, magnitude, free_bytes: _ }) => {
             assert_eq!(context, "ColumnPool::try_init");
             assert_eq!(magnitude, 64);
         }
         Err(other) => panic!("expected InsufficientGpuMemory, got {:?}", other),
         Ok(()) => panic!("expected OOM rejection, got Ok"),
     }
-    assert!(
-        !pool_oom.is_initialized(),
-        "pool_oom must not be initialized on OOM"
-    );
+    assert!(!pool_oom.is_initialized(), "pool_oom must not be initialized on OOM");
     // Caller's fallback hook: `is_initialized() == false` → host-arm path.
     // The actual fallback is exercised by the `commit_permuted` closure
     // (see `plonk/lookup/prover.rs`); end-to-end correctness is the
@@ -2175,10 +2034,8 @@ fn test_permute_expression_pair_gpu_vs_seq() {
 
         let mut permuted_table = vec![Fr::ZERO; usable_rows];
         let mut repeated_input_rows: Vec<usize> = Vec::new();
-        for (row, (input_value, table_value)) in permuted_input
-            .iter()
-            .zip(permuted_table.iter_mut())
-            .enumerate()
+        for (row, (input_value, table_value)) in
+            permuted_input.iter().zip(permuted_table.iter_mut()).enumerate()
         {
             if row == 0 || *input_value != permuted_input[row - 1] {
                 *table_value = *input_value;
@@ -2337,16 +2194,9 @@ fn test_permute_expression_pair_gpu_vs_seq() {
     // (no duplicates, mixed, full duplicates) across multiple log_n
     // and multiple seeds at each combination.
     let log_ns = [6u32, 10, 12];
-    let patterns = [
-        AdversarialPattern::AllDistinct,
-        AdversarialPattern::Mixed,
-        AdversarialPattern::AllSame,
-    ];
-    let seeds: [u64; 3] = [
-        0x517c_c1b9_2729_24d3,
-        0xdead_beef_f00d_cafe,
-        0x0123_4567_89ab_cdef,
-    ];
+    let patterns =
+        [AdversarialPattern::AllDistinct, AdversarialPattern::Mixed, AdversarialPattern::AllSame];
+    let seeds: [u64; 3] = [0x517c_c1b9_2729_24d3, 0xdead_beef_f00d_cafe, 0x0123_4567_89ab_cdef];
     let blinding = 6usize; // matches default ConstraintSystem blinding_factors() + 1 budget
     for &log_n in &log_ns {
         for &pattern in &patterns {
@@ -2372,11 +2222,12 @@ fn test_dense_lagrange_to_coset_device_input_vs_host_input() {
 
     for log_n in [10u32, 12, 14] {
         let n = 1usize << log_n;
-        let domain = EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let omega = domain.get_omega();
         let omega_inv = domain.get_omega_inv();
-        let divisor = domain.ifft_divisor;
-        let omega_part = domain.g_coset * domain.get_extended_omega();
+        let divisor = domain.inner.ifft_divisor;
+        let omega_part = domain.inner.g_coset * domain.get_extended_omega();
 
         let host_input: Vec<Fr> = (0..n).map(|_| Fr::random(OsRng)).collect();
 
@@ -2425,11 +2276,12 @@ fn test_ifft_cosetfftpart_device_input_vs_host_input() {
 
     for log_n in [10u32, 12, 14] {
         let n = 1usize << log_n;
-        let domain = EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let omega = domain.get_omega();
         let omega_inv = domain.get_omega_inv();
-        let divisor = domain.ifft_divisor;
-        let omega_part = domain.g_coset * domain.get_extended_omega();
+        let divisor = domain.inner.ifft_divisor;
+        let omega_part = domain.inner.g_coset * domain.get_extended_omega();
 
         let host_input: Vec<Fr> = (0..n).map(|_| Fr::random(OsRng)).collect();
 
@@ -2478,9 +2330,10 @@ fn test_module_poly_to_coset_device_input_vs_host_input() {
 
     for log_n in [10u32, 12, 14] {
         let n = 1usize << log_n;
-        let domain = EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let omega = domain.get_omega();
-        let omega_part = domain.g_coset * domain.get_extended_omega();
+        let omega_part = domain.inner.g_coset * domain.get_extended_omega();
 
         let host_input: Vec<Fr> = (0..n).map(|_| Fr::random(OsRng)).collect();
 
@@ -2527,11 +2380,12 @@ fn test_calculate_constraints_full_device_vs_calculate_constraints_device() {
 
     for log_n in [10u32, 12, 14] {
         let n = 1usize << log_n;
-        let domain = EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let omega = domain.get_omega();
         let omega_inv = domain.get_omega_inv();
-        let divisor = domain.ifft_divisor;
-        let g_coset_part = domain.g_coset * domain.get_extended_omega();
+        let divisor = domain.inner.ifft_divisor;
+        let g_coset_part = domain.inner.g_coset * domain.get_extended_omega();
 
         let init_values: Vec<Fr> = (0..n).map(|_| Fr::random(OsRng)).collect();
         let l0: Vec<Fr> = (0..n).map(|_| Fr::random(OsRng)).collect();
@@ -2561,10 +2415,8 @@ fn test_calculate_constraints_full_device_vs_calculate_constraints_device() {
             omega,
             n,
         );
-        let d_table_a: DeviceBuffer<Fr> = table_values
-            .as_slice()
-            .to_device_on(&HALO2_GPU_CTX)
-            .unwrap();
+        let d_table_a: DeviceBuffer<Fr> =
+            table_values.as_slice().to_device_on(&HALO2_GPU_CTX).unwrap();
         gpu_a
             .calculate_constraints_device(
                 &d_table_a,
@@ -2574,10 +2426,7 @@ fn test_calculate_constraints_full_device_vs_calculate_constraints_device() {
                 g_coset_part,
             )
             .unwrap();
-        let out_a: Vec<Fr> = gpu_a
-            .take_values_device()
-            .to_host_on(&HALO2_GPU_CTX)
-            .unwrap();
+        let out_a: Vec<Fr> = gpu_a.take_values_device().to_host_on(&HALO2_GPU_CTX).unwrap();
 
         // Full device-input variant: all four lookup polys pre-staged on
         // device. Internal helpers must skip every per-call H2D.
@@ -2595,22 +2444,14 @@ fn test_calculate_constraints_full_device_vs_calculate_constraints_device() {
             omega,
             n,
         );
-        let d_table_b: DeviceBuffer<Fr> = table_values
-            .as_slice()
-            .to_device_on(&HALO2_GPU_CTX)
-            .unwrap();
-        let d_product: DeviceBuffer<Fr> = product_poly
-            .as_slice()
-            .to_device_on(&HALO2_GPU_CTX)
-            .unwrap();
-        let d_permuted_input: DeviceBuffer<Fr> = permuted_input
-            .as_slice()
-            .to_device_on(&HALO2_GPU_CTX)
-            .unwrap();
-        let d_permuted_table: DeviceBuffer<Fr> = permuted_table
-            .as_slice()
-            .to_device_on(&HALO2_GPU_CTX)
-            .unwrap();
+        let d_table_b: DeviceBuffer<Fr> =
+            table_values.as_slice().to_device_on(&HALO2_GPU_CTX).unwrap();
+        let d_product: DeviceBuffer<Fr> =
+            product_poly.as_slice().to_device_on(&HALO2_GPU_CTX).unwrap();
+        let d_permuted_input: DeviceBuffer<Fr> =
+            permuted_input.as_slice().to_device_on(&HALO2_GPU_CTX).unwrap();
+        let d_permuted_table: DeviceBuffer<Fr> =
+            permuted_table.as_slice().to_device_on(&HALO2_GPU_CTX).unwrap();
         gpu_b
             .calculate_constraints_full_device(
                 &d_table_b,
@@ -2620,10 +2461,7 @@ fn test_calculate_constraints_full_device_vs_calculate_constraints_device() {
                 g_coset_part,
             )
             .unwrap();
-        let out_b: Vec<Fr> = gpu_b
-            .take_values_device()
-            .to_host_on(&HALO2_GPU_CTX)
-            .unwrap();
+        let out_b: Vec<Fr> = gpu_b.take_values_device().to_host_on(&HALO2_GPU_CTX).unwrap();
 
         assert_eq!(
             out_a, out_b,
@@ -2680,9 +2518,7 @@ fn test_kate_division_device_chained_vs_cpu() {
     let poly: Vec<Fr> = (0..n).map(|_| Fr::random(OsRng)).collect();
     let roots: [Fr; 3] = [Fr::random(OsRng), Fr::random(OsRng), Fr::random(OsRng)];
 
-    let cpu_q: Vec<Fr> = roots
-        .iter()
-        .fold(poly.clone(), |acc, r| kate_division(acc.iter(), *r));
+    let cpu_q: Vec<Fr> = roots.iter().fold(poly.clone(), |acc, r| kate_division(acc.iter(), *r));
 
     let mut d_poly: DeviceBuffer<Fr> = poly.as_slice().to_device_on(&HALO2_GPU_CTX).unwrap();
     for r in roots.iter() {
@@ -2690,11 +2526,7 @@ fn test_kate_division_device_chained_vs_cpu() {
     }
     let gpu_q: Vec<Fr> = d_poly.to_host_on(&HALO2_GPU_CTX).unwrap();
 
-    assert_eq!(
-        gpu_q.len(),
-        cpu_q.len(),
-        "kate_division_device chained length mismatch"
-    );
+    assert_eq!(gpu_q.len(), cpu_q.len(), "kate_division_device chained length mismatch");
     assert_eq!(
         gpu_q, cpu_q,
         "kate_division_device chained disagrees with CPU iterated kate_division"
@@ -2747,9 +2579,8 @@ fn test_poly_sub_scalar_at_zero_device_vs_cpu() {
     cpu[0] -= scalar;
 
     let mut d_buf: DeviceBuffer<Fr> = poly.as_slice().to_device_on(&HALO2_GPU_CTX).unwrap();
-    let d_scalar: DeviceBuffer<Fr> = std::slice::from_ref(&scalar)
-        .to_device_on(&HALO2_GPU_CTX)
-        .unwrap();
+    let d_scalar: DeviceBuffer<Fr> =
+        std::slice::from_ref(&scalar).to_device_on(&HALO2_GPU_CTX).unwrap();
     poly_sub_scalar_at_zero_device(&mut d_buf, &d_scalar).unwrap();
     let got: Vec<Fr> = d_buf.to_host_on(&HALO2_GPU_CTX).unwrap();
 
@@ -2778,9 +2609,8 @@ fn test_kate_division_device_padded_vs_cpu() {
         let q_len = cpu_q.len();
 
         let d_poly: DeviceBuffer<Fr> = poly.as_slice().to_device_on(&HALO2_GPU_CTX).unwrap();
-        let d_root: DeviceBuffer<Fr> = std::slice::from_ref(&root)
-            .to_device_on(&HALO2_GPU_CTX)
-            .unwrap();
+        let d_root: DeviceBuffer<Fr> =
+            std::slice::from_ref(&root).to_device_on(&HALO2_GPU_CTX).unwrap();
 
         for &pad_extra in &[0usize, 1, 256] {
             let out_len = q_len + pad_extra;
@@ -2816,9 +2646,8 @@ fn test_kate_division_device_padded_n1_zero_only() {
     let poly: Vec<Fr> = vec![Fr::random(OsRng)];
     let root = Fr::random(OsRng);
     let d_poly: DeviceBuffer<Fr> = poly.as_slice().to_device_on(&HALO2_GPU_CTX).unwrap();
-    let d_root: DeviceBuffer<Fr> = std::slice::from_ref(&root)
-        .to_device_on(&HALO2_GPU_CTX)
-        .unwrap();
+    let d_root: DeviceBuffer<Fr> =
+        std::slice::from_ref(&root).to_device_on(&HALO2_GPU_CTX).unwrap();
 
     for &out_len in &[1usize, 4, 1024] {
         let d_q = kate_division_device_padded_with_d_root(&d_poly, &d_root, out_len).unwrap();
@@ -2893,9 +2722,8 @@ fn test_kate_division_device_n1_no_panic() {
     let host_q: Vec<Fr> = d_q.to_host_on(&HALO2_GPU_CTX).unwrap();
     assert!(host_q.is_empty(), "n==1 host roundtrip must be empty");
 
-    let d_root: DeviceBuffer<Fr> = std::slice::from_ref(&root)
-        .to_device_on(&HALO2_GPU_CTX)
-        .unwrap();
+    let d_root: DeviceBuffer<Fr> =
+        std::slice::from_ref(&root).to_device_on(&HALO2_GPU_CTX).unwrap();
     let d_q2 =
         kate_division_device_with_d_root(&d_poly, &d_root).expect("n==1 with_d_root panicked");
     assert_eq!(d_q2.len(), 0, "n==1 _with_d_root must produce length-0 q");

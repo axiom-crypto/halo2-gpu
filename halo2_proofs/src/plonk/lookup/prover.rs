@@ -83,7 +83,7 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
         &self,
         pk: &GpuProvingKey<'_, C>,
         params: &P,
-        domain: &EvaluationDomain<C::Scalar>,
+        domain: &EvaluationDomain<'_, C::Scalar>,
         theta: ChallengeTheta<C>,
         advice_values_device: &'a [Polynomial<C::Scalar, LagrangeCoeff, Device>],
         fixed_values: &'a [Polynomial<C::Scalar, LagrangeCoeff>],
@@ -119,9 +119,7 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
                         challenges,
                     ))
                 })
-                .fold(domain.empty_lagrange(), |acc, expression| {
-                    acc * *theta + &expression
-                });
+                .fold(domain.empty_lagrange(), |acc, expression| acc * *theta + &expression);
             compressed_expression
         };
 
@@ -162,33 +160,31 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
         // same host slices they do today.
         let n = params.n() as usize;
         let usable_rows = n - (pk.cs.blinding_factors() + 1);
-        let fused_device = column_pool
-            .filter(|pool| pool.is_initialized())
-            .and_then(|pool| {
-                #[cfg(feature = "profile")]
-                let device_fused_time = start_timer!(|| "compress + permute (device-fused)");
-                let res = run_compress_permute_device::<C>(
-                    pool,
-                    *theta,
-                    &self.input_expressions,
-                    &self.table_expressions,
-                    n,
-                    usable_rows,
-                    challenges,
-                );
-                #[cfg(feature = "profile")]
-                end_timer!(device_fused_time);
-                match res {
-                    Ok(out) => Some(out),
-                    Err(e) => {
-                        log::warn!(
-                            "compress+permute device-fused path failed ({:?}); host-arm fallback",
-                            e
-                        );
-                        None
-                    }
+        let fused_device = column_pool.filter(|pool| pool.is_initialized()).and_then(|pool| {
+            #[cfg(feature = "profile")]
+            let device_fused_time = start_timer!(|| "compress + permute (device-fused)");
+            let res = run_compress_permute_device::<C>(
+                pool,
+                *theta,
+                &self.input_expressions,
+                &self.table_expressions,
+                n,
+                usable_rows,
+                challenges,
+            );
+            #[cfg(feature = "profile")]
+            end_timer!(device_fused_time);
+            match res {
+                Ok(out) => Some(out),
+                Err(e) => {
+                    log::warn!(
+                        "compress+permute device-fused path failed ({:?}); host-arm fallback",
+                        e
+                    );
+                    None
                 }
-            });
+            }
+        });
 
         let (
             compressed_input_expression,
@@ -223,10 +219,7 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
                 )
                 .map_err(HaloGpuError::from)?;
             }
-            HALO2_GPU_CTX
-                .stream
-                .to_host_sync()
-                .map_err(HaloGpuError::from)?;
+            HALO2_GPU_CTX.stream.to_host_sync().map_err(HaloGpuError::from)?;
             (
                 pk.domain.lagrange_from_vec(compressed_input_host),
                 pk.domain.lagrange_from_vec(compressed_table_host),
@@ -358,10 +351,8 @@ impl<C: CurveAffine> Permuted<C> {
             let d_permuted_input: &DeviceBuffer<C::Scalar> = match &self.permuted_input_expression {
                 MaybeDevice::Device(p) => p.device_buf(),
                 MaybeDevice::Host(p) => {
-                    permuted_input_owned = p
-                        .values()
-                        .to_device_on(&HALO2_GPU_CTX)
-                        .map_err(HaloGpuError::from)?;
+                    permuted_input_owned =
+                        p.values().to_device_on(&HALO2_GPU_CTX).map_err(HaloGpuError::from)?;
                     &permuted_input_owned
                 }
             };
@@ -369,10 +360,8 @@ impl<C: CurveAffine> Permuted<C> {
             let d_permuted_table: &DeviceBuffer<C::Scalar> = match &self.permuted_table_expression {
                 MaybeDevice::Device(p) => p.device_buf(),
                 MaybeDevice::Host(p) => {
-                    permuted_table_owned = p
-                        .values()
-                        .to_device_on(&HALO2_GPU_CTX)
-                        .map_err(HaloGpuError::from)?;
+                    permuted_table_owned =
+                        p.values().to_device_on(&HALO2_GPU_CTX).map_err(HaloGpuError::from)?;
                     &permuted_table_owned
                 }
             };
@@ -428,9 +417,8 @@ impl<C: CurveAffine> Permuted<C> {
         // Blinding factors are host-RNG-generated and uploaded with a
         // single tiny H2D into the tail of the device buffer — the
         // accumulator stays device-resident.
-        let host_blind: Vec<C::Scalar> = (0..blinding_factors)
-            .map(|_| C::Scalar::random(&mut rng))
-            .collect();
+        let host_blind: Vec<C::Scalar> =
+            (0..blinding_factors).map(|_| C::Scalar::random(&mut rng)).collect();
         unsafe {
             cuda_memcpy_on::<false, true>(
                 (d_z.as_mut_raw_ptr() as *mut u8).add(acc_len * scalar_bytes) as *mut libc::c_void,
@@ -448,9 +436,7 @@ impl<C: CurveAffine> Permuted<C> {
 
         // Single-stream GPU prover: commit Z(X) via device-scalars MSM, then
         // device-input iFFT to coeff form. No PCIe traffic on Z(X).
-        let product_commitment = params
-            .commit_lagrange_device(&z, Blind::default())
-            .to_affine();
+        let product_commitment = params.commit_lagrange_device(&z, Blind::default()).to_affine();
         let product_poly = pk.domain.lagrange_to_coeff_device_input(z)?;
 
         Ok((
@@ -533,10 +519,7 @@ impl<C: CurveAffine> Evaluated<C> {
 
         iter::empty()
             // Open lookup product commitments at x
-            .chain(Some(ProverQuery {
-                point: *x,
-                poly: (&self.constructed.product_poly).into(),
-            }))
+            .chain(Some(ProverQuery { point: *x, poly: (&self.constructed.product_poly).into() }))
             // Open lookup input commitments at x
             .chain(Some(ProverQuery {
                 point: *x,
@@ -589,13 +572,8 @@ where
 {
     // Slot 4 carries the Horner factor (`theta`); slots 0..3 are the
     // kernel's hard-coded `[0, 1, -1, 2]` for `c1`/`c2` combine decoding.
-    let expr_constants = vec![
-        C::Scalar::ZERO,
-        C::Scalar::ONE,
-        -C::Scalar::ONE,
-        C::Scalar::from(2),
-        theta,
-    ];
+    let expr_constants =
+        vec![C::Scalar::ZERO, C::Scalar::ONE, -C::Scalar::ONE, C::Scalar::from(2), theta];
 
     let graph_input = GraphEvaluator::<C>::for_compress(input_expressions);
     let graph_table = GraphEvaluator::<C>::for_compress(table_expressions);
@@ -656,7 +634,7 @@ type ExpressionPair<F> = (Polynomial<F, LagrangeCoeff>, Polynomial<F, LagrangeCo
 fn permute_expression_pair<'params, C: CurveAffine, P: Params<'params, C>>(
     pk: &GpuProvingKey<'_, C>,
     params: &P,
-    domain: &EvaluationDomain<C::Scalar>,
+    domain: &EvaluationDomain<'_, C::Scalar>,
     input_expression: &Polynomial<C::Scalar, LagrangeCoeff>,
     table_expression: &Polynomial<C::Scalar, LagrangeCoeff>,
 ) -> Result<ExpressionPair<C::Scalar>, GpuError>
@@ -821,10 +799,8 @@ fn permute_expression_pair_seq<C: CurveAffine>(
     // A BTreeMap of each unique element in the table expression and its count
     #[cfg(feature = "profile")]
     let leftover_map_time = start_timer!(|| "permute_seq construct leftover map");
-    let mut leftover_table_map: BTreeMap<C::Scalar, u32> = table_expression
-        .iter()
-        .take(usable_rows)
-        .fold(BTreeMap::new(), |mut acc, coeff| {
+    let mut leftover_table_map: BTreeMap<C::Scalar, u32> =
+        table_expression.iter().take(usable_rows).fold(BTreeMap::new(), |mut acc, coeff| {
             *acc.entry(*coeff).or_insert(0) += 1;
             acc
         });
@@ -884,10 +860,8 @@ fn permute_expression_pair_seq<C: CurveAffine>(
     #[cfg(feature = "sanity-checks")]
     {
         let mut last = None;
-        for (a, b) in permuted_input_expression
-            .iter()
-            .zip(permuted_table_coeffs.iter())
-            .take(usable_rows)
+        for (a, b) in
+            permuted_input_expression.iter().zip(permuted_table_coeffs.iter()).take(usable_rows)
         {
             if *a != *b {
                 assert_eq!(*a, last.unwrap());
@@ -941,26 +915,20 @@ mod tests {
             let chunk_size = table_expression.len().div_ceil(num_threads);
             let handles = table_expression
                 .chunks(chunk_size)
-                .map(
-                    |table_expr| -> ScopedJoinHandle<BTreeMap<C::Scalar, usize>> {
-                        s.spawn(move || -> BTreeMap<C::Scalar, usize> {
-                            table_expr.iter().fold(BTreeMap::new(), |mut acc, coeff| {
-                                *acc.entry(*coeff).or_insert(0) += 1;
-                                acc
-                            })
+                .map(|table_expr| -> ScopedJoinHandle<BTreeMap<C::Scalar, usize>> {
+                    s.spawn(move || -> BTreeMap<C::Scalar, usize> {
+                        table_expr.iter().fold(BTreeMap::new(), |mut acc, coeff| {
+                            *acc.entry(*coeff).or_insert(0) += 1;
+                            acc
                         })
-                    },
-                )
+                    })
+                })
                 .collect::<Vec<_>>();
             // Note: Don't delete the `.collect::<Vec<_>>();` above if clippy error
             //       it will change the type of `handles` to Vec of closure, which is not what we want
             // Added this log output to bypass the `clippy::needless-collect` check
             log::debug!("spawned {} threads", handles.len());
-            handles
-                .into_iter()
-                .map(|handle| handle.join())
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap()
+            handles.into_iter().map(|handle| handle.join()).collect::<Result<Vec<_>, _>>().unwrap()
         });
         #[cfg(feature = "profile")]
         end_timer!(leftover_table_par_time);
@@ -1032,10 +1000,8 @@ mod tests {
         #[cfg(feature = "sanity-checks")]
         {
             let mut last = None;
-            for (a, b) in permuted_input_expression
-                .iter()
-                .zip(permuted_table_coeffs.iter())
-                .take(usable_rows)
+            for (a, b) in
+                permuted_input_expression.iter().zip(permuted_table_coeffs.iter()).take(usable_rows)
             {
                 if *a != *b {
                     assert_eq!(*a, last.unwrap());

@@ -68,10 +68,8 @@ pub fn multiexp_gpu<C: CurveAffine>(
     }
 
     let mut results = vec![C::Curve::identity(); num_chunks];
-    for ((coeff, base), res) in coeffs
-        .chunks(chunk_size)
-        .zip(bases.chunks(chunk_size))
-        .zip(results.iter_mut())
+    for ((coeff, base), res) in
+        coeffs.chunks(chunk_size).zip(bases.chunks(chunk_size)).zip(results.iter_mut())
     {
         let coeffs_obj = FFITraitObject::from_ref(&coeff[0]);
         let bases_obj = FFITraitObject::from_ref(&base[0]);
@@ -169,10 +167,7 @@ pub(crate) fn multiexp_gpu_device_bases_chunked<C: CurveAffine>(
     let elem_bytes = mem::size_of::<C>();
 
     let mut results: Vec<C::Curve> = vec![C::Curve::identity(); num_chunks];
-    for (idx, (coeffs_chunk, res)) in coeffs
-        .chunks(chunk_size)
-        .zip(results.iter_mut())
-        .enumerate()
+    for (idx, (coeffs_chunk, res)) in coeffs.chunks(chunk_size).zip(results.iter_mut()).enumerate()
     {
         let chunk_len = coeffs_chunk.len();
         debug_assert!(idx * chunk_size + chunk_len <= length);

@@ -58,28 +58,18 @@ impl Assembly {
         right_column: Column<Any>,
         right_row: usize,
     ) -> Result<(), GpuError> {
-        let left_column =
-            self.columns
-                .iter()
-                .position(|c| c == &left_column)
-                .ok_or(GpuError::Canonical(
-                    halo2_axiom::plonk::Error::ColumnNotInPermutation(left_column),
-                ))?;
-        let right_column =
-            self.columns
-                .iter()
-                .position(|c| c == &right_column)
-                .ok_or(GpuError::Canonical(
-                    halo2_axiom::plonk::Error::ColumnNotInPermutation(right_column),
-                ))?;
+        let left_column = self.columns.iter().position(|c| c == &left_column).ok_or(
+            GpuError::Canonical(halo2_axiom::plonk::Error::ColumnNotInPermutation(left_column)),
+        )?;
+        let right_column = self.columns.iter().position(|c| c == &right_column).ok_or(
+            GpuError::Canonical(halo2_axiom::plonk::Error::ColumnNotInPermutation(right_column)),
+        )?;
 
         // Check bounds
         if left_row >= self.mapping[left_column].len()
             || right_row >= self.mapping[right_column].len()
         {
-            return Err(GpuError::Canonical(
-                halo2_axiom::plonk::Error::BoundsFailure,
-            ));
+            return Err(GpuError::Canonical(halo2_axiom::plonk::Error::BoundsFailure));
         }
 
         // See book/src/design/permutation.md for a description of this algorithm.
@@ -124,7 +114,7 @@ impl Assembly {
     pub(crate) fn build_vk<'params, C: CurveAffine, P: Params<'params, C>>(
         self,
         params: &P,
-        domain: &EvaluationDomain<C::Scalar>,
+        domain: &EvaluationDomain<'_, C::Scalar>,
         p: &Argument,
     ) -> halo2_axiom::plonk::permutation::VerifyingKey<C> {
         build_vk(params, domain, p, |i, j| self.mapping[i][j])
@@ -135,7 +125,7 @@ impl Assembly {
     pub(crate) fn build_pk<'params, C: CurveAffine, P: Params<'params, C>>(
         self,
         params: &P,
-        domain: &EvaluationDomain<C::Scalar>,
+        domain: &EvaluationDomain<'_, C::Scalar>,
         p: &Argument,
     ) -> Result<halo2_axiom::plonk::permutation::ProvingKey<C>, GpuError> {
         build_pk(params, domain, p, |i, j| self.mapping[i][j])
@@ -154,24 +144,21 @@ impl Assembly {
 /// permutation `ProvingKey`.
 pub(crate) fn build_pk<'params, C: CurveAffine, P: Params<'params, C>>(
     params: &P,
-    domain: &EvaluationDomain<C::Scalar>,
+    domain: &EvaluationDomain<'_, C::Scalar>,
     p: &Argument,
     mapping: impl Fn(usize, usize) -> (usize, usize) + Sync,
 ) -> Result<halo2_axiom::plonk::permutation::ProvingKey<C>, GpuError> {
     let permutations = permutation_lagrange_polys::<C, P>(params, domain, p, mapping);
     // GPU iFFT. NOTE: do not interleave parallelize() with GPU fft() — risks GPU OOM.
     let polys = domain.lagrange_to_coeff_many(&permutations)?;
-    Ok(halo2_axiom::plonk::permutation::ProvingKey::from_parts(
-        permutations,
-        polys,
-    ))
+    Ok(halo2_axiom::plonk::permutation::ProvingKey::from_parts(permutations, polys))
 }
 
 /// Computes the σ-permutation polynomials and their GPU-MSM commitments for the
 /// halo2-axiom permutation `VerifyingKey`.
 pub(crate) fn build_vk<'params, C: CurveAffine, P: Params<'params, C>>(
     params: &P,
-    domain: &EvaluationDomain<C::Scalar>,
+    domain: &EvaluationDomain<'_, C::Scalar>,
     p: &Argument,
     mapping: impl Fn(usize, usize) -> (usize, usize) + Sync,
 ) -> halo2_axiom::plonk::permutation::VerifyingKey<C> {
@@ -179,11 +166,7 @@ pub(crate) fn build_vk<'params, C: CurveAffine, P: Params<'params, C>>(
     // GPU MSM commitment per σ-column.
     let commitments = permutations
         .iter()
-        .map(|permutation| {
-            params
-                .commit_lagrange(permutation, Blind::default())
-                .to_affine()
-        })
+        .map(|permutation| params.commit_lagrange(permutation, Blind::default()).to_affine())
         .collect();
     halo2_axiom::plonk::permutation::VerifyingKey::from_commitments(commitments)
 }
@@ -192,7 +175,7 @@ pub(crate) fn build_vk<'params, C: CurveAffine, P: Params<'params, C>>(
 /// δ^{permuted_col} · ω^{permuted_row}` per the copy `mapping`.
 fn permutation_lagrange_polys<'params, C: CurveAffine, P: Params<'params, C>>(
     params: &P,
-    domain: &EvaluationDomain<C::Scalar>,
+    domain: &EvaluationDomain<'_, C::Scalar>,
     p: &Argument,
     mapping: impl Fn(usize, usize) -> (usize, usize) + Sync,
 ) -> Vec<Polynomial<C::Scalar, LagrangeCoeff>> {

@@ -25,18 +25,14 @@ use crate::poly::{
     commitment::{Blind, Params},
     EvaluationDomain, LagrangeCoeff, Polynomial,
 };
+use halo2_axiom::poly::EvaluationDomain as EvaluationDomainCPU;
 
 /// Runs `Circuit::configure` to build the GPU evaluation domain, the canonical
 /// constraint system, and the circuit config. The vk's canonical-typed domain
 /// is reconstructed identically from `(degree, k)` by the callers.
-fn create_domain<C, ConcreteCircuit>(
-    k: u32,
+fn create_constraint_system<C, ConcreteCircuit>(
     #[cfg(feature = "circuit-params")] params: ConcreteCircuit::Params,
-) -> (
-    EvaluationDomain<C::Scalar>,
-    ConstraintSystem<C::Scalar>,
-    ConcreteCircuit::Config,
-)
+) -> (ConstraintSystem<C::Scalar>, ConcreteCircuit::Config)
 where
     C: CurveAffine,
     ConcreteCircuit: Circuit<C::Scalar>,
@@ -47,10 +43,7 @@ where
     #[cfg(not(feature = "circuit-params"))]
     let config = ConcreteCircuit::configure(&mut cs);
 
-    let degree = cs.degree();
-    let domain = EvaluationDomain::new(degree as u32, k);
-
-    (domain, cs, config)
+    (cs, config)
 }
 
 /// Assembly accumulator for keygen synthesis; implements the canonical `Assignment` trait.
@@ -119,22 +112,12 @@ impl<F: Field> Assignment<F> for Assembly<F> {
 
     fn assign_fixed(&mut self, column: Column<Fixed>, row: usize, to: Assigned<F>) {
         if !self.usable_rows.contains(&row) {
-            panic!(
-                "Assign Fixed {:?}",
-                GpuError::not_enough_rows_available(self.k)
-            );
+            panic!("Assign Fixed {:?}", GpuError::not_enough_rows_available(self.k));
         }
 
-        *self
-            .fixed
-            .get_mut(column.index())
-            .and_then(|v| v.get_mut(row))
-            .unwrap_or_else(|| {
-                panic!(
-                    "{:?}",
-                    GpuError::Canonical(halo2_axiom::plonk::Error::BoundsFailure)
-                )
-            }) = to;
+        *self.fixed.get_mut(column.index()).and_then(|v| v.get_mut(row)).unwrap_or_else(|| {
+            panic!("{:?}", GpuError::Canonical(halo2_axiom::plonk::Error::BoundsFailure))
+        }) = to;
     }
 
     fn copy(
@@ -163,10 +146,8 @@ impl<F: Field> Assignment<F> for Assembly<F> {
             return Err(halo2_axiom::plonk::Error::NotEnoughRowsAvailable { current_k: self.k });
         }
 
-        let col = self
-            .fixed
-            .get_mut(column.index())
-            .ok_or(halo2_axiom::plonk::Error::BoundsFailure)?;
+        let col =
+            self.fixed.get_mut(column.index()).ok_or(halo2_axiom::plonk::Error::BoundsFailure)?;
 
         // Canonical `Value::assign()` is `pub(crate)`; extract the known value
         // via the public `map` closure (erroring on unknown, as `assign` does).
@@ -232,12 +213,13 @@ where
     ConcreteCircuit: Circuit<C::Scalar>,
     C::Scalar: FromUniformBytes<64>,
 {
-    let (domain, cs, config) = create_domain::<C, ConcreteCircuit>(
-        params.k(),
+    let (cs, config) = create_constraint_system::<C, ConcreteCircuit>(
         #[cfg(feature = "circuit-params")]
         circuit.params(),
     );
     let degree = cs.degree();
+    let cpu_domain = EvaluationDomainCPU::new(degree as u32, params.k());
+    let domain = EvaluationDomain::from_host_domain(&cpu_domain);
 
     if (params.n() as usize) < cs.minimum_rows() {
         return Err(GpuError::not_enough_rows_available(params.k()));
@@ -278,15 +260,9 @@ where
         let selectors = std::mem::take(&mut assembly.selectors);
         cs.directly_convert_selectors_to_fixed(selectors)
     };
-    fixed.extend(
-        selector_polys
-            .into_iter()
-            .map(|poly| domain.lagrange_from_vec(poly)),
-    );
+    fixed.extend(selector_polys.into_iter().map(|poly| domain.lagrange_from_vec(poly)));
 
-    let permutation_vk = assembly
-        .permutation
-        .build_vk(params, &domain, cs.permutation());
+    let permutation_vk = assembly.permutation.build_vk(params, &domain, cs.permutation());
 
     // GPU MSM commitment per fixed/selector column.
     let fixed_commitments = fixed
@@ -352,12 +328,13 @@ where
     P: Params<'params, C> + Sync,
     ConcreteCircuit: Circuit<C::Scalar>,
 {
-    let (domain, cs, config) = create_domain::<C, ConcreteCircuit>(
-        params.k(),
+    let (cs, config) = create_constraint_system::<C, ConcreteCircuit>(
         #[cfg(feature = "circuit-params")]
         circuit.params(),
     );
     let degree = cs.degree();
+    let cpu_domain = EvaluationDomainCPU::new(degree as u32, params.k());
+    let domain = EvaluationDomain::from_host_domain(&cpu_domain);
 
     if (params.n() as usize) < cs.minimum_rows() {
         return Err(GpuError::not_enough_rows_available(params.k()));
@@ -398,24 +375,15 @@ where
         let selectors = std::mem::take(&mut assembly.selectors);
         cs.directly_convert_selectors_to_fixed(selectors)
     };
-    fixed.extend(
-        selector_polys
-            .into_iter()
-            .map(|poly| domain.lagrange_from_vec(poly)),
-    );
+    fixed.extend(selector_polys.into_iter().map(|poly| domain.lagrange_from_vec(poly)));
 
     let permutation_pk =
-        assembly
-            .permutation
-            .clone()
-            .build_pk(params, &domain, cs.permutation())?;
+        assembly.permutation.clone().build_pk(params, &domain, cs.permutation())?;
 
     let vk = match vk {
         Some(vk) => vk,
         None => {
-            let permutation_vk = assembly
-                .permutation
-                .build_vk(params, &domain, cs.permutation());
+            let permutation_vk = assembly.permutation.build_vk(params, &domain, cs.permutation());
 
             // GPU MSM commitment per fixed/selector column.
             let fixed_commitments = fixed
@@ -467,15 +435,7 @@ where
     let l_last = domain.lagrange_to_coeff(l_last)?;
     let l_active_row = domain.lagrange_to_coeff(l_active_row)?;
 
-    Ok(ProvingKey::from_parts(
-        vk,
-        l0,
-        l_last,
-        l_active_row,
-        fixed,
-        fixed_polys,
-        permutation_pk,
-    ))
+    Ok(ProvingKey::from_parts(vk, l0, l_last, l_active_row, fixed, fixed_polys, permutation_pk))
 }
 
 /// Reinterprets the canonical `Assigned` fixed columns as device-repr
@@ -483,9 +443,7 @@ where
 fn batch_invert_fixed<F: Field>(
     fixed: &[Polynomial<Assigned<F>, LagrangeCoeff>],
 ) -> Vec<Polynomial<F, LagrangeCoeff>> {
-    let columns: Vec<Vec<GpuAssigned<F>>> = fixed
-        .iter()
-        .map(|poly| poly.iter().map(|a| GpuAssigned::from(*a)).collect())
-        .collect();
+    let columns: Vec<Vec<GpuAssigned<F>>> =
+        fixed.iter().map(|poly| poly.iter().map(|a| GpuAssigned::from(*a)).collect()).collect();
     batch_invert_assigned::<F, _>(columns)
 }

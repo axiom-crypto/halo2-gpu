@@ -74,9 +74,7 @@ impl Argument {
 /// Rebuilds the GPU-crate permutation `Argument` from the canonical halo2-axiom one.
 impl From<&halo2_axiom::plonk::permutation::Argument> for Argument {
     fn from(a: &halo2_axiom::plonk::permutation::Argument) -> Self {
-        Argument {
-            columns: a.get_columns().iter().map(GpuColumn::from).collect(),
-        }
+        Argument { columns: a.get_columns().iter().map(GpuColumn::from).collect() }
     }
 }
 

@@ -174,9 +174,7 @@ impl<F: Clone, B> HostPolyExt<F, B> for Polynomial<F, B, Host> {
         &self,
         device_ctx: &GpuDeviceCtx,
     ) -> Result<Polynomial<F, B, Device>, MemCopyError> {
-        Ok(Polynomial::from_backing(
-            self.values().to_device_on(device_ctx)?,
-        ))
+        Ok(Polynomial::from_backing(self.values().to_device_on(device_ctx)?))
     }
 
     fn try_clone(&self) -> Result<Polynomial<F, B, Host>, HaloGpuError> {
@@ -250,10 +248,7 @@ impl<F, B> DevicePolyExt<F, B> for Polynomial<F, B, Device> {
             )
             .expect("D2H to_host copy failed");
         }
-        HALO2_GPU_CTX
-            .stream
-            .to_host_sync()
-            .expect("stream sync after D2H to_host failed");
+        HALO2_GPU_CTX.stream.to_host_sync().expect("stream sync after D2H to_host failed");
         Polynomial::from_backing(host)
     }
 
@@ -281,10 +276,7 @@ impl<F, B> DevicePolyExt<F, B> for Polynomial<F, B, Device> {
             )
             .expect("D2H materialization copy failed");
         }
-        HALO2_GPU_CTX
-            .stream
-            .to_host_sync()
-            .expect("stream sync after D2H materialization failed");
+        HALO2_GPU_CTX.stream.to_host_sync().expect("stream sync after D2H materialization failed");
         Polynomial::from_backing(host)
     }
 }
@@ -590,10 +582,8 @@ mod tests {
             // kernel performs, done as two `par_iter` passes; the
             // byte-exact reference for the GPU decode kernel.
             let host_nums: Vec<Fr> = column.iter().map(|a| a.numerator()).collect();
-            let host_denoms: Vec<Fr> = column
-                .iter()
-                .map(|a| a.denominator().unwrap_or(Fr::ONE))
-                .collect();
+            let host_denoms: Vec<Fr> =
+                column.iter().map(|a| a.denominator().unwrap_or(Fr::ONE)).collect();
 
             let (d_nums, d_denoms) = decode_assigned_to_num_denom_device(&column)
                 .expect("decode_assigned_to_num_denom_device failed");
@@ -773,15 +763,9 @@ mod tests {
         for log_n in min_base_size..=max_base_size {
             let poly_len: usize = 1 << log_n;
             let ploy_in_many = (0..batch_size)
-                .map(|_| {
-                    (0..poly_len)
-                        .map(|_| Scalar::random(&mut rng))
-                        .collect::<Vec<_>>()
-                })
+                .map(|_| (0..poly_len).map(|_| Scalar::random(&mut rng)).collect::<Vec<_>>())
                 .collect::<Vec<_>>();
-            let eval_point = (0..batch_size)
-                .map(|_| Scalar::random(&mut rng))
-                .collect::<Vec<_>>();
+            let eval_point = (0..batch_size).map(|_| Scalar::random(&mut rng)).collect::<Vec<_>>();
             let eval_point_gpu = eval_point.clone();
 
             let get_polys_ffi_in = |polys: Vec<&Vec<Scalar>>| {
@@ -909,26 +893,21 @@ mod tests {
         println!("single gpu, batch_size: {}", batch_size);
 
         let v = Scalar::random(&mut rng);
-        let challenge_point = (0..batch_size)
-            .zip(powers(v))
-            .map(|(_, power_of_v)| power_of_v)
-            .collect::<Vec<_>>();
+        let challenge_point =
+            (0..batch_size).zip(powers(v)).map(|(_, power_of_v)| power_of_v).collect::<Vec<_>>();
 
         for log_n in min_base_size..=max_base_size {
             let poly_length = 1 << log_n;
 
-            let evaluate_point = (0..batch_size)
-                .map(|_| Scalar::random(&mut rng))
-                .collect::<Vec<_>>();
+            let evaluate_point =
+                (0..batch_size).map(|_| Scalar::random(&mut rng)).collect::<Vec<_>>();
             let evaluate_point_gpu = evaluate_point.clone();
             let poly_acc: Polynomial<Scalar, Coeff> =
                 Polynomial::new((0..poly_length).map(|_| Scalar::zero()).collect::<Vec<_>>());
             let mut poly_vec: Vec<Polynomial<Scalar, Coeff>> = Vec::with_capacity(batch_size);
             for _ in 0..batch_size {
                 poly_vec.push(Polynomial::new(
-                    (0..poly_length)
-                        .map(|_| Scalar::random(&mut rng))
-                        .collect::<Vec<_>>(),
+                    (0..poly_length).map(|_| Scalar::random(&mut rng)).collect::<Vec<_>>(),
                 ));
             }
             let get_slice_polys_ffi_in = |polys: Vec<&Polynomial<Scalar, Coeff>>| {

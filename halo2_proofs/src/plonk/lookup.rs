@@ -30,11 +30,7 @@ impl<F: Field> Argument<F> {
         table_map: Vec<(GpuExpression<F>, GpuExpression<F>)>,
     ) -> Self {
         let (input_expressions, table_expressions) = table_map.into_iter().unzip();
-        Argument {
-            name: name.as_ref().to_string(),
-            input_expressions,
-            table_expressions,
-        }
+        Argument { name: name.as_ref().to_string(), input_expressions, table_expressions }
     }
 
     pub(crate) fn required_degree(&self) -> usize {

@@ -45,10 +45,7 @@ impl<'a, C: CurveAffine> Commitment<C::Scalar, PolynomialPointer<'a, C>> {
 
         let low_degree_equivalent = Polynomial::new(poly);
 
-        CommitmentExtension {
-            commitment: self.clone(),
-            low_degree_equivalent,
-        }
+        CommitmentExtension { commitment: self.clone(), low_degree_equivalent }
     }
 }
 
@@ -59,10 +56,7 @@ struct RotationSetExtension<'a, C: CurveAffine> {
 
 impl<'a, C: CurveAffine> RotationSet<C::Scalar, PolynomialPointer<'a, C>> {
     fn extend(self, commitments: Vec<CommitmentExtension<'a, C>>) -> RotationSetExtension<'a, C> {
-        RotationSetExtension {
-            commitments,
-            points: self.points,
-        }
+        RotationSetExtension { commitments, points: self.points }
     }
 }
 
@@ -117,10 +111,8 @@ where
             crate::perf_section!("construct_intermediate_sets");
             construct_intermediate_sets(queries)
         };
-        let (rotation_sets, super_point_set) = (
-            intermediate_sets.rotation_sets,
-            intermediate_sets.super_point_set,
-        );
+        let (rotation_sets, super_point_set) =
+            (intermediate_sets.rotation_sets, intermediate_sets.super_point_set);
 
         #[cfg(feature = "profile")]
         for (i, rotate_set) in rotation_sets.iter().enumerate() {
@@ -158,12 +150,8 @@ where
         // `linearisation_contribution`'s `r_i` host fold index into it (the
         // host fold reads it via the existing `powers(*y)` iterator —
         // identical values, just precomputed for the device side).
-        let max_commitments_per_rs = rotation_sets
-            .iter()
-            .map(|rs| rs.commitments.len())
-            .max()
-            .unwrap_or(1)
-            .max(1);
+        let max_commitments_per_rs =
+            rotation_sets.iter().map(|rs| rs.commitments.len()).max().unwrap_or(1).max(1);
         let y_powers_host: Vec<E::Fr> = powers(*y).take(max_commitments_per_rs).collect();
         let d_y_powers: DeviceBuffer<E::Fr> = y_powers_host
             .as_slice()
@@ -181,9 +169,7 @@ where
             // Zero-init via cudaMemsetAsync; Fr::ZERO is all-zero bytes.
             let mut d_p_x: DeviceBuffer<E::Fr> =
                 DeviceBuffer::<E::Fr>::with_capacity_on(n, &HALO2_GPU_CTX);
-            d_p_x
-                .fill_zero_on(&HALO2_GPU_CTX)
-                .expect("fill_zero on p_x accumulator failed");
+            d_p_x.fill_zero_on(&HALO2_GPU_CTX).expect("fill_zero on p_x accumulator failed");
 
             for (i, commitment) in rotation_set.commitments.iter().enumerate() {
                 match commitment.commitment.get().poly {
@@ -222,10 +208,8 @@ where
             // into a fresh buffer. No D2D clone of p_x — d_p_x is preserved
             // for the linearisation closure which consumes it as
             // `l_x_short = p_x - r_i` after the quotient pass completes.
-            let d_r_x_short: DeviceBuffer<E::Fr> = r_x
-                .values()
-                .to_device_on(&HALO2_GPU_CTX)
-                .expect("H2D r_x_short failed");
+            let d_r_x_short: DeviceBuffer<E::Fr> =
+                r_x.values().to_device_on(&HALO2_GPU_CTX).expect("H2D r_x_short failed");
             let mut d_n_x: DeviceBuffer<E::Fr> =
                 DeviceBuffer::<E::Fr>::with_capacity_on(n, &HALO2_GPU_CTX);
             poly_sub_short_out_of_place_device(&mut d_n_x, &d_p_x, &d_r_x_short)
@@ -291,9 +275,7 @@ where
             crate::perf_section!("h_x_device_reduce");
             let mut d_h_x: DeviceBuffer<E::Fr> =
                 DeviceBuffer::<E::Fr>::with_capacity_on(n, &HALO2_GPU_CTX);
-            d_h_x
-                .fill_zero_on(&HALO2_GPU_CTX)
-                .expect("fill_zero on h_x accumulator failed");
+            d_h_x.fill_zero_on(&HALO2_GPU_CTX).expect("fill_zero on h_x accumulator failed");
             for (j, poly) in quotient_polynomials.into_iter().enumerate() {
                 poly_multiply_add_device_at_lut_offset(
                     &mut d_h_x,
@@ -351,9 +333,8 @@ where
 
             // consume p_x_dev as l_x_short; l_x_short[0] -= r_i.
             let mut d_l_x: DeviceBuffer<E::Fr> = p_x_dev.into_device_buf();
-            let d_r_i: DeviceBuffer<E::Fr> = std::slice::from_ref(&r_i)
-                .to_device_on(&HALO2_GPU_CTX)
-                .expect("H2D r_i failed");
+            let d_r_i: DeviceBuffer<E::Fr> =
+                std::slice::from_ref(&r_i).to_device_on(&HALO2_GPU_CTX).expect("H2D r_i failed");
             poly_sub_scalar_at_zero_device(&mut d_l_x, &d_r_i)
                 .expect("poly_sub_scalar_at_zero_device(l_x_short, r_i): device subtract of scalar r_i from coefficient 0 failed");
 
@@ -388,8 +369,7 @@ where
             crate::perf_section!("shplonk.l_x_device_reduce");
             let mut acc: DeviceBuffer<E::Fr> =
                 DeviceBuffer::<E::Fr>::with_capacity_on(n, &HALO2_GPU_CTX);
-            acc.fill_zero_on(&HALO2_GPU_CTX)
-                .expect("fill_zero on l_x accumulator failed");
+            acc.fill_zero_on(&HALO2_GPU_CTX).expect("fill_zero on l_x accumulator failed");
             for (j, poly) in linearisation_contributions.into_iter().enumerate() {
                 poly_multiply_add_device_at_lut_offset(&mut acc, poly.device_buf(), &d_v_powers, j)
                     .expect("l_x device FMA failed");

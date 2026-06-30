@@ -22,16 +22,10 @@ fn run_one(log_n: u32) {
 
     let expected = eval_polynomial(&coeffs, point);
 
-    let d_poly = coeffs
-        .as_slice()
-        .to_device_on(&HALO2_GPU_CTX)
-        .expect("H2D for Horner eval test");
+    let d_poly = coeffs.as_slice().to_device_on(&HALO2_GPU_CTX).expect("H2D for Horner eval test");
     let actual = eval_polynomial_device(&d_poly, point).expect("device Horner eval");
 
-    assert_eq!(
-        actual, expected,
-        "device Horner eval mismatch at log_n={log_n}, n={n}"
-    );
+    assert_eq!(actual, expected, "device Horner eval mismatch at log_n={log_n}, n={n}");
 }
 
 #[test]

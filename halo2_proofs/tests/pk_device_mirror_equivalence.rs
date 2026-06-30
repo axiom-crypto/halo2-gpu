@@ -23,9 +23,7 @@ use openvm_cuda_common::copy::MemCopyH2D;
 use rand_core::OsRng;
 
 fn fresh_columns(n: usize, num_cols: usize) -> Vec<Vec<Fr>> {
-    (0..num_cols)
-        .map(|_| (0..n).map(|_| Fr::random(OsRng)).collect::<Vec<Fr>>())
-        .collect()
+    (0..num_cols).map(|_| (0..n).map(|_| Fr::random(OsRng)).collect::<Vec<Fr>>()).collect()
 }
 
 /// Materialize a device-resident Lagrange polynomial vector by H2D-ing each
@@ -74,12 +72,7 @@ fn run_one(log_n: u32) {
     let instance_device = build_device_lagrange_polys(&instance_host);
     let mut pool_borrowed = ColumnPool::<Fr>::new(n);
     pool_borrowed
-        .try_init_device(
-            Some(mirror.as_slice()),
-            &fixed_slices,
-            &advice_device,
-            &instance_device,
-        )
+        .try_init_device(Some(mirror.as_slice()), &fixed_slices, &advice_device, &instance_device)
         .expect(
             "borrowed ColumnPool::try_init_device \
              failed",

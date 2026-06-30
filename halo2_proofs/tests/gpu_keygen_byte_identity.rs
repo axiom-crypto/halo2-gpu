@@ -67,10 +67,7 @@ impl Circuit<Fr> for RichCircuit {
     type Params = ();
 
     fn without_witnesses(&self) -> Self {
-        Self {
-            public: Value::unknown(),
-            b: Value::unknown(),
-        }
+        Self { public: Value::unknown(), b: Value::unknown() }
     }
 
     fn configure(meta: &mut ConstraintSystem<Fr>) -> RichConfig {
@@ -107,16 +104,7 @@ impl Circuit<Fr> for RichCircuit {
             vec![(ql * a, table)]
         });
 
-        RichConfig {
-            a,
-            b,
-            c,
-            d,
-            s,
-            ql,
-            instance,
-            table,
-        }
+        RichConfig { a, b, c, d, s, ql, instance, table }
     }
 
     fn synthesize(&self, config: RichConfig, mut layouter: impl Layouter<Fr>) -> Result<(), Error> {
@@ -215,10 +203,7 @@ fn gpu_keygen_bytes_match_cpu() {
     let gpu_params = halo2_axiom_gpu::poly::kzg::commitment::ParamsKZG::<Bn256>::setup(K, OsRng);
     let mut srs_bytes = Vec::new();
     gpu_params
-        .write_custom(
-            &mut srs_bytes,
-            halo2_axiom_gpu::SerdeFormat::RawBytesUnchecked,
-        )
+        .write_custom(&mut srs_bytes, halo2_axiom_gpu::SerdeFormat::RawBytesUnchecked)
         .expect("write shared SRS");
     let cpu_params = halo2_axiom::poly::kzg::commitment::ParamsKZG::<Bn256>::read_custom(
         &mut &srs_bytes[..],
@@ -227,10 +212,7 @@ fn gpu_keygen_bytes_match_cpu() {
     .expect("read shared SRS into halo2-axiom ParamsKZG");
 
     // Witness-free circuit: keygen ignores advice values.
-    let circuit = RichCircuit {
-        public: Value::unknown(),
-        b: Value::unknown(),
-    };
+    let circuit = RichCircuit { public: Value::unknown(), b: Value::unknown() };
 
     for compress_selectors in [false, true] {
         assert_keygen_byte_identity(&gpu_params, &cpu_params, &circuit, compress_selectors);

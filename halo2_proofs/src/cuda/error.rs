@@ -70,11 +70,7 @@ impl From<CudaStatus> for openvm_cuda_common::error::CudaError {
         let code = status.code;
         let message = String::from(status);
         let name = openvm_cuda_common::error::get_cuda_error_name(code);
-        Self {
-            code,
-            name,
-            message,
-        }
+        Self { code, name, message }
     }
 }
 

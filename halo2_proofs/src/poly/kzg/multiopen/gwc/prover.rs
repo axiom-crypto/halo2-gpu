@@ -111,16 +111,13 @@ where
                     poly_length,
                 )
                 .expect("multiopen_poly_calculation_gpu failed in gwc::create_proof");
-                let acc_eval = evaluate_result_many
-                    .iter()
-                    .fold(E::Fr::ZERO, |acc, eval| acc * (*v) + eval);
+                let acc_eval =
+                    evaluate_result_many.iter().fold(E::Fr::ZERO, |acc, eval| acc * (*v) + eval);
 
                 let poly_batch = &poly_acc - acc_eval;
                 let witness_poly = Polynomial::new(kate_division(poly_batch.values(), z));
-                w_result_many[i] = self
-                    .params
-                    .commit_with_gpu(&witness_poly, 0, Blind::default())
-                    .to_affine();
+                w_result_many[i] =
+                    self.params.commit_with_gpu(&witness_poly, 0, Blind::default()).to_affine();
                 #[cfg(feature = "profile")]
                 end_timer!(commitment_at_point_time);
             }

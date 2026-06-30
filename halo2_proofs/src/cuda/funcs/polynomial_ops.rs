@@ -96,11 +96,8 @@ pub fn batch_eval_polynomial_gpu<F: Field>(
             log::debug!("chunk_idx: {}", chunk_idx);
             let mut temp_result = vec![F::ZERO; batch_size];
             let _offset = chunk_idx * chunk_size;
-            let _lenght = if chunk_idx == num_chunks - 1 {
-                poly_length - _offset
-            } else {
-                chunk_size
-            };
+            let _lenght =
+                if chunk_idx == num_chunks - 1 { poly_length - _offset } else { chunk_size };
             basic_batch_eval_polynomial_gpu(
                 poly_in_many_ori,
                 eval_points,
@@ -114,9 +111,7 @@ pub fn batch_eval_polynomial_gpu<F: Field>(
             multi_eval_result.push(temp_result);
         }
         eval_result.iter_mut().enumerate().for_each(|(i, result)| {
-            *result = multi_eval_result
-                .iter()
-                .fold(F::ZERO, |acc, res| acc + res[i]);
+            *result = multi_eval_result.iter().fold(F::ZERO, |acc, res| acc + res[i]);
         });
         Ok(())
     }
@@ -168,9 +163,7 @@ pub fn poly_multiply_add_single_gpu<F: Field>(
     crate::perf_h2d!("cuda.poly_multiply_add.poly_in", acc_bytes);
     let poly_in_device = poly_in.to_device_on(&HALO2_GPU_CTX).unwrap();
     crate::perf_h2d!("cuda.poly_multiply_add.scalar", std::mem::size_of::<F>());
-    let scalar_device = std::slice::from_ref(&scalar)
-        .to_device_on(&HALO2_GPU_CTX)
-        .unwrap();
+    let scalar_device = std::slice::from_ref(&scalar).to_device_on(&HALO2_GPU_CTX).unwrap();
 
     let status = unsafe {
         _halo2_poly_multiply_add(
@@ -231,9 +224,8 @@ pub fn poly_multiply_add_device<F: Field>(
         "poly_multiply_add_device: zero-length buffer (no-op kernel launch)"
     );
     ensure_current_device_matches_ctx()?;
-    let d_scalar = std::slice::from_ref(&scalar)
-        .to_device_on(&HALO2_GPU_CTX)
-        .map_err(HaloGpuError::from)?;
+    let d_scalar =
+        std::slice::from_ref(&scalar).to_device_on(&HALO2_GPU_CTX).map_err(HaloGpuError::from)?;
     poly_multiply_add_device_with_d_scalar(d_acc, d_in, &d_scalar)
 }
 
@@ -278,10 +270,7 @@ pub fn poly_multiply_add_device_at_lut_offset<F: Field>(
         lut_offset < d_lut.len(),
         "poly_multiply_add_device_at_lut_offset: offset out of range"
     );
-    debug_assert!(
-        !d_acc.is_empty(),
-        "poly_multiply_add_device_at_lut_offset: zero-length acc"
-    );
+    debug_assert!(!d_acc.is_empty(), "poly_multiply_add_device_at_lut_offset: zero-length acc");
     ensure_current_device_matches_ctx()?;
     let elt_bytes = mem::size_of::<F>();
     let d_scalar_ptr = unsafe { (d_lut.as_raw_ptr() as *const u8).add(lut_offset * elt_bytes) }
@@ -348,10 +337,7 @@ pub fn eval_polynomial_device<F: Field>(
     // itself does not synchronize. The host-bound boundary here is the
     // 32-byte eval result.
     let mut acc = F::ZERO;
-    crate::perf_d2h!(
-        "cuda.eval_polynomial_device.result",
-        mem::size_of::<F>() as u64
-    );
+    crate::perf_d2h!("cuda.eval_polynomial_device.result", mem::size_of::<F>() as u64);
     unsafe {
         cuda_memcpy_on::<true, false>(
             &mut acc as *mut F as *mut libc::c_void,
@@ -428,9 +414,8 @@ pub fn kate_division_device<F: Field>(
     }
     let d_q = DeviceBuffer::<F>::with_capacity_on(out_len, &HALO2_GPU_CTX);
 
-    let d_root = std::slice::from_ref(&root)
-        .to_device_on(&HALO2_GPU_CTX)
-        .map_err(HaloGpuError::from)?;
+    let d_root =
+        std::slice::from_ref(&root).to_device_on(&HALO2_GPU_CTX).map_err(HaloGpuError::from)?;
 
     let scratch_bytes = unsafe { _halo2_kate_division_workspace_size(n as u64) } as usize;
     let scratch = DeviceBuffer::<u8>::with_capacity_on(scratch_bytes, &HALO2_GPU_CTX);
@@ -461,10 +446,7 @@ pub fn kate_division_device_with_d_root<F: Field>(
 ) -> Result<DeviceBuffer<F>, HaloGpuError> {
     crate::perf_section!("kate_division_device_with_d_root");
     let n = d_a.len();
-    debug_assert!(
-        n >= 1,
-        "kate_division_device_with_d_root: input length must be >= 1"
-    );
+    debug_assert!(n >= 1, "kate_division_device_with_d_root: input length must be >= 1");
     assert_eq!(d_root.len(), 1);
     ensure_current_device_matches_ctx()?;
 
@@ -518,10 +500,7 @@ pub fn kate_division_device_padded_with_d_root<F: Field>(
 ) -> Result<DeviceBuffer<F>, HaloGpuError> {
     crate::perf_section!("kate_division_device_padded");
     let n = d_a.len();
-    debug_assert!(
-        n >= 1,
-        "kate_division_device_padded_with_d_root: input length must be >= 1"
-    );
+    debug_assert!(n >= 1, "kate_division_device_padded_with_d_root: input length must be >= 1");
     assert_eq!(d_root.len(), 1);
     assert!(
         out_len >= n.saturating_sub(1),
@@ -573,10 +552,7 @@ pub fn poly_sub_short_in_place_device<F: Field>(
     if short_len == 0 {
         return Ok(());
     }
-    assert!(
-        d_acc.len() >= short_len,
-        "poly_sub_short_in_place_device: short_len exceeds acc len"
-    );
+    assert!(d_acc.len() >= short_len, "poly_sub_short_in_place_device: short_len exceeds acc len");
     ensure_current_device_matches_ctx()?;
     let status = unsafe {
         _halo2_poly_sub_short_inplace(
@@ -649,10 +625,7 @@ pub fn poly_sub_scalar_at_zero_device<F: Field>(
     d_scalar: &DeviceBuffer<F>,
 ) -> Result<(), HaloGpuError> {
     crate::perf_section!("poly_sub_scalar_at_zero_device");
-    debug_assert!(
-        !d_buf.is_empty(),
-        "poly_sub_scalar_at_zero_device: zero-length buffer"
-    );
+    debug_assert!(!d_buf.is_empty(), "poly_sub_scalar_at_zero_device: zero-length buffer");
     assert_eq!(d_scalar.len(), 1);
     ensure_current_device_matches_ctx()?;
     let status = unsafe {
@@ -705,11 +678,7 @@ pub fn decode_assigned_to_num_denom_device<F: Field>(
     verify_assigned_layout::<F>();
 
     let (stride_bytes, num_offset, denom_offset) = assigned_layout_offsets::<F>();
-    let layout = AssignedLayout {
-        stride_bytes,
-        num_offset,
-        denom_offset,
-    };
+    let layout = AssignedLayout { stride_bytes, num_offset, denom_offset };
     let d_raw = column.to_device_on(&HALO2_GPU_CTX)?;
     let d_nums = DeviceBuffer::<F>::with_capacity_on(n, &HALO2_GPU_CTX);
     let d_denoms = DeviceBuffer::<F>::with_capacity_on(n, &HALO2_GPU_CTX);
@@ -764,11 +733,7 @@ pub fn decode_assigned_into_denom_slice_device<F: Field>(
     verify_assigned_layout::<F>();
 
     let (stride_bytes, num_offset, denom_offset) = assigned_layout_offsets::<F>();
-    let layout = AssignedLayout {
-        stride_bytes,
-        num_offset,
-        denom_offset,
-    };
+    let layout = AssignedLayout { stride_bytes, num_offset, denom_offset };
     let d_raw = column.to_device_on(&HALO2_GPU_CTX)?;
     let d_nums = DeviceBuffer::<F>::with_capacity_on(n, &HALO2_GPU_CTX);
     let d_denoms_at = unsafe {

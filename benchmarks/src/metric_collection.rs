@@ -34,10 +34,8 @@ pub fn run_with_metric_collection<R>(
 
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,p3_=warn"));
-    let subscriber = Registry::default()
-        .with(env_filter)
-        .with(ForestLayer::default())
-        .with(MetricsLayer::new());
+    let subscriber =
+        Registry::default().with(env_filter).with(ForestLayer::default()).with(MetricsLayer::new());
     #[cfg(feature = "metrics")]
     let subscriber = subscriber.with(NestedTimingMetricsLayer::new());
     #[cfg(feature = "nvtx")]
@@ -284,9 +282,8 @@ mod tests {
                 .expect("global metrics recorder must be installable for this test");
             SNAPSHOTTER.set(snapshotter).ok();
 
-            let subscriber = Registry::default()
-                .with(MetricsLayer::new())
-                .with(NestedTimingMetricsLayer::new());
+            let subscriber =
+                Registry::default().with(MetricsLayer::new()).with(NestedTimingMetricsLayer::new());
             tracing::subscriber::set_global_default(subscriber)
                 .expect("global tracing subscriber must be installable for this test");
         });
@@ -312,32 +309,28 @@ mod tests {
             });
         });
 
-        let found = snapshotter
-            .snapshot()
-            .into_vec()
-            .into_iter()
-            .any(|(ckey, _, _, _)| {
-                if ckey.kind() != MetricKind::Gauge {
-                    return false;
+        let found = snapshotter.snapshot().into_vec().into_iter().any(|(ckey, _, _, _)| {
+            if ckey.kind() != MetricKind::Gauge {
+                return false;
+            }
+            let (_, key) = ckey.into_parts();
+            let (name, labels) = key.into_parts();
+            if name.as_str() != "halo2_section_time_ms" {
+                return false;
+            }
+            let mut phase_match = false;
+            let mut group_match = false;
+            for label in labels {
+                let (k, v) = label.into_parts();
+                if k.as_ref() == "phase" && v.as_ref() == PHASE {
+                    phase_match = true;
                 }
-                let (_, key) = ckey.into_parts();
-                let (name, labels) = key.into_parts();
-                if name.as_str() != "halo2_section_time_ms" {
-                    return false;
+                if k.as_ref() == "group" && v.as_ref() == GROUP {
+                    group_match = true;
                 }
-                let mut phase_match = false;
-                let mut group_match = false;
-                for label in labels {
-                    let (k, v) = label.into_parts();
-                    if k.as_ref() == "phase" && v.as_ref() == PHASE {
-                        phase_match = true;
-                    }
-                    if k.as_ref() == "group" && v.as_ref() == GROUP {
-                        group_match = true;
-                    }
-                }
-                phase_match && group_match
-            });
+            }
+            phase_match && group_match
+        });
         assert!(
             found,
             "expected halo2_section_time_ms metric with phase={PHASE} to carry group={GROUP}",

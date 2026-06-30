@@ -257,10 +257,7 @@ impl<F: Field> Mul for GpuAssigned<F> {
             (
                 Self::Rational(lhs_numerator, lhs_denominator),
                 Self::Rational(rhs_numerator, rhs_denominator),
-            ) => Self::Rational(
-                lhs_numerator * rhs_numerator,
-                lhs_denominator * rhs_denominator,
-            ),
+            ) => Self::Rational(lhs_numerator * rhs_numerator, lhs_denominator * rhs_denominator),
         }
     }
 }
@@ -415,41 +412,21 @@ pub(crate) fn verify_assigned_layout<F: Field>() {
     let denom = num.double();
     let rational = GpuAssigned::<F>::Rational(num, denom);
     let bytes = unsafe {
-        std::slice::from_raw_parts(
-            &rational as *const GpuAssigned<F> as *const u8,
-            stride as usize,
-        )
+        std::slice::from_raw_parts(&rational as *const GpuAssigned<F> as *const u8, stride as usize)
     };
-    assert_eq!(
-        bytes[0], 2,
-        "GpuAssigned::Rational discriminant expected 2, got {}",
-        bytes[0]
-    );
+    assert_eq!(bytes[0], 2, "GpuAssigned::Rational discriminant expected 2, got {}", bytes[0]);
     let probe_num =
         unsafe { std::ptr::read_unaligned(bytes.as_ptr().add(num_off as usize) as *const F) };
     let probe_denom =
         unsafe { std::ptr::read_unaligned(bytes.as_ptr().add(denom_off as usize) as *const F) };
-    assert!(
-        probe_num == num,
-        "GpuAssigned<F> numerator offset mismatch at byte {num_off}"
-    );
-    assert!(
-        probe_denom == denom,
-        "GpuAssigned<F> denominator offset mismatch at byte {denom_off}"
-    );
+    assert!(probe_num == num, "GpuAssigned<F> numerator offset mismatch at byte {num_off}");
+    assert!(probe_denom == denom, "GpuAssigned<F> denominator offset mismatch at byte {denom_off}");
 
     let trivial = GpuAssigned::<F>::Trivial(num);
     let tb = unsafe {
-        std::slice::from_raw_parts(
-            &trivial as *const GpuAssigned<F> as *const u8,
-            stride as usize,
-        )
+        std::slice::from_raw_parts(&trivial as *const GpuAssigned<F> as *const u8, stride as usize)
     };
-    assert_eq!(
-        tb[0], 1,
-        "GpuAssigned::Trivial discriminant expected 1, got {}",
-        tb[0]
-    );
+    assert_eq!(tb[0], 1, "GpuAssigned::Trivial discriminant expected 1, got {}", tb[0]);
     let probe_trivial =
         unsafe { std::ptr::read_unaligned(tb.as_ptr().add(num_off as usize) as *const F) };
     assert!(
@@ -461,11 +438,7 @@ pub(crate) fn verify_assigned_layout<F: Field>() {
     let zb = unsafe {
         std::slice::from_raw_parts(&zero as *const GpuAssigned<F> as *const u8, stride as usize)
     };
-    assert_eq!(
-        zb[0], 0,
-        "GpuAssigned::Zero discriminant expected 0, got {}",
-        zb[0]
-    );
+    assert_eq!(zb[0], 0, "GpuAssigned::Zero discriminant expected 0, got {}", zb[0]);
 }
 
 /// Soundness guard for the `WitnessCollection::assign_advice` fast path, which
@@ -513,11 +486,7 @@ fn probe_canonical_assigned_layout<F: Field>() {
             stride as usize,
         )
     };
-    assert_eq!(
-        rb[0], 2,
-        "canonical Assigned::Rational discriminant expected 2, got {}",
-        rb[0]
-    );
+    assert_eq!(rb[0], 2, "canonical Assigned::Rational discriminant expected 2, got {}", rb[0]);
     let probe_num =
         unsafe { std::ptr::read_unaligned(rb.as_ptr().add(num_off as usize) as *const F) };
     let probe_denom =
@@ -538,11 +507,7 @@ fn probe_canonical_assigned_layout<F: Field>() {
             stride as usize,
         )
     };
-    assert_eq!(
-        tb[0], 1,
-        "canonical Assigned::Trivial discriminant expected 1, got {}",
-        tb[0]
-    );
+    assert_eq!(tb[0], 1, "canonical Assigned::Trivial discriminant expected 1, got {}", tb[0]);
     let probe_trivial =
         unsafe { std::ptr::read_unaligned(tb.as_ptr().add(num_off as usize) as *const F) };
     assert!(
@@ -557,11 +522,7 @@ fn probe_canonical_assigned_layout<F: Field>() {
             stride as usize,
         )
     };
-    assert_eq!(
-        zb[0], 0,
-        "canonical Assigned::Zero discriminant expected 0, got {}",
-        zb[0]
-    );
+    assert_eq!(zb[0], 0, "canonical Assigned::Zero discriminant expected 0, got {}", zb[0]);
 }
 
 /// Hard guard: the CUDA decoder is hardwired to bn256 `Fr` in
@@ -751,11 +712,8 @@ mod proptests {
         Mul,
     }
 
-    const BINARY_OPERATORS: &[BinaryOperator] = &[
-        BinaryOperator::Add,
-        BinaryOperator::Sub,
-        BinaryOperator::Mul,
-    ];
+    const BINARY_OPERATORS: &[BinaryOperator] =
+        &[BinaryOperator::Add, BinaryOperator::Sub, BinaryOperator::Mul];
 
     impl BinaryOperator {
         fn apply<F: BinaryOperand>(&self, a: F, b: F) -> F {

@@ -27,18 +27,11 @@ pub enum HaloGpuError {
     /// (`log_n` for FFT-shaped paths, raw `length` for unpack-shaped
     /// paths) and `free_bytes` is the result of the host-side free-memory
     /// query at the moment the rejection was emitted.
-    InsufficientGpuMemory {
-        context: &'static str,
-        magnitude: u64,
-        free_bytes: u64,
-    },
+    InsufficientGpuMemory { context: &'static str, magnitude: u64, free_bytes: u64 },
     /// Caller passed an unsupported parameter combination — reachable in
     /// principle but indicates a shape-validation gap upstream. Typically
     /// signaled by a host-side advisory FFI returning a sentinel value.
-    InvalidParameter {
-        context: &'static str,
-        magnitude: u64,
-    },
+    InvalidParameter { context: &'static str, magnitude: u64 },
     /// A real CUDA driver error returned by the FFI layer. Source of
     /// truth for `code` / `name` / `message`.
     Cuda(CudaError),

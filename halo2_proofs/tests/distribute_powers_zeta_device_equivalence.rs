@@ -11,7 +11,8 @@ use rand_core::OsRng;
 
 fn run_one(log_n: u32) {
     let j: u32 = 4;
-    let domain = EvaluationDomain::<Fr>::new(j, log_n);
+    let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(j, log_n);
+    let domain = EvaluationDomain::from_host_domain(&domain);
     let n_ext = domain.extended_len();
 
     // Random extended-Lagrange polynomial.
@@ -29,22 +30,13 @@ fn run_one(log_n: u32) {
             .expect("H2D upload failed");
         Polynomial::<Fr, ExtendedLagrangeCoeff, Device>::from_device(d_buf)
     };
-    let device_out = domain
-        .extended_to_coeff_device(device_in)
-        .expect("device arm failed");
+    let device_out = domain.extended_to_coeff_device(device_in).expect("device arm failed");
     let device_out_host = device_out.to_host();
     let device_out_slice = device_out_host.values();
 
-    assert_eq!(
-        host_out_vec.len(),
-        device_out_slice.len(),
-        "length mismatch at log_n={log_n}"
-    );
+    assert_eq!(host_out_vec.len(), device_out_slice.len(), "length mismatch at log_n={log_n}");
     for (i, (h, d)) in host_out_vec.iter().zip(device_out_slice.iter()).enumerate() {
-        assert_eq!(
-            h, d,
-            "extended_to_coeff host vs device disagree at log_n={log_n}, idx={i}"
-        );
+        assert_eq!(h, d, "extended_to_coeff host vs device disagree at log_n={log_n}, idx={i}");
     }
 }
 

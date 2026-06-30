@@ -51,10 +51,7 @@ pub mod inner {
                 if num_indent_opt.is_none() {
                     num_indents.insert(
                         thread_id,
-                        NestedEvent {
-                            root_msg: msg.to_string(),
-                            num_indent: AtomicUsize::new(0),
-                        },
+                        NestedEvent { root_msg: msg.to_string(), num_indent: AtomicUsize::new(0) },
                     );
                 }
                 let event = num_indents.get_mut(&thread_id).unwrap();
@@ -71,10 +68,7 @@ pub mod inner {
             let indent = compute_indent(indent_amount);
 
             log::debug!("[{}] {}{:8} {}", root_msg, indent, start_info, msg);
-            $crate::plonk::logging::inner::TimerInfo {
-                msg: msg.to_string(),
-                time: Instant::now(),
-            }
+            $crate::plonk::logging::inner::TimerInfo { msg: msg.to_string(), time: Instant::now() }
         }};
     }
 

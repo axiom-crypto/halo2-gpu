@@ -72,7 +72,7 @@ impl<C: CurveAffine> Argument<C> {
         T: TranscriptWrite<C, E>,
     >(
         params: &P,
-        domain: &EvaluationDomain<C::Scalar>,
+        domain: &EvaluationDomain<'_, C::Scalar>,
         _: R,
         transcript: &mut T,
     ) -> Result<Committed<C>, GpuError> {
@@ -106,7 +106,7 @@ impl<C: CurveAffine> Committed<C> {
     >(
         self,
         params: &P,
-        domain: &EvaluationDomain<C::Scalar>,
+        domain: &EvaluationDomain<'_, C::Scalar>,
         h_poly: crate::poly::MaybeDevice<C::Scalar, ExtendedLagrangeCoeff>,
         mut rng: R,
         transcript: &mut T,
@@ -122,10 +122,7 @@ impl<C: CurveAffine> Committed<C> {
                 let h_poly_coset_ifft_time = Instant::now();
                 let p = domain.extended_to_coeff_device(p)?;
                 #[cfg(feature = "profile")]
-                log::info!(
-                    "h_poly coset ifft took {:?}",
-                    h_poly_coset_ifft_time.elapsed()
-                );
+                log::info!("h_poly coset ifft took {:?}", h_poly_coset_ifft_time.elapsed());
                 HPieces::Device(p.chunks_device(params.n() as usize))
             }
             crate::poly::MaybeDevice::Host(p) => {
@@ -134,10 +131,7 @@ impl<C: CurveAffine> Committed<C> {
                 let h_poly_coset_ifft_time = Instant::now();
                 let p = domain.extended_to_coeff(p)?;
                 #[cfg(feature = "profile")]
-                log::info!(
-                    "h_poly coset ifft took {:?}",
-                    h_poly_coset_ifft_time.elapsed()
-                );
+                log::info!("h_poly coset ifft took {:?}", h_poly_coset_ifft_time.elapsed());
                 let pieces: Vec<_> = p
                     .values()
                     .chunks_exact(params.n() as usize)
@@ -146,9 +140,8 @@ impl<C: CurveAffine> Committed<C> {
                 HPieces::Host(pieces)
             }
         };
-        let h_blinds: Vec<_> = (0..h_pieces.len())
-            .map(|_| Blind(C::Scalar::random(&mut rng)))
-            .collect();
+        let h_blinds: Vec<_> =
+            (0..h_pieces.len()).map(|_| Blind(C::Scalar::random(&mut rng))).collect();
 
         #[cfg(feature = "profile")]
         let h_commitments_projective_time = Instant::now();
@@ -178,11 +171,7 @@ impl<C: CurveAffine> Committed<C> {
             transcript.write_point(*c)?;
         }
 
-        Ok(Constructed {
-            h_pieces,
-            h_blinds,
-            committed: self,
-        })
+        Ok(Constructed { h_pieces, h_blinds, committed: self })
     }
 }
 
@@ -191,7 +180,7 @@ impl<C: CurveAffine> Constructed<C> {
         self,
         x: ChallengeX<C>,
         xn: C::Scalar,
-        domain: &EvaluationDomain<C::Scalar>,
+        domain: &EvaluationDomain<'_, C::Scalar>,
         transcript: &mut T,
     ) -> Result<Evaluated<C>, GpuError> {
         crate::perf_section!("vanishing.evaluate");
@@ -233,10 +222,7 @@ impl<C: CurveAffine> Constructed<C> {
                 )
             }
             HPieces::Host(pieces) => crate::poly::MaybeDevice::Host(
-                pieces
-                    .iter()
-                    .rev()
-                    .fold(domain.empty_coeff(), |acc, eval| acc * xn + eval),
+                pieces.iter().rev().fold(domain.empty_coeff(), |acc, eval| acc * xn + eval),
             ),
         };
 
@@ -249,11 +235,7 @@ impl<C: CurveAffine> Constructed<C> {
         let random_eval = eval_polynomial(&self.committed.random_poly, *x);
         transcript.write_scalar(random_eval)?;
 
-        Ok(Evaluated {
-            h_poly,
-            h_blind,
-            committed: self.committed,
-        })
+        Ok(Evaluated { h_poly, h_blind, committed: self.committed })
     }
 }
 
@@ -267,13 +249,7 @@ impl<C: CurveAffine> Evaluated<C> {
             crate::poly::MaybeDevice::Device(p) => crate::poly::PolyRef::Device(p),
         };
         iter::empty()
-            .chain(Some(ProverQuery {
-                point: *x,
-                poly: h_poly_ref,
-            }))
-            .chain(Some(ProverQuery {
-                point: *x,
-                poly: (&self.committed.random_poly).into(),
-            }))
+            .chain(Some(ProverQuery { point: *x, poly: h_poly_ref }))
+            .chain(Some(ProverQuery { point: *x, poly: (&self.committed.random_poly).into() }))
     }
 }

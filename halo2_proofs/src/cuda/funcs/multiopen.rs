@@ -93,11 +93,8 @@ pub fn multiopen_poly_calculation_gpu<F: Field>(
             log::debug!("chunk_idx: {}", chunk_idx);
             let mut temp_result: Vec<F> = vec![F::ZERO; batch_size];
             let _offset = chunk_idx * chunk_size;
-            let _lenght = if chunk_idx == num_chunks - 1 {
-                poly_length - _offset
-            } else {
-                chunk_size
-            };
+            let _lenght =
+                if chunk_idx == num_chunks - 1 { poly_length - _offset } else { chunk_size };
             batch_multiopen_poly_calculation_gpu(
                 poly_in_many_ori.clone(),
                 poly_acc,
@@ -112,14 +109,9 @@ pub fn multiopen_poly_calculation_gpu<F: Field>(
             });
             multi_eval_result.push(temp_result);
         }
-        evalaute_result
-            .iter_mut()
-            .enumerate()
-            .for_each(|(i, result)| {
-                *result = multi_eval_result
-                    .iter()
-                    .fold(F::ZERO, |acc, res| acc + res[i]);
-            });
+        evalaute_result.iter_mut().enumerate().for_each(|(i, result)| {
+            *result = multi_eval_result.iter().fold(F::ZERO, |acc, res| acc + res[i]);
+        });
         Ok(())
     }
 }

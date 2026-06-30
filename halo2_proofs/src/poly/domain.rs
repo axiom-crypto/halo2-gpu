@@ -34,7 +34,7 @@ use super::{
 pub trait LagrangeToCoeffManyInput<F: Field>: Sized {
     type Output;
     fn lagrange_to_coeff_many_impl(
-        domain: &EvaluationDomain<F>,
+        domain: &EvaluationDomain<'_, F>,
         in_many: &[Self],
     ) -> Result<Vec<Self::Output>, GpuError>;
 }
@@ -44,7 +44,7 @@ impl<F: WithSmallOrderMulGroup<3>> LagrangeToCoeffManyInput<F>
 {
     type Output = Polynomial<F, Coeff, Host>;
     fn lagrange_to_coeff_many_impl(
-        domain: &EvaluationDomain<F>,
+        domain: &EvaluationDomain<'_, F>,
         in_many: &[Self],
     ) -> Result<Vec<Self::Output>, GpuError> {
         crate::cpu::poly::domain::lagrange_to_coeff_many_host(domain, in_many)
@@ -56,7 +56,7 @@ impl<F: WithSmallOrderMulGroup<3>> LagrangeToCoeffManyInput<F>
 {
     type Output = Polynomial<F, Coeff, Device>;
     fn lagrange_to_coeff_many_impl(
-        domain: &EvaluationDomain<F>,
+        domain: &EvaluationDomain<'_, F>,
         in_many: &[Self],
     ) -> Result<Vec<Self::Output>, GpuError> {
         domain.lagrange_to_coeff_many_device_inputs(in_many)
@@ -68,7 +68,7 @@ impl<F: WithSmallOrderMulGroup<3>> LagrangeToCoeffManyInput<F>
 /// `Vec<DeviceBuffer<F>>` outputs (the kernel always writes to device memory).
 pub trait CoeffToExtendedPartManyDeviceInput<F: Field>: Sized {
     fn coeff_to_extended_part_many_device_impl(
-        domain: &EvaluationDomain<F>,
+        domain: &EvaluationDomain<'_, F>,
         in_many: Vec<&Self>,
         extended_omega_factor: F,
     ) -> Result<Vec<DeviceBuffer<F>>, GpuError>;
@@ -78,7 +78,7 @@ impl<F: WithSmallOrderMulGroup<3>> CoeffToExtendedPartManyDeviceInput<F>
     for Polynomial<F, Coeff, Host>
 {
     fn coeff_to_extended_part_many_device_impl(
-        domain: &EvaluationDomain<F>,
+        domain: &EvaluationDomain<'_, F>,
         in_many: Vec<&Self>,
         extended_omega_factor: F,
     ) -> Result<Vec<DeviceBuffer<F>>, GpuError> {
@@ -90,7 +90,7 @@ impl<F: WithSmallOrderMulGroup<3>> CoeffToExtendedPartManyDeviceInput<F>
     for Polynomial<F, Coeff, Device>
 {
     fn coeff_to_extended_part_many_device_impl(
-        domain: &EvaluationDomain<F>,
+        domain: &EvaluationDomain<'_, F>,
         in_many: Vec<&Self>,
         extended_omega_factor: F,
     ) -> Result<Vec<DeviceBuffer<F>>, GpuError> {
@@ -126,19 +126,13 @@ impl From<NttType> for u32 {
 /// performing operations on an evaluation domain of size $2^k$ and an extended
 /// domain of size $2^{k} * j$ with $j \neq 0$.
 #[derive(Clone, Debug)]
-pub struct EvaluationDomain<F: Field> {
-    inner: poly::EvaluationDomain<F>,
+pub struct EvaluationDomain<'pk, F: Field> {
+    pub inner: &'pk poly::EvaluationDomain<F>,
 }
 
-impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
-    pub fn from_host_domain(domain: poly::EvaluationDomain<F>) -> Self {
+impl<'pk, F: WithSmallOrderMulGroup<3>> EvaluationDomain<'pk, F> {
+    pub fn from_host_domain(domain: &'pk poly::EvaluationDomain<F>) -> Self {
         EvaluationDomain { inner: domain }
-    }
-
-    /// This constructs a new evaluation domain object based on the provided
-    /// values $j, k$.
-    pub fn new(j: u32, k: u32) -> Self {
-        EvaluationDomain { inner: poly::EvaluationDomain::new(j, k) }
     }
 
     /// Obtains a polynomial in Lagrange form when given a vector of Lagrange
@@ -937,6 +931,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         Ok(())
     }
 
+    #[cfg(test)]
     fn cosetfft(
         &self,
         a: &[F],
@@ -1005,18 +1000,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         Ok(())
     }
 
-    /// Given a slice of group elements `[a_0, a_1, a_2, ...]`, this returns
-    /// `[a_0, [c]a_1, [c^2]a_2, [c^3]a_3, [c^4]a_4, ...]`.
-    fn distribute_powers(&self, a: &mut [F], c: F) {
-        parallelize(a, |a, index| {
-            let mut c_power = c.pow_vartime([index as u64]);
-            for a in a {
-                a.mul_assign(&c_power);
-                c_power = c_power * c;
-            }
-        });
-    }
-
+    #[cfg(test)]
     fn ifft(&self, a: &mut [F], omega_inv: F, log_n: u32, divisor: F) -> Result<(), HaloGpuError> {
         let ntt_type = NttType::iFFT.into();
         fft_gpu(ntt_type, a, log_n, omega_inv, divisor)?;
@@ -1275,7 +1259,7 @@ mod tests {
     // Test-only helper: only callers are `test_fft`'s round-trip below.
     // Kept inside `mod tests` so the `#[cfg(test)]` gating stays implicit.
     fn icosetfft<F: WithSmallOrderMulGroup<3>>(
-        domain: &EvaluationDomain<F>,
+        domain: &EvaluationDomain<'_, F>,
         a: &mut [F],
         omega_inv: F,
         log_n: u32,
@@ -1304,9 +1288,11 @@ mod tests {
         use rand_core::OsRng;
 
         use crate::arithmetic::eval_polynomial;
+        use halo2_axiom::poly::EvaluationDomain as EvaluationDomainCPU;
         use halo2curves::bn256::Fr;
 
-        let domain = EvaluationDomain::<Fr>::new(1, 3);
+        let domain = EvaluationDomainCPU::<Fr>::new(1, 3);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let rng = OsRng;
 
         let mut poly = domain.empty_lagrange();
@@ -1343,7 +1329,8 @@ mod tests {
 
         use crate::arithmetic::{eval_polynomial, lagrange_interpolate};
         use halo2curves::pasta::pallas::Scalar;
-        let domain = EvaluationDomain::<Scalar>::new(1, 3);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Scalar>::new(1, 3);
+        let domain = EvaluationDomain::from_host_domain(&domain);
 
         let mut l = vec![];
         let mut points = vec![];
@@ -1404,7 +1391,8 @@ mod tests {
         let min_log_n = 10;
         let cutoff_num = 13; // cut off the last 13 elements of omega_powers
         for log_n in min_log_n..=max_log_n {
-            let domain = EvaluationDomain::<Scalar>::new(1, log_n);
+            let domain = halo2_axiom::poly::EvaluationDomain::<Scalar>::new(1, log_n);
+            let domain = EvaluationDomain::from_host_domain(&domain);
             let omega = domain.inner.omega;
 
             let mut omega_powers_cpu = vec![Scalar::zero(); (1 << log_n) as usize];
@@ -1466,7 +1454,8 @@ mod tests {
         let min_log_n = 10;
 
         for log_n in min_log_n..=max_log_n {
-            let domain = EvaluationDomain::<Scalar>::new(1, log_n);
+            let domain = halo2_axiom::poly::EvaluationDomain::<Scalar>::new(1, log_n);
+            let domain = EvaluationDomain::from_host_domain(&domain);
             let omega = domain.inner.omega;
 
             // correctness and warmup
@@ -1509,7 +1498,8 @@ mod tests {
         println!("----------test FFT---------");
         let ntt_type = NttType::FFT.into();
         for log_n in min_log_n..=max_log_n {
-            let domain = EvaluationDomain::<Scalar>::new(1, log_n);
+            let domain = halo2_axiom::poly::EvaluationDomain::<Scalar>::new(1, log_n);
+            let domain = EvaluationDomain::from_host_domain(&domain);
             let mut a0 = a[0..(1 << log_n)].to_vec();
             let mut a1 = a0.clone();
 
@@ -1542,7 +1532,8 @@ mod tests {
         println!("----------test iFFT---------");
         let _ntt_type: u32 = NttType::iFFT.into();
         for log_n in min_log_n..=max_log_n {
-            let domain = EvaluationDomain::<Scalar>::new(1, log_n);
+            let domain = halo2_axiom::poly::EvaluationDomain::<Scalar>::new(1, log_n);
+            let domain = EvaluationDomain::from_host_domain(&domain);
             let mut a0 = a[0..(1 << log_n)].to_vec();
             let mut a1 = a0.clone();
 
@@ -1586,7 +1577,8 @@ mod tests {
         println!("----------test cosetFFT---------");
         let _ntt_type: u32 = NttType::CosetFFT.into();
         for log_n in min_log_n..=max_log_n {
-            let domain = EvaluationDomain::<Scalar>::new(5, log_n);
+            let domain = halo2_axiom::poly::EvaluationDomain::<Scalar>::new(5, log_n);
+            let domain = EvaluationDomain::from_host_domain(&domain);
             let a0 = a[0..(1 << log_n)].to_vec();
             let a1 = a0.clone();
             let mut b = a0.clone();
@@ -1643,7 +1635,8 @@ mod tests {
         println!("----------test icosetFFT---------");
         let _ntt_type: u32 = NttType::iCosetFFT.into(); // icosetFFT
         for log_n in min_log_n..=max_log_n {
-            let domain = EvaluationDomain::<Scalar>::new(5, log_n);
+            let domain = halo2_axiom::poly::EvaluationDomain::<Scalar>::new(5, log_n);
+            let domain = EvaluationDomain::from_host_domain(&domain);
             let a0 = a[0..(1 << log_n)].to_vec();
             let a1 = a0.clone();
 
@@ -1723,7 +1716,8 @@ mod tests {
         let ntt_type = NttType::iFFT.into();
         for log_n in min_log_n..=max_log_n {
             let a0 = a[0..(1 << log_n)].to_vec();
-            let domain = EvaluationDomain::<Scalar>::new(1, log_n);
+            let domain = halo2_axiom::poly::EvaluationDomain::<Scalar>::new(1, log_n);
+            let domain = EvaluationDomain::from_host_domain(&domain);
 
             // many data
             const TASK_NUM: usize = 15;
@@ -1790,7 +1784,8 @@ mod tests {
 
         use crate::arithmetic::best_fft;
         let _ntt_type: u32 = NttType::CosetFFT.into();
-        let domain = EvaluationDomain::<Scalar>::new(5, log_n);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Scalar>::new(5, log_n);
+        let domain = EvaluationDomain::from_host_domain(&domain);
 
         println!("----------test cosetFFT many---------\n");
         println!(
@@ -1875,7 +1870,8 @@ mod tests {
         use rand_core::OsRng;
 
         for k in 5..20 {
-            let domain = EvaluationDomain::<Scalar>::new(3, k);
+            let domain = halo2_axiom::poly::EvaluationDomain::<Scalar>::new(3, k);
+            let domain = EvaluationDomain::from_host_domain(&domain);
 
             let mut poly = domain.empty_coeff();
             for value in poly.iter_mut() {
@@ -1899,7 +1895,8 @@ mod tests {
         let mut rng = thread_rng();
         let batch_size = 8;
         let k = 20;
-        let domain = EvaluationDomain::<Scalar>::new(5, k);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Scalar>::new(5, k);
+        let domain = EvaluationDomain::from_host_domain(&domain);
 
         let mut polys = vec![];
         let mut poly = domain.empty_coeff();
@@ -1949,7 +1946,8 @@ mod tests {
 
         let k = 20;
         let mut rng = thread_rng();
-        let domain = EvaluationDomain::<Scalar>::new(3, k);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Scalar>::new(3, k);
+        let domain = EvaluationDomain::from_host_domain(&domain);
 
         let mut poly = domain.empty_coeff();
         for value in poly.iter_mut() {
@@ -1989,7 +1987,8 @@ mod tests {
 
         println!("----------test iFFT + cosetFFT_part---------");
         for log_n in min_log_n..=max_log_n {
-            let domain = EvaluationDomain::<Scalar>::new(1, log_n);
+            let domain = halo2_axiom::poly::EvaluationDomain::<Scalar>::new(1, log_n);
+            let domain = EvaluationDomain::from_host_domain(&domain);
             let a0 = Polynomial::<Scalar, LagrangeCoeff>::new(a[0..(1 << log_n)].to_vec());
 
             let mut rng = rand::thread_rng();

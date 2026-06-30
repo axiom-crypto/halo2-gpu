@@ -55,8 +55,8 @@ pub use halo2_axiom::plonk::{
 /// [`VerifyingKey`]). Holds the GPU-crate forks the verifier attaches to,
 /// rebuilt via [`GpuVerifyingKey::from_host`].
 #[derive(Clone, Debug)]
-pub struct GpuVerifyingKey<C: CurveAffine> {
-    pub(crate) domain: EvaluationDomain<C::Scalar>,
+pub struct GpuVerifyingKey<'vk, C: CurveAffine> {
+    pub(crate) domain: EvaluationDomain<'vk, C::Scalar>,
     pub(crate) fixed_commitments: Vec<C>,
     pub(crate) permutation: permutation::VerifyingKey<C>,
     pub(crate) cs: GpuConstraintSystem<C::Scalar>,
@@ -66,18 +66,16 @@ pub struct GpuVerifyingKey<C: CurveAffine> {
     pub(crate) transcript_repr: C::Scalar,
 }
 
-impl<C: CurveAffine> GpuVerifyingKey<C>
+impl<'vk, C: CurveAffine> GpuVerifyingKey<'vk, C>
 where
     C::Scalar: FromUniformBytes<64>,
 {
     /// Rebuilds the GPU verifying key from a canonical [`VerifyingKey`].
     /// Pure host: no device traffic, no kernel launch.
-    pub fn from_host(vk: &VerifyingKey<C>) -> Self {
+    pub fn from_host(vk: &'vk VerifyingKey<C>) -> Self {
         let cs = GpuConstraintSystem::from(vk.cs());
         let cs_degree = cs.degree();
-        let hdomain = vk.get_domain();
-        let domain =
-            EvaluationDomain::new(hdomain.get_quotient_poly_degree() as u32 + 1, hdomain.k());
+        let domain = EvaluationDomain::from_host_domain(vk.get_domain());
         let permutation =
             permutation::VerifyingKey { commitments: vk.permutation().commitments().clone() };
         GpuVerifyingKey {
@@ -117,7 +115,7 @@ pub struct GpuProvingKey<'a, C: CurveAffine> {
     /// GPU `ConstraintSystem`, holding the lookup/permutation Arguments the
     /// prover's `commit`/`commit_permuted` attach to.
     cs: GpuConstraintSystem<C::Scalar>,
-    domain: EvaluationDomain<C::Scalar>,
+    domain: EvaluationDomain<'a, C::Scalar>,
     /// GPU quotient evaluator.
     ev: Evaluator<C>,
     /// Cached `cs.degree()`, constant after construction; avoids rescanning
@@ -164,31 +162,21 @@ impl<'a, C: CurveAffine> GpuProvingKey<'a, C>
 where
     C::Scalar: FromUniformBytes<64>,
 {
-    /// Wraps a canonical [`ProvingKey`] by ownership. Used by the serde path
-    /// and tests.
-    pub fn from_host(inner: ProvingKey<C>) -> GpuProvingKey<'static, C> {
-        GpuProvingKey::from_cow(Cow::Owned(inner))
-    }
-
     /// Wraps a canonical [`ProvingKey`] by *borrowing* it: the per-proof hot
     /// path. Clones no host polys, so [`create_proof`] takes a `&ProvingKey`
     /// without a per-proof deep copy.
-    pub fn from_host_ref(inner: &'a ProvingKey<C>) -> Self {
-        GpuProvingKey::from_cow(Cow::Borrowed(inner))
-    }
-
-    /// Shared constructor for the owned/borrowed paths. Pure host rebuild: no
-    /// device traffic, no kernel launch. Device mirrors start empty and
-    /// populate lazily at first prove.
-    fn from_cow(inner: Cow<'a, ProvingKey<C>>) -> Self {
+    ///
+    /// Pure host rebuild: no device traffic, no kernel launch. Device mirrors
+    /// start empty and populate lazily at first prove.
+    pub fn from_host(inner: &'a ProvingKey<C>) -> Self {
         let cs = GpuConstraintSystem::from(inner.get_vk().cs());
         let hdomain = inner.get_vk().get_domain();
-        let domain = EvaluationDomain::from_host_domain(hdomain.clone());
+        let domain = EvaluationDomain::from_host_domain(hdomain);
         let ev = Evaluator::new(&cs);
         let cs_degree = cs.degree();
         let transcript_repr = inner.get_vk().transcript_repr();
         GpuProvingKey {
-            inner,
+            inner: Cow::Borrowed(inner),
             cs,
             domain,
             ev,
@@ -365,40 +353,9 @@ where
         self.inner.write(writer, format)
     }
 
-    /// Reads a canonical [`ProvingKey`] and wraps it via
-    /// [`GpuProvingKey::from_host`]; device mirrors start empty (lazy).
-    pub fn read<R: io::Read, ConcreteCircuit: halo2_axiom::plonk::Circuit<C::Scalar>>(
-        reader: &mut R,
-        format: halo2_axiom::SerdeFormat,
-        #[cfg(feature = "circuit-params")] params: ConcreteCircuit::Params,
-    ) -> io::Result<Self> {
-        let inner = ProvingKey::<C>::read::<R, ConcreteCircuit>(
-            reader,
-            format,
-            #[cfg(feature = "circuit-params")]
-            params,
-        )?;
-        Ok(Self::from_host(inner))
-    }
-
     /// Writes the proving key to a vector of bytes using [`Self::write`].
     pub fn to_bytes(&self, format: halo2_axiom::SerdeFormat) -> Vec<u8> {
         self.inner.to_bytes(format)
-    }
-
-    /// Reads a proving key from a slice of bytes using [`Self::read`].
-    pub fn from_bytes<ConcreteCircuit: halo2_axiom::plonk::Circuit<C::Scalar>>(
-        bytes: &[u8],
-        format: halo2_axiom::SerdeFormat,
-        #[cfg(feature = "circuit-params")] params: ConcreteCircuit::Params,
-    ) -> io::Result<Self> {
-        let inner = ProvingKey::<C>::from_bytes::<ConcreteCircuit>(
-            bytes,
-            format,
-            #[cfg(feature = "circuit-params")]
-            params,
-        )?;
-        Ok(Self::from_host(inner))
     }
 }
 

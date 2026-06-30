@@ -26,7 +26,7 @@ pub(crate) struct EvaluatorVkView<'a, F: Field> {
     pub(crate) blinding_factors: usize,
     pub(crate) cs_degree: usize,
     pub(crate) permutation_argument: &'a permutation::Argument,
-    pub(crate) domain: &'a EvaluationDomain<F>,
+    pub(crate) domain: &'a EvaluationDomain<'a, F>,
 }
 
 /// Return the index in the polynomial of size `isize` after rotation `rot`.

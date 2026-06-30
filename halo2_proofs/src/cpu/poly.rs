@@ -110,11 +110,7 @@ where
     // 1d vector better for memory allocation
     let mut assigned_denominators: Vec<_> = assigned
         .par_iter()
-        .flat_map(|f| {
-            f.deref()
-                .par_iter()
-                .map(|value| value.denominator().unwrap_or(F::ONE))
-        })
+        .flat_map(|f| f.deref().par_iter().map(|value| value.denominator().unwrap_or(F::ONE)))
         .collect();
 
     #[cfg(feature = "profile")]

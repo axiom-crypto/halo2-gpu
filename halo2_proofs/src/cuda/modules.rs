@@ -126,14 +126,7 @@ pub(crate) fn ifft_cosetfftpart_gpu<F: Field>(
     } else {
         log::warn!(" ifft_cosetfftpart_gpu: insufficient gpu memory, using split radix fft");
         split_radix_fft_inout_gpu(NttType::iFFT.into(), a, b, log_n, log_n, omega_inv, divisor)?;
-        split_radix_fft_gpu(
-            NttType::CosetFFT_Part.into(),
-            b,
-            log_n,
-            log_n,
-            omega,
-            omega_part,
-        )
+        split_radix_fft_gpu(NttType::CosetFFT_Part.into(), b, log_n, log_n, omega, omega_part)
     }
 }
 
@@ -199,13 +192,7 @@ pub(crate) fn module_poly_to_coset_device<F: Field>(
 ) -> Result<DeviceBuffer<u8>, HaloGpuError> {
     let out_bytes = length * mem::size_of::<F>();
     let values_device = DeviceBuffer::<u8>::with_capacity_on(out_bytes, &HALO2_GPU_CTX);
-    cosetfftpart_module(
-        values_device.as_mut_raw_ptr(),
-        values_mem,
-        log_n,
-        omega,
-        omega_part,
-    )?;
+    cosetfftpart_module(values_device.as_mut_raw_ptr(), values_mem, log_n, omega, omega_part)?;
     Ok(values_device)
 }
 
@@ -371,17 +358,11 @@ impl<F: Field> QuotientLookupsGpu<F> {
         length: usize,
     ) -> Self {
         crate::perf_section!("quotient_lookups_gpu.new");
-        crate::perf_h2d!(
-            "quotient_lookups_gpu.new.values",
-            std::mem::size_of_val(values)
-        );
+        crate::perf_h2d!("quotient_lookups_gpu.new.values", std::mem::size_of_val(values));
         let values_device = values.to_device_on(&HALO2_GPU_CTX).unwrap();
         crate::perf_h2d!("quotient_lookups_gpu.new.l0", std::mem::size_of_val(l0));
         let l0_device = l0.to_device_on(&HALO2_GPU_CTX).unwrap();
-        crate::perf_h2d!(
-            "quotient_lookups_gpu.new.l_last",
-            std::mem::size_of_val(l_last)
-        );
+        crate::perf_h2d!("quotient_lookups_gpu.new.l_last", std::mem::size_of_val(l_last));
         let l_last_device = l_last.to_device_on(&HALO2_GPU_CTX).unwrap();
         crate::perf_h2d!(
             "quotient_lookups_gpu.new.l_active_row",
@@ -391,17 +372,11 @@ impl<F: Field> QuotientLookupsGpu<F> {
 
         // beta/gamma/y don't change across calls — upload once.
         crate::perf_h2d!("quotient_lookups_gpu.new.beta", std::mem::size_of::<F>());
-        let beta_device = std::slice::from_ref(&beta)
-            .to_device_on(&HALO2_GPU_CTX)
-            .unwrap();
+        let beta_device = std::slice::from_ref(&beta).to_device_on(&HALO2_GPU_CTX).unwrap();
         crate::perf_h2d!("quotient_lookups_gpu.new.gamma", std::mem::size_of::<F>());
-        let gamma_device = std::slice::from_ref(&gamma)
-            .to_device_on(&HALO2_GPU_CTX)
-            .unwrap();
+        let gamma_device = std::slice::from_ref(&gamma).to_device_on(&HALO2_GPU_CTX).unwrap();
         crate::perf_h2d!("quotient_lookups_gpu.new.y", std::mem::size_of::<F>());
-        let y_device = std::slice::from_ref(&y)
-            .to_device_on(&HALO2_GPU_CTX)
-            .unwrap();
+        let y_device = std::slice::from_ref(&y).to_device_on(&HALO2_GPU_CTX).unwrap();
 
         let table_values_device = DeviceBuffer::<F>::with_capacity_on(length, &HALO2_GPU_CTX);
 
