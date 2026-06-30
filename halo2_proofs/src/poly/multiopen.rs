@@ -174,7 +174,8 @@ mod tests {
         let params: Params<G1Affine> = Params::<G1Affine>::unsafe_setup::<Bn256>(K);
         let params_verifier: ParamsVerifier<Bn256> = params.verifier(0).unwrap();
 
-        let domain = EvaluationDomain::new(1, K);
+        let domain = halo2_axiom::poly::EvaluationDomain::new(1, K);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let rng = OsRng;
 
         let mut ax = domain.empty_coeff();

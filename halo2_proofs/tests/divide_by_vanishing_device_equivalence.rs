@@ -11,7 +11,8 @@ use rand_core::OsRng;
 
 fn run_one(log_n: u32) {
     let j: u32 = 4;
-    let domain = EvaluationDomain::<Fr>::new(j, log_n);
+    let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(j, log_n);
+    let domain = EvaluationDomain::from_host_domain(&domain);
     let n_ext = 1usize << domain.extended_k();
 
     // Random extended-Lagrange polynomial.

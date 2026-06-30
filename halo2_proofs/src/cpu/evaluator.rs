@@ -24,14 +24,14 @@ use crate::{
 /// with `omega`); see the equivalence test in
 /// `cuda::tests::test_fft_normal_to_device_coset_part_vs_cpu`.
 fn coeff_to_extended_part_cpu<F: WithSmallOrderMulGroup<3>>(
-    domain: &EvaluationDomain<F>,
+    domain: &EvaluationDomain<'_, F>,
     input: &Polynomial<F, Coeff>,
     extended_omega_factor: F,
 ) -> Polynomial<F, LagrangeCoeff> {
     let log_n = domain.k();
     let n = 1usize << log_n;
     let omega = domain.get_omega();
-    let coset_shift = domain.g_coset * extended_omega_factor;
+    let coset_shift = domain.inner.g_coset * extended_omega_factor;
     let fft_data = domain.get_fft_data(n);
 
     let mut a = input.values().to_vec();
@@ -47,7 +47,7 @@ fn coeff_to_extended_part_cpu<F: WithSmallOrderMulGroup<3>>(
 /// Batched CPU equivalent of [`EvaluationDomain::coeff_to_extended_part_many_device`].
 /// See [`coeff_to_extended_part_cpu`] for the per-poly semantics.
 fn coeff_to_extended_part_many_cpu<F: WithSmallOrderMulGroup<3>>(
-    domain: &EvaluationDomain<F>,
+    domain: &EvaluationDomain<'_, F>,
     inputs: Vec<&Polynomial<F, Coeff>>,
     extended_omega_factor: F,
 ) -> Vec<Polynomial<F, LagrangeCoeff>> {
@@ -429,7 +429,8 @@ mod tests {
         let n = 1usize << k;
         let n_polys = 5;
 
-        let domain = EvaluationDomain::<Fr>::new(j, k);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(j, k);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let mut rng = ChaCha20Rng::seed_from_u64(0xC0FFEE);
 
         let host_polys: Vec<Polynomial<Fr, Coeff>> = (0..n_polys)
@@ -895,7 +896,8 @@ mod test_eval {
     ) {
         let n = 1 << k;
 
-        let domain = EvaluationDomain::<F>::new(expansion, k);
+        let domain = halo2_axiom::poly::EvaluationDomain::<F>::new(expansion, k);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let view = EvaluatorVkView {
             blinding_factors: 2,
             cs_degree: 3,

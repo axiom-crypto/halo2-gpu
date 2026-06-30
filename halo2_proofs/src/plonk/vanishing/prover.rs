@@ -72,7 +72,7 @@ impl<C: CurveAffine> Argument<C> {
         T: TranscriptWrite<C, E>,
     >(
         params: &P,
-        domain: &EvaluationDomain<C::Scalar>,
+        domain: &EvaluationDomain<'_, C::Scalar>,
         _: R,
         transcript: &mut T,
     ) -> Result<Committed<C>, GpuError> {
@@ -106,7 +106,7 @@ impl<C: CurveAffine> Committed<C> {
     >(
         self,
         params: &P,
-        domain: &EvaluationDomain<C::Scalar>,
+        domain: &EvaluationDomain<'_, C::Scalar>,
         h_poly: crate::poly::MaybeDevice<C::Scalar, ExtendedLagrangeCoeff>,
         mut rng: R,
         transcript: &mut T,
@@ -191,7 +191,7 @@ impl<C: CurveAffine> Constructed<C> {
         self,
         x: ChallengeX<C>,
         xn: C::Scalar,
-        domain: &EvaluationDomain<C::Scalar>,
+        domain: &EvaluationDomain<'_, C::Scalar>,
         transcript: &mut T,
     ) -> Result<Evaluated<C>, GpuError> {
         crate::perf_section!("vanishing.evaluate");

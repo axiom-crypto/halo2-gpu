@@ -72,7 +72,8 @@ fn test_generate_omega_powers_single_gpu_vs_cpu() {
     // can assert the kernel writes exactly `output_num` slots and does
     // not touch the tail past the cutoff.
     let log_n = 12u32;
-    let domain = EvaluationDomain::<Fr>::new(1, log_n);
+    let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, log_n);
+    let domain = EvaluationDomain::from_host_domain(&domain);
     let omega = domain.get_omega();
 
     let total = 1usize << log_n;
@@ -111,7 +112,8 @@ fn test_fft_gpu_vs_best_fft() {
     // elsewhere in the prover.
     let log_n = 11u32;
     let n = 1usize << log_n;
-    let domain = EvaluationDomain::<Fr>::new(1, log_n);
+    let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, log_n);
+    let domain = EvaluationDomain::from_host_domain(&domain);
     let omega = domain.get_omega();
     let omega_inv = domain.get_omega_inv();
 
@@ -135,7 +137,8 @@ fn test_fft_many_gpu_vs_best_fft() {
     use crate::cuda::funcs::fft_gpu_many;
     for &log_n in &[10u32, 12, 14] {
         let n = 1usize << log_n;
-        let domain = EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let omega = domain.get_omega();
         let omega_inv = domain.get_omega_inv();
         let num_polys = 3usize;
@@ -185,7 +188,8 @@ fn test_fft_normal_to_device_vs_cpu() {
 
     for log_n in [12u32, 13, 14] {
         let n = 1usize << log_n;
-        let domain = EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let omega = domain.get_omega();
         let omega_inv = domain.get_omega_inv();
 
@@ -230,7 +234,8 @@ fn test_fft_normal_to_device_ifft_vs_cpu() {
 
     for log_n in [12u32, 13, 14] {
         let n = 1usize << log_n;
-        let domain = EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let omega = domain.get_omega();
         let omega_inv = domain.get_omega_inv();
         let n_inv = Fr::from(n as u64).invert().unwrap();
@@ -289,10 +294,11 @@ fn test_fft_normal_to_device_coset_part_vs_cpu() {
 
     for log_n in [12u32, 13, 14] {
         let n = 1usize << log_n;
-        let domain = EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let omega = domain.get_omega();
         let omega_inv = domain.get_omega_inv();
-        let g_coset = domain.g_coset;
+        let g_coset = domain.inner.g_coset;
         // Pick a non-identity extended_omega_factor — `extended_omega^1` is
         // the simplest non-trivial choice and exercises the
         // `distribute_powers(divisor)` shift end-to-end.
@@ -346,7 +352,8 @@ fn test_cosetfft_gpu_roundtrip() {
     // `1/n` divisor applied on the return leg.
     let log_n = 10u32;
     let n = 1usize << log_n;
-    let domain = EvaluationDomain::<Fr>::new(1, log_n);
+    let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, log_n);
+    let domain = EvaluationDomain::from_host_domain(&domain);
     let omega = domain.get_omega();
     let omega_inv = domain.get_omega_inv();
     let n_inv = Fr::from(n as u64).invert().unwrap();
@@ -686,7 +693,8 @@ fn test_lagrange_to_coeff_device_vs_host() {
     use openvm_cuda_common::copy::cuda_memcpy_on;
 
     for k in [20u32, 22u32, 23u32] {
-        let domain = EvaluationDomain::<Fr>::new(1, k);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, k);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let n = 1usize << k;
         let host_values: Vec<Fr> = (0..n).map(|_| Fr::random(OsRng)).collect();
         let lagrange_a = domain.lagrange_from_vec(host_values.clone());
@@ -731,7 +739,8 @@ fn test_ifft_gpu_many_device_to_device_vs_host() {
     use openvm_cuda_common::copy::{cuda_memcpy_on, MemCopyH2D};
 
     for k in [20u32, 22u32, 23u32] {
-        let domain = EvaluationDomain::<Fr>::new(1, k);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, k);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let n = 1usize << k;
         let batch_size = 3usize;
         let host_polys: Vec<_> = (0..batch_size)
@@ -744,8 +753,13 @@ fn test_ifft_gpu_many_device_to_device_vs_host() {
 
         // Host-input path (oracle): existing wrapper, hardcoded
         // `input_on_device: false`.
-        let host_input_outs =
-            ifft_many_h2d::<Fr>(&lagrange_polys, k, domain.omega_inv, domain.ifft_divisor).unwrap();
+        let host_input_outs = ifft_many_h2d::<Fr>(
+            &lagrange_polys,
+            k,
+            domain.inner.omega_inv,
+            domain.inner.ifft_divisor,
+        )
+        .unwrap();
 
         // Device-input path: H2D the same inputs first, then run the
         // new device-input wrapper.
@@ -757,8 +771,13 @@ fn test_ifft_gpu_many_device_to_device_vs_host() {
             .iter()
             .map(|b| FFITraitObject::new(b.as_raw_ptr() as usize))
             .collect();
-        let dev_input_outs =
-            ifft_many_device::<Fr>(in_objs, k, domain.omega_inv, domain.ifft_divisor).unwrap();
+        let dev_input_outs = ifft_many_device::<Fr>(
+            in_objs,
+            k,
+            domain.inner.omega_inv,
+            domain.inner.ifft_divisor,
+        )
+        .unwrap();
 
         assert_eq!(host_input_outs.len(), dev_input_outs.len());
         for (i, (h, d)) in host_input_outs
@@ -805,7 +824,8 @@ fn test_lagrange_to_coeff_many_device_vs_host() {
     use openvm_cuda_common::copy::cuda_memcpy_on;
 
     for k in [20u32, 22u32, 23u32] {
-        let domain = EvaluationDomain::<Fr>::new(1, k);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, k);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let n = 1usize << k;
         let batch_size = 3;
         let host_polys: Vec<_> = (0..batch_size)
@@ -873,7 +893,8 @@ fn test_params_kzg_commit_lagrange_cache_cold_warm() {
     );
     let params = ParamsKZG::<Bn256>::setup(k, OsRng);
 
-    let domain = EvaluationDomain::<Fr>::new(1, k);
+    let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, k);
+    let domain = EvaluationDomain::from_host_domain(&domain);
     let mut poly = domain.empty_lagrange();
     for v in poly.iter_mut() {
         *v = Fr::random(OsRng);
@@ -928,7 +949,8 @@ fn test_commit_lagrange_device_vs_host() {
         "test must size strictly above GPU_MSM_THRESHOLD"
     );
     let params = ParamsKZG::<Bn256>::setup(k, OsRng);
-    let domain = EvaluationDomain::<Fr>::new(1, k);
+    let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, k);
+    let domain = EvaluationDomain::from_host_domain(&domain);
 
     let mut poly_host = domain.empty_lagrange();
     for v in poly_host.iter_mut() {
@@ -1125,7 +1147,8 @@ fn test_permutation_product_gpu_vs_cpu() {
     let log_n = 6u32;
     let n = 1usize << log_n;
     let num_cols = 2usize;
-    let domain = EvaluationDomain::<Fr>::new(1, log_n);
+    let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, log_n);
+    let domain = EvaluationDomain::from_host_domain(&domain);
     let omega = domain.get_omega();
 
     let values: Vec<Vec<Fr>> = (0..num_cols)
@@ -1189,7 +1212,8 @@ fn test_permutation_product_gpu_vs_cpu_chunking() {
     // caller's device slot) are covered.
     for &log_n in &[8u32, 12, 14] {
         let n = 1usize << log_n;
-        let domain = EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let omega = domain.get_omega();
         for &num_cols in &[2usize, 5] {
             let values: Vec<Vec<Fr>> = (0..num_cols)
@@ -1256,7 +1280,8 @@ fn test_permutation_product_device_inputs_vs_host_inputs() {
     // `test_permutation_product_gpu_vs_cpu_chunking`).
     for &log_n in &[8u32, 12, 14] {
         let n = 1usize << log_n;
-        let domain = EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let omega = domain.get_omega();
         for &num_cols in &[2usize, 5] {
             let values: Vec<Vec<Fr>> = (0..num_cols)
@@ -1534,9 +1559,10 @@ fn test_cosetfft_gpu_many_to_device_vs_host_output() {
     let log_n = 10u32;
     let extend_log_n = 10u32;
     let extend_size: usize = 1 << extend_log_n;
-    let domain = EvaluationDomain::<Fr>::new(1, log_n);
+    let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, log_n);
+    let domain = EvaluationDomain::from_host_domain(&domain);
     let omega = domain.get_omega();
-    let omega_part = domain.g_coset; // matches typical cosetfft_part call shape
+    let omega_part = domain.inner.g_coset; // matches typical cosetfft_part call shape
 
     // Three input polys of length 2^log_n, padded to 2^extend_log_n.
     let num_many = 3usize;
@@ -1622,8 +1648,9 @@ fn test_cosetfft_gpu_many_device_to_device_vs_host_output() {
     fn run_one(log_n: u32) {
         let extend_log_n = log_n;
         let extend_size: usize = 1 << extend_log_n;
-        let domain = EvaluationDomain::<Fr>::new(1, log_n);
-        let omega_part = domain.g_coset;
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = EvaluationDomain::from_host_domain(&domain);
+        let omega_part = domain.inner.g_coset;
 
         let num_many = 3usize;
         let in_polys: Vec<Vec<Fr>> = (0..num_many)
@@ -1716,7 +1743,8 @@ fn test_quotient_lookups_gpu_vs_cpu() {
 
     fn run_one(log_n: u32) {
         let length = 1usize << log_n;
-        let domain = EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = EvaluationDomain::from_host_domain(&domain);
 
         let make_poly = |n: usize| (0..n).map(|_| Fr::random(OsRng)).collect::<Vec<Fr>>();
 
@@ -1740,7 +1768,7 @@ fn test_quotient_lookups_gpu_vs_cpu() {
         let extended_omega_factor = Fr::random(OsRng);
         // CPU `lagrange_to_extend_part` multiplies by `g_coset` internally;
         // GPU takes the pre-scaled `omega_part`. Both land on the same coset.
-        let omega_part = domain.g_coset * extended_omega_factor;
+        let omega_part = domain.inner.g_coset * extended_omega_factor;
 
         let permuted_input_coset = domain
             .lagrange_to_extend_part(&permuted_input_lagrange, extended_omega_factor)
@@ -1777,9 +1805,9 @@ fn test_quotient_lookups_gpu_vs_cpu() {
             gamma,
             y,
             log_n,
-            domain.omega_inv,
-            domain.ifft_divisor,
-            domain.omega,
+            domain.inner.omega_inv,
+            domain.inner.ifft_divisor,
+            domain.inner.omega,
             length,
         );
         gpu.calculate_constraints(
@@ -1861,7 +1889,8 @@ fn test_compress_expressions_gpu_vs_cpu() {
 
     fn run_one(log_n: u32) {
         let j: u32 = 4;
-        let domain = EvaluationDomain::<Fr>::new(j, log_n);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(j, log_n);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let n: usize = 1usize << log_n;
 
         let mk_col = || -> crate::poly::Polynomial<Fr, crate::poly::LagrangeCoeff> {
@@ -1978,7 +2007,8 @@ fn test_compress_expressions_gpu_inplace_device_vs_host() {
 
     fn run_one(log_n: u32) {
         let j: u32 = 4;
-        let domain = EvaluationDomain::<Fr>::new(j, log_n);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(j, log_n);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let n: usize = 1usize << log_n;
 
         let mk_col = || -> crate::poly::Polynomial<Fr, crate::poly::LagrangeCoeff> {
@@ -2372,11 +2402,12 @@ fn test_dense_lagrange_to_coset_device_input_vs_host_input() {
 
     for log_n in [10u32, 12, 14] {
         let n = 1usize << log_n;
-        let domain = EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let omega = domain.get_omega();
         let omega_inv = domain.get_omega_inv();
-        let divisor = domain.ifft_divisor;
-        let omega_part = domain.g_coset * domain.get_extended_omega();
+        let divisor = domain.inner.ifft_divisor;
+        let omega_part = domain.inner.g_coset * domain.get_extended_omega();
 
         let host_input: Vec<Fr> = (0..n).map(|_| Fr::random(OsRng)).collect();
 
@@ -2425,11 +2456,12 @@ fn test_ifft_cosetfftpart_device_input_vs_host_input() {
 
     for log_n in [10u32, 12, 14] {
         let n = 1usize << log_n;
-        let domain = EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let omega = domain.get_omega();
         let omega_inv = domain.get_omega_inv();
-        let divisor = domain.ifft_divisor;
-        let omega_part = domain.g_coset * domain.get_extended_omega();
+        let divisor = domain.inner.ifft_divisor;
+        let omega_part = domain.inner.g_coset * domain.get_extended_omega();
 
         let host_input: Vec<Fr> = (0..n).map(|_| Fr::random(OsRng)).collect();
 
@@ -2478,9 +2510,10 @@ fn test_module_poly_to_coset_device_input_vs_host_input() {
 
     for log_n in [10u32, 12, 14] {
         let n = 1usize << log_n;
-        let domain = EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let omega = domain.get_omega();
-        let omega_part = domain.g_coset * domain.get_extended_omega();
+        let omega_part = domain.inner.g_coset * domain.get_extended_omega();
 
         let host_input: Vec<Fr> = (0..n).map(|_| Fr::random(OsRng)).collect();
 
@@ -2527,11 +2560,12 @@ fn test_calculate_constraints_full_device_vs_calculate_constraints_device() {
 
     for log_n in [10u32, 12, 14] {
         let n = 1usize << log_n;
-        let domain = EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, log_n);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let omega = domain.get_omega();
         let omega_inv = domain.get_omega_inv();
-        let divisor = domain.ifft_divisor;
-        let g_coset_part = domain.g_coset * domain.get_extended_omega();
+        let divisor = domain.inner.ifft_divisor;
+        let g_coset_part = domain.inner.g_coset * domain.get_extended_omega();
 
         let init_values: Vec<Fr> = (0..n).map(|_| Fr::random(OsRng)).collect();
         let l0: Vec<Fr> = (0..n).map(|_| Fr::random(OsRng)).collect();

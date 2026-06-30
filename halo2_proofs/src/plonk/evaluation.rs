@@ -26,7 +26,7 @@ pub(crate) struct EvaluatorVkView<'a, F: Field> {
     pub(crate) blinding_factors: usize,
     pub(crate) cs_degree: usize,
     pub(crate) permutation_argument: &'a permutation::Argument,
-    pub(crate) domain: &'a EvaluationDomain<F>,
+    pub(crate) domain: &'a EvaluationDomain<'a, F>,
 }
 
 /// Return the index in the polynomial of size `isize` after rotation `rot`.
@@ -268,7 +268,12 @@ impl Calculation {
 
     fn encode(&self, rotations: &[i32]) -> CalcRule {
         let dummy_var = 6;
-        let combines = [CombineType::Zero, CombineType::One, CombineType::NegOne, CombineType::Two];
+        let combines = [
+            CombineType::Zero,
+            CombineType::One,
+            CombineType::NegOne,
+            CombineType::Two,
+        ];
         let degrees = [CalcDegree::One, CalcDegree::Two];
 
         let (a, b, c1, c2, d) = match self {
@@ -337,9 +342,10 @@ impl Calculation {
 
     fn encode_vp(&self, rotations: &[i32]) -> Vec<u64> {
         match self {
-            Calculation::Horner(_, parts, _) => {
-                parts.iter().map(|part| part.encode(rotations)).collect::<Vec<u64>>()
-            }
+            Calculation::Horner(_, parts, _) => parts
+                .iter()
+                .map(|part| part.encode(rotations))
+                .collect::<Vec<u64>>(),
             _ => unreachable!(),
         }
     }
@@ -396,8 +402,11 @@ impl<C: CurveAffine> Evaluator<C> {
         // Custom gates
         let mut parts = Vec::new();
         for gate in gates.iter() {
-            parts
-                .extend(gate.polynomials().iter().map(|poly| ev.custom_gates.add_expression(poly)));
+            parts.extend(
+                gate.polynomials()
+                    .iter()
+                    .map(|poly| ev.custom_gates.add_expression(poly)),
+            );
         }
         ev.custom_gates.add_calculation(Calculation::Horner(
             ValueSource::PreviousValue(),
@@ -410,7 +419,10 @@ impl<C: CurveAffine> Evaluator<C> {
             let mut graph = GraphEvaluator::default();
 
             let mut evaluate_lc = |expressions: &Vec<GpuExpression<_>>| {
-                let parts = expressions.iter().map(|expr| graph.add_expression(expr)).collect();
+                let parts = expressions
+                    .iter()
+                    .map(|expr| graph.add_expression(expr))
+                    .collect();
                 graph.add_calculation(Calculation::Horner(
                     ValueSource::Constant(0),
                     parts,
@@ -423,10 +435,14 @@ impl<C: CurveAffine> Evaluator<C> {
             // table coset
             let compressed_table_coset = evaluate_lc(&lookup.table_expressions);
             // z(\omega X) (a'(X) + \beta) (s'(X) + \gamma)
-            let right_gamma = graph
-                .add_calculation(Calculation::Add(compressed_table_coset, ValueSource::Gamma()));
-            let lc = graph
-                .add_calculation(Calculation::Add(compressed_input_coset, ValueSource::Beta()));
+            let right_gamma = graph.add_calculation(Calculation::Add(
+                compressed_table_coset,
+                ValueSource::Gamma(),
+            ));
+            let lc = graph.add_calculation(Calculation::Add(
+                compressed_input_coset,
+                ValueSource::Beta(),
+            ));
             graph.add_calculation(Calculation::Mul(lc, right_gamma));
             ev.lookups.push(graph);
         }
@@ -448,7 +464,11 @@ impl<C: CurveAffine> Default for GraphEvaluator<C> {
     fn default() -> Self {
         Self {
             // Fixed positions to allow easy access
-            constants: vec![C::ScalarExt::ZERO, C::ScalarExt::ONE, C::ScalarExt::from(2u64)],
+            constants: vec![
+                C::ScalarExt::ZERO,
+                C::ScalarExt::ONE,
+                C::ScalarExt::from(2u64),
+            ],
             rotations: Vec::new(),
             calculations: Vec::new(),
             num_intermediates: 0,
@@ -486,12 +506,18 @@ impl<C: CurveAffine> GraphEvaluator<C> {
     /// resulting value so the result can be reused  when that calculation
     /// is done multiple times.
     pub(crate) fn add_calculation(&mut self, calculation: Calculation) -> ValueSource {
-        let existing_calculation = self.calculations.iter().find(|c| c.calculation == calculation);
+        let existing_calculation = self
+            .calculations
+            .iter()
+            .find(|c| c.calculation == calculation);
         match existing_calculation {
             Some(existing_calculation) => ValueSource::Intermediate(existing_calculation.target),
             None => {
                 let target = self.num_intermediates;
-                self.calculations.push(CalculationInfo { calculation, target });
+                self.calculations.push(CalculationInfo {
+                    calculation,
+                    target,
+                });
                 self.num_intermediates += 1;
                 ValueSource::Intermediate(target)
             }
@@ -524,9 +550,9 @@ impl<C: CurveAffine> GraphEvaluator<C> {
                     rot_idx,
                 )))
             }
-            GpuExpression::Challenge(challenge) => {
-                self.add_calculation(Calculation::Store(ValueSource::Challenge(challenge.index())))
-            }
+            GpuExpression::Challenge(challenge) => self.add_calculation(Calculation::Store(
+                ValueSource::Challenge(challenge.index()),
+            )),
             GpuExpression::Negated(a) => match **a {
                 GpuExpression::Constant(scalar) => self.add_constant(&-scalar),
                 _ => {
@@ -614,8 +640,10 @@ impl<C: CurveAffine> GraphEvaluator<C> {
     ///   `Constant(0)` is unused (the kernel inits `val = 0`).
     pub(crate) fn for_compress(expressions: &[GpuExpression<C::ScalarExt>]) -> Self {
         let mut graph = GraphEvaluator::<C>::default();
-        let parts: Vec<ValueSource> =
-            expressions.iter().map(|expr| graph.add_expression(expr)).collect();
+        let parts: Vec<ValueSource> = expressions
+            .iter()
+            .map(|expr| graph.add_expression(expr))
+            .collect();
         graph.add_calculation(Calculation::Horner(
             ValueSource::Constant(0),
             parts,
@@ -632,8 +660,10 @@ impl<C: CurveAffine> GraphEvaluator<C> {
     /// See [`CalcRule`] for the on-wire layout.
     pub(crate) fn encode_for_device(&self) -> (Vec<CalcRule>, Vec<u64>) {
         let n = self.calculations.len() - 1;
-        let intermediate_rules =
-            self.calculations[..n].iter().map(|c| c.calculation.encode(&self.rotations)).collect();
+        let intermediate_rules = self.calculations[..n]
+            .iter()
+            .map(|c| c.calculation.encode(&self.rotations))
+            .collect();
         let value_part_rules = self.calculations[n].calculation.encode_vp(&self.rotations);
         (intermediate_rules, value_part_rules)
     }
@@ -776,7 +806,10 @@ impl<C: CurveAffine> GraphEvaluator<C> {
         new_calcs.push(terminal_calc);
 
         let n = new_calcs.len() - 1;
-        let intermediate_rules = new_calcs[..n].iter().map(|c| c.encode(&self.rotations)).collect();
+        let intermediate_rules = new_calcs[..n]
+            .iter()
+            .map(|c| c.encode(&self.rotations))
+            .collect();
         let value_part_rules = new_calcs[n].encode_vp(&self.rotations);
 
         (constants, intermediate_rules, value_part_rules)
@@ -1048,11 +1081,16 @@ where
         evaluator,
         &view,
         pk.l0_device().expect("l0 device failed to transport"),
-        pk.l_last_device().expect("l_last device failed to transport"),
-        pk.l_active_row_device().expect("l_active_row device failed to transport"),
-        pk.fixed_values_device().expect("fixed_values device failed to transport"),
-        pk.permutation_polys_device().expect("permutation_polys device failed to transport"),
-        pk.fixed_polys_device().expect("fixed_polys device failed to transport"),
+        pk.l_last_device()
+            .expect("l_last device failed to transport"),
+        pk.l_active_row_device()
+            .expect("l_active_row device failed to transport"),
+        pk.fixed_values_device()
+            .expect("fixed_values device failed to transport"),
+        pk.permutation_polys_device()
+            .expect("permutation_polys device failed to transport"),
+        pk.fixed_polys_device()
+            .expect("fixed_polys device failed to transport"),
         advice_polys,
         instance_polys,
         challenges,
@@ -1978,7 +2016,11 @@ mod tests {
         let idx = ((rule >> 4) & 0xf_ffff) as u32;
         let rot_abs = ((rule >> 24) & 0x7fff) as u32;
         let rot_sign = ((rule >> 39) & 0x1) as u32;
-        let rotation = if rot_sign == 0 { rot_abs as i32 } else { -(rot_abs as i32) };
+        let rotation = if rot_sign == 0 {
+            rot_abs as i32
+        } else {
+            -(rot_abs as i32)
+        };
         (src, idx, rotation)
     }
 
@@ -2245,8 +2287,14 @@ mod tests {
 
         // The first len(self.constants) entries must equal the original
         // pool; the last four entries are theta/beta/gamma/y.
-        assert_eq!(&extended_constants[..graph.constants.len()], &graph.constants[..]);
-        assert_eq!(&extended_constants[graph.constants.len()..], &[theta, beta, gamma, y][..]);
+        assert_eq!(
+            &extended_constants[..graph.constants.len()],
+            &graph.constants[..]
+        );
+        assert_eq!(
+            &extended_constants[graph.constants.len()..],
+            &[theta, beta, gamma, y][..]
+        );
         // No CalcRule may carry a Beta/Gamma/Theta/Y src tag (encoded
         // form would have panicked); each operand's src must be in
         // {Fixed, Instance, Advice, Intermediate, Constant, Challenge}.
@@ -2267,10 +2315,18 @@ mod tests {
         // matches `Calculation::evaluate` on the original graph.
         let isize_n = 16i32;
         let advice_cols: Vec<Vec<Fr>> = (0..3)
-            .map(|c| (0..isize_n).map(|r| Fr::from((c * 100 + r) as u64)).collect())
+            .map(|c| {
+                (0..isize_n)
+                    .map(|r| Fr::from((c * 100 + r) as u64))
+                    .collect()
+            })
             .collect();
         let fixed_cols: Vec<Vec<Fr>> = (0..3)
-            .map(|c| (0..isize_n).map(|r| Fr::from((c * 1000 + r) as u64 + 1)).collect())
+            .map(|c| {
+                (0..isize_n)
+                    .map(|r| Fr::from((c * 1000 + r) as u64 + 1))
+                    .collect()
+            })
             .collect();
 
         let fixed_polys: Vec<crate::poly::Polynomial<Fr, crate::poly::LagrangeCoeff>> = fixed_cols
@@ -2402,9 +2458,12 @@ mod tests {
 
             fn configure(cs: &mut ConstraintSystem<F>) -> Self::Config {
                 let n = 32;
-                let advice_cols =
-                    (0..n).map(|_| cs.advice_column()).collect::<Vec<Column<Advice>>>();
-                let coeff_cols = (0..n).map(|_| cs.fixed_column()).collect::<Vec<Column<Fixed>>>();
+                let advice_cols = (0..n)
+                    .map(|_| cs.advice_column())
+                    .collect::<Vec<Column<Advice>>>();
+                let coeff_cols = (0..n)
+                    .map(|_| cs.fixed_column())
+                    .collect::<Vec<Column<Fixed>>>();
                 let coeff_next_col = cs.fixed_column();
                 let byte_selector = cs.fixed_column();
                 let byte_table = cs.lookup_table_column();
@@ -2582,8 +2641,11 @@ mod tests {
         let instance = gen_rand_rows(num_rows, 0);
         let advices = gen_rand_rows(num_rows, num_advices);
 
-        let fixed_polys =
-            fixed.clone().into_iter().map(Polynomial::<Fr, LagrangeCoeff>::new).collect::<Vec<_>>();
+        let fixed_polys = fixed
+            .clone()
+            .into_iter()
+            .map(Polynomial::<Fr, LagrangeCoeff>::new)
+            .collect::<Vec<_>>();
         let instance_polys = instance
             .clone()
             .into_iter()
@@ -2600,7 +2662,10 @@ mod tests {
             intermediate_rules.len(),
             value_part_rules.len()
         );
-        println!("value_part: {:?}", evaluator.custom_gates.calculations.last().unwrap());
+        println!(
+            "value_part: {:?}",
+            evaluator.custom_gates.calculations.last().unwrap()
+        );
 
         let gen_test = |row_start: usize, row_end: usize| {
             println!("test row: [{}, {}]", row_start, row_end);
@@ -2687,7 +2752,12 @@ mod tests {
             let isize = num_rows as i32;
             let rot_scale = 1;
             let cpu_timer = info_span!("halo2_section", phase = "cpu evaluate_h").entered();
-            for (i, value_gpu) in quotient_poly.iter().enumerate().take(row_end).skip(row_start) {
+            for (i, value_gpu) in quotient_poly
+                .iter()
+                .enumerate()
+                .take(row_end)
+                .skip(row_start)
+            {
                 let mut eval_data = custom_gates.instance();
                 let mut value = Fr::ZERO;
                 value = custom_gates.evaluate(
