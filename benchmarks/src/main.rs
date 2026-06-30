@@ -4,6 +4,7 @@ use openvm::platform::memory::GUEST_MAX_MEM;
 use openvm_sdk::{
     config::{AggregationSystemParams, AppConfig, DEFAULT_APP_L_SKIP},
     fs::{read_object_from_file, write_object_to_file},
+    types::ExecutableFormat,
     Sdk, StdIn,
 };
 use openvm_stark_sdk::config::app_params_with_100_bits_security;
@@ -51,19 +52,15 @@ fn main() -> Result<()> {
     }
 
     let sdk = builder.build()?;
-    let app_exe = sdk.convert_to_exe(elf)?;
+    let app_exe = sdk.convert_to_exe(ExecutableFormat::Elf(elf))?;
 
     let evm_proof = if root_proof_path.exists() {
         eprintln!("reusing root proof from {:?}", root_proof_path);
         let halo2_prover = sdk.halo2_prover();
         let root_proof = read_object_from_file(root_proof_path)?;
-        run_with_metric_collection("OUTPUT_PATH", move || {
-            halo2_prover.prove_for_evm(&root_proof)
-        })
+        run_with_metric_collection("OUTPUT_PATH", move || halo2_prover.prove_for_evm(&root_proof))
     } else {
-        let mut evm_prover = sdk
-            .evm_prover(app_exe)
-            .expect("evm_prover construction failed");
+        let mut evm_prover = sdk.evm_prover(app_exe).expect("evm_prover construction failed");
 
         let root_proof = evm_prover.prove_root(stdin, &[])?;
 
@@ -73,17 +70,12 @@ fn main() -> Result<()> {
         write_object_to_file(root_pk_path, sdk.root_pk())?;
 
         run_with_metric_collection("OUTPUT_PATH", move || {
-            evm_prover
-                .halo2_prover
-                .as_ref()
-                .unwrap()
-                .prove_for_evm(&root_proof)
+            evm_prover.halo2_prover.as_ref().unwrap().prove_for_evm(&root_proof)
         })
     };
 
-    let openvm_verifier = sdk
-        .generate_halo2_verifier_solidity()
-        .expect("generate_halo2_verifier_solidity failed");
+    let openvm_verifier =
+        sdk.generate_halo2_verifier_solidity().expect("generate_halo2_verifier_solidity failed");
     Sdk::verify_evm_halo2_proof(&openvm_verifier, evm_proof, None)
         .expect("verify_evm_halo2_proof failed");
 
