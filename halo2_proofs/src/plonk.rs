@@ -78,9 +78,8 @@ where
         let hdomain = vk.get_domain();
         let domain =
             EvaluationDomain::new(hdomain.get_quotient_poly_degree() as u32 + 1, hdomain.k());
-        let permutation = permutation::VerifyingKey {
-            commitments: vk.permutation().commitments().clone(),
-        };
+        let permutation =
+            permutation::VerifyingKey { commitments: vk.permutation().commitments().clone() };
         GpuVerifyingKey {
             domain,
             fixed_commitments: vk.fixed_commitments().clone(),
@@ -184,8 +183,7 @@ where
     fn from_cow(inner: Cow<'a, ProvingKey<C>>) -> Self {
         let cs = GpuConstraintSystem::from(inner.get_vk().cs());
         let hdomain = inner.get_vk().get_domain();
-        let domain =
-            EvaluationDomain::new(hdomain.get_quotient_poly_degree() as u32 + 1, hdomain.k());
+        let domain = EvaluationDomain::from_host_domain(hdomain.clone());
         let ev = Evaluator::new(&cs);
         let cs_degree = cs.degree();
         let transcript_repr = inner.get_vk().transcript_repr();
