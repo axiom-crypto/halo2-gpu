@@ -10,7 +10,7 @@ pub use ff::Field;
 pub use halo2curves::{CurveAffine, CurveExt};
 
 /// FFTStage
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FFTStage {
     radix: usize,
     length: usize,
@@ -47,7 +47,7 @@ fn get_stages(size: usize, radixes: Vec<usize>) -> Vec<FFTStage> {
 }
 
 /// FFTData
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FFTData<F: arithmetic::Field> {
     n: usize,
 
