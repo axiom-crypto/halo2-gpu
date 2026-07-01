@@ -13,7 +13,10 @@ use super::super::{circuit::GpuAny, ChallengeBeta, ChallengeGamma, ChallengeX};
 use super::Argument;
 use crate::{
     arithmetic::CurveAffine,
-    cuda::funcs::{batch_eval_polynomial_d2h, grand_product_device, permutation_product_device},
+    cuda::funcs::{
+        batch_eval_polynomial_d2h, grand_product_device_with_prefix_device,
+        permutation_product_device,
+    },
     cuda::utils::{FFITraitObject, HALO2_GPU_CTX},
     cuda::HaloGpuError,
     plonk::{self, GpuError},
@@ -97,9 +100,6 @@ impl Argument {
         // Each column gets its own delta power.
         let mut deltaomega = C::Scalar::ONE;
 
-        // The "last" value carried from the previous column set.
-        let mut last_z = C::Scalar::ONE;
-
         let mut sets = vec![];
         let mut commitments = vec![];
 
@@ -123,6 +123,21 @@ impl Argument {
             .map_err(HaloGpuError::from)?;
         let modified_values_bytes = n * scalar_bytes;
         let acc_len = n - blinding_factors;
+
+        // Cross-set carry z_0. Each set's z[0] equals the previous set's
+        // z[acc_len-1]; kept device-resident (init to ONE via a D2D from the
+        // ONE-fill template) so the per-set carry is a pure device→device copy
+        // — no D2H/H2D round-trip and no stream sync between sets.
+        let d_last_z = DeviceBuffer::<C::Scalar>::with_capacity_on(1, &HALO2_GPU_CTX);
+        unsafe {
+            cuda_memcpy_on::<true, true>(
+                d_last_z.as_mut_raw_ptr(),
+                d_ones_template.as_raw_ptr(),
+                scalar_bytes,
+                &HALO2_GPU_CTX,
+            )
+            .map_err(HaloGpuError::from)?;
+        }
 
         for (columns, permutations_chunk) in self
             .columns
@@ -198,14 +213,15 @@ impl Argument {
             #[cfg(feature = "profile")]
             let z_grand_product_time = start_timer!(|| "Z_i(X) grand product");
             // Device-resident running product Z_i(X). Layout:
-            //   z[0]              = last_z (cross-chunk roll-in)
+            //   z[0]              = d_last_z (cross-set roll-in)
             //   z[1..acc_len]     = scan of modified_values[0..acc_len-1]
             //   z[acc_len..n]     = RNG blinding factors
             // The scan FFI is in-place, so its output sits at
             // d_scanned[0..acc_len-1]; a D2D shifts it into d_z[1..acc_len].
+            // The scan consumes the running prefix straight from `d_last_z`.
             let d_scanned = {
                 crate::perf_section!("grand_product_scan");
-                grand_product_device(d_modified_values, acc_len - 1, last_z)?
+                grand_product_device_with_prefix_device(d_modified_values, acc_len - 1, &d_last_z)?
             };
 
             #[cfg(feature = "profile")]
@@ -213,9 +229,10 @@ impl Argument {
 
             let d_z = DeviceBuffer::<C::Scalar>::with_capacity_on(n, &HALO2_GPU_CTX);
             unsafe {
-                cuda_memcpy_on::<false, true>(
+                // z[0] = carry from the previous set (device→device).
+                cuda_memcpy_on::<true, true>(
                     d_z.as_mut_raw_ptr(),
-                    std::slice::from_ref(&last_z).as_ptr() as *const libc::c_void,
+                    d_last_z.as_raw_ptr(),
                     scalar_bytes,
                     &HALO2_GPU_CTX,
                 )
@@ -246,11 +263,13 @@ impl Argument {
                 .map_err(HaloGpuError::from)?;
             }
 
-            // Carry last_z = z[acc_len - 1] (last element of the scan region)
-            // into the next chunk. Single 32-byte D2H.
+            // Carry z_0 for the next set = z[acc_len - 1] (last element of the
+            // scan region), copied device→device. No D2H and no stream sync:
+            // stream ordering guarantees this write lands before the next set
+            // reads `d_last_z` as its scan prefix / z[0] seed.
             unsafe {
-                cuda_memcpy_on::<true, false>(
-                    &mut last_z as *mut C::Scalar as *mut libc::c_void,
+                cuda_memcpy_on::<true, true>(
+                    d_last_z.as_mut_raw_ptr(),
                     (d_z.as_raw_ptr() as *const u8).add((acc_len - 1) * scalar_bytes)
                         as *const libc::c_void,
                     scalar_bytes,
@@ -258,10 +277,6 @@ impl Argument {
                 )
                 .map_err(HaloGpuError::from)?;
             }
-            HALO2_GPU_CTX
-                .stream
-                .to_host_sync()
-                .map_err(HaloGpuError::from)?;
 
             let z = Polynomial::<C::Scalar, LagrangeCoeff, Device>::from_device(d_z);
 
