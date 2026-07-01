@@ -23,9 +23,10 @@ use crate::cpu::arithmetic::{best_multiexp_cpu, lookup_product_cpu};
 use crate::cpu::evaluator::permutation_quotient_cpu_chunk;
 use crate::cuda::funcs::{
     batch_invert_single_gpu, cosetfft_gpu, cosetfft_many_h2d, eval_polynomial_gpu, fft_gpu,
-    generate_omega_powers_gpu, grand_product_device, grand_product_gpu, lookup_product_device,
-    lookup_product_gpu, multiexp_gpu, permutation_product_device, permutation_product_gpu,
-    permutation_quotient_gpu, permute_expression_pair_device,
+    generate_omega_powers_gpu, grand_product_device, grand_product_device_with_prefix_device,
+    grand_product_gpu, lookup_product_device, lookup_product_gpu, multiexp_gpu,
+    permutation_product_device, permutation_product_gpu, permutation_quotient_gpu,
+    permute_expression_pair_device,
 };
 use crate::cuda::utils::FFITraitObject;
 use crate::cuda::utils::HALO2_GPU_CTX;
@@ -1378,6 +1379,164 @@ fn test_grand_product_device_inputs_vs_host_inputs() {
             device_out, host_out,
             "grand_product_device_inputs disagrees with host-input arm at log_n={}",
             log_n
+        );
+    }
+}
+
+#[test]
+fn test_grand_product_device_multi_chunk_carry() {
+    // A5: exercises the cross-chunk device→device prefix carry in
+    // `grand_product_device_chunked`. `_halo2_grand_product_max_len` only
+    // forces multi-chunk on memory-sized inputs, so we drive the chunked core
+    // directly with a small `chunk_size` that evenly divides `output_len`,
+    // producing several in-bounds chunks (offset 0,n/4,n/2,3n/4 → 3 boundary
+    // carries). The multi-chunk device scan must be byte-identical to both the
+    // single-chunk host oracle (`grand_product_gpu`) and a plain CPU running
+    // product — proving the D2D boundary carry rolls the prefix correctly.
+    for &log_n in &[10u32, 12, 14] {
+        let n = 1usize << log_n;
+        let input: Vec<Fr> = (0..n).map(|_| Fr::random(OsRng)).collect();
+        let prefix = Fr::random(OsRng);
+
+        // Host single-chunk oracle.
+        let mut host_out = vec![Fr::ZERO; n];
+        grand_product_gpu(&mut host_out, &input, prefix).unwrap();
+
+        // CPU reference: out[i] = prefix * prod_{j<=i} input[j].
+        let mut cpu_out = vec![Fr::ZERO; n];
+        let mut acc = prefix;
+        for i in 0..n {
+            acc *= input[i];
+            cpu_out[i] = acc;
+        }
+
+        // Device multi-chunk: device-resident prefix, forced chunk_size = n/4.
+        let input_device = input.as_slice().to_device_on(&HALO2_GPU_CTX).unwrap();
+        let prefix_device = std::slice::from_ref(&prefix)
+            .to_device_on(&HALO2_GPU_CTX)
+            .unwrap();
+        let chunk_size = n / 4;
+        assert!(chunk_size > 0 && n.is_multiple_of(chunk_size));
+        let d_scanned = crate::cuda::funcs::grand_product::grand_product_device_chunked(
+            input_device,
+            n,
+            &prefix_device,
+            chunk_size,
+        )
+        .unwrap();
+        let device_out = d_scanned.to_host_on(&HALO2_GPU_CTX).unwrap();
+
+        assert_eq!(
+            device_out, cpu_out,
+            "multi-chunk device carry disagrees with CPU reference at log_n={}",
+            log_n
+        );
+        assert_eq!(
+            device_out, host_out,
+            "multi-chunk device carry disagrees with single-chunk host oracle at log_n={}",
+            log_n
+        );
+    }
+}
+
+#[test]
+fn test_permutation_grand_product_cross_set_carry() {
+    // A4: the permutation prover chains each set's grand product into the next
+    // via z_0[set k] = z_{acc_len-1}[set k-1]. Compares the device-resident
+    // carry (`grand_product_device_with_prefix_device` + D2D z[0] seed + D2D
+    // carry update, mirroring `permutation::Argument::commit`) against the
+    // host-scalar carry route over a multi-set scenario. The concatenated
+    // per-set Z must be byte-identical.
+    let log_n = 12u32;
+    let n = 1usize << log_n;
+    let blinding = 6usize; // representative blinding-factor count
+    let acc_len = n - blinding;
+    let num_sets = 3usize;
+    let scalar_bytes = std::mem::size_of::<Fr>();
+
+    // Per-set modified-value inputs (analogue of `d_modified_values`).
+    let sets: Vec<Vec<Fr>> = (0..num_sets)
+        .map(|_| (0..n).map(|_| Fr::random(OsRng)).collect())
+        .collect();
+
+    // ---- Route A: host-scalar carry (baseline / oracle). ----
+    let mut host_zs: Vec<Vec<Fr>> = Vec::new();
+    let mut last_z = Fr::ONE;
+    for modified in &sets {
+        let input_device = modified.as_slice().to_device_on(&HALO2_GPU_CTX).unwrap();
+        let d_scanned = grand_product_device(input_device, acc_len - 1, last_z).unwrap();
+        let scanned = d_scanned.to_host_on(&HALO2_GPU_CTX).unwrap();
+        let mut z = vec![Fr::ZERO; acc_len];
+        z[0] = last_z;
+        z[1..acc_len].copy_from_slice(&scanned[0..acc_len - 1]);
+        last_z = z[acc_len - 1];
+        host_zs.push(z);
+    }
+
+    // ---- Route B: device-resident carry (the A4 fix). ----
+    let d_ones = vec![Fr::ONE]
+        .as_slice()
+        .to_device_on(&HALO2_GPU_CTX)
+        .unwrap();
+    let d_last_z = DeviceBuffer::<Fr>::with_capacity_on(1, &HALO2_GPU_CTX);
+    unsafe {
+        openvm_cuda_common::copy::cuda_memcpy_on::<true, true>(
+            d_last_z.as_mut_raw_ptr(),
+            d_ones.as_raw_ptr(),
+            scalar_bytes,
+            &HALO2_GPU_CTX,
+        )
+        .unwrap();
+    }
+    let mut dev_zs: Vec<Vec<Fr>> = Vec::new();
+    for modified in &sets {
+        let input_device = modified.as_slice().to_device_on(&HALO2_GPU_CTX).unwrap();
+        let d_scanned =
+            grand_product_device_with_prefix_device(input_device, acc_len - 1, &d_last_z).unwrap();
+        let d_z = DeviceBuffer::<Fr>::with_capacity_on(acc_len, &HALO2_GPU_CTX);
+        unsafe {
+            // z[0] = carry (D2D).
+            openvm_cuda_common::copy::cuda_memcpy_on::<true, true>(
+                d_z.as_mut_raw_ptr(),
+                d_last_z.as_raw_ptr(),
+                scalar_bytes,
+                &HALO2_GPU_CTX,
+            )
+            .unwrap();
+            // z[1..acc_len] = d_scanned[0..acc_len-1] (D2D).
+            openvm_cuda_common::copy::cuda_memcpy_on::<true, true>(
+                (d_z.as_mut_raw_ptr() as *mut u8).add(scalar_bytes) as *mut libc::c_void,
+                d_scanned.as_raw_ptr(),
+                (acc_len - 1) * scalar_bytes,
+                &HALO2_GPU_CTX,
+            )
+            .unwrap();
+            // carry update: d_last_z = z[acc_len-1] (D2D).
+            openvm_cuda_common::copy::cuda_memcpy_on::<true, true>(
+                d_last_z.as_mut_raw_ptr(),
+                (d_z.as_raw_ptr() as *const u8).add((acc_len - 1) * scalar_bytes)
+                    as *const libc::c_void,
+                scalar_bytes,
+                &HALO2_GPU_CTX,
+            )
+            .unwrap();
+        }
+        let z = d_z.to_host_on(&HALO2_GPU_CTX).unwrap();
+        dev_zs.push(z);
+    }
+
+    assert_eq!(
+        dev_zs, host_zs,
+        "device cross-set carry disagrees with host-scalar carry route"
+    );
+    // Sanity: the carry actually chains, and set 0 starts from ONE.
+    assert_eq!(dev_zs[0][0], Fr::ONE);
+    for k in 1..num_sets {
+        assert_eq!(
+            dev_zs[k][0],
+            dev_zs[k - 1][acc_len - 1],
+            "set {k} z[0] must equal set {} z[acc_len-1]",
+            k - 1
         );
     }
 }
