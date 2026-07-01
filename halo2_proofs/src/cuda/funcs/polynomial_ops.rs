@@ -122,16 +122,96 @@ pub fn batch_eval_polynomial_gpu<F: Field>(
     }
 }
 
-/// Device-input batch evaluation. For each `(d_poly, point)` pair,
-/// evaluates `d_poly` at `point` via [`eval_polynomial_device`] and writes
-/// the scalar into `eval_result[i]`. No H2D of polynomial coefficients —
-/// the device buffers stay caller-owned and resident.
+/// Device-**output** batch evaluation. For each `(d_poly, point)` pair,
+/// evaluates `d_poly` at `point` via the same `_halo2_eval_polynomial`
+/// Horner FFI [`eval_polynomial_device`] uses, and writes the 32-byte result
+/// into slot `i` of a freshly-allocated `DeviceBuffer<F>` with a
+/// device-to-device copy. Unlike [`batch_eval_polynomial_d2h`], **no per-eval
+/// `to_host_sync`** is performed — every evaluation stays on device, so a
+/// batch of N evals costs one batched D2H (done by the caller) instead of N
+/// synced 32-byte D2Hs.
 ///
-/// Each iteration enqueues one Horner-tree kernel + a 32-byte D2H of the
-/// result on `HALO2_GPU_CTX.stream` and synchronizes. This is the
-/// equivalent of the host-input [`batch_eval_polynomial_gpu`] for callers
-/// whose polys are already on device; it trades the batched kernel's
-/// double-buffered H2D-with-compute overlap for zero coefficient transfer.
+/// # Contract
+/// - **Ownership**: `d_polys` are caller-owned device buffers; the returned
+///   `DeviceBuffer<F>` (length `d_polys.len()`) is caller-owned. Per-eval
+///   Horner scratch is allocated + freed within the loop — both are
+///   stream-ordered async ops (`cudaMallocAsync` / `cudaFreeAsync`), so
+///   there is no host sync. The scratch free enqueues after the result copy
+///   on the same stream, so the D→D copy reads the result before the block
+///   is reclaimed.
+/// - **Sync**: all work enqueues on `HALO2_GPU_CTX.stream`; the function
+///   returns BEFORE completion. Callers that read on host must D2H +
+///   stream-sync; same-stream downstream kernels see the result directly.
+/// - **Ordering**: result slot `i` corresponds to input pair `i`, so callers
+///   iterating the D2H'd buffer in order preserve the `write_scalar` absorb
+///   order.
+pub fn batch_eval_polynomial_device_out<F: Field>(
+    d_polys: &[&DeviceBuffer<F>],
+    eval_points: &[F],
+) -> Result<DeviceBuffer<F>, HaloGpuError> {
+    crate::perf_section!("batch_eval_polynomial_device_out");
+    assert_eq!(d_polys.len(), eval_points.len());
+    let n = d_polys.len();
+    assert!(
+        n > 0,
+        "batch_eval_polynomial_device_out: empty batch (DeviceBuffer alloc requires n >= 1)"
+    );
+    ensure_current_device_matches_ctx()?;
+
+    let elt_bytes = mem::size_of::<F>();
+    let d_out = DeviceBuffer::<F>::with_capacity_on(n, &HALO2_GPU_CTX);
+
+    for (i, (d_poly, point)) in d_polys.iter().zip(eval_points.iter()).enumerate() {
+        debug_assert!(
+            !d_poly.is_empty(),
+            "batch_eval_polynomial_device_out: zero-length poly (Horner kernel undefined)"
+        );
+        let len = d_poly.len();
+        let point_obj = FFITraitObject::from_ref(point);
+        let scratch_bytes = unsafe { _halo2_eval_polynomial_workspace_size(len as u64) } as usize;
+        let scratch = DeviceBuffer::<u8>::with_capacity_on(scratch_bytes, &HALO2_GPU_CTX);
+
+        let mut d_result_ptr: *mut libc::c_void = std::ptr::null_mut();
+        let status = unsafe {
+            _halo2_eval_polynomial(
+                d_poly.as_raw_ptr(),
+                &point_obj,
+                &mut d_result_ptr,
+                len,
+                scratch.as_mut_raw_ptr(),
+                scratch_bytes as u64,
+                HALO2_GPU_CTX.stream.as_raw(),
+            )
+        };
+        if status.code != 0 {
+            return Err(status.into());
+        }
+
+        // Device-to-device copy of the 32-byte result into slot `i`. Enqueued
+        // on the stream before `scratch` drops, so it reads the result before
+        // the scratch block's (stream-ordered) async free.
+        let dst =
+            unsafe { (d_out.as_mut_raw_ptr() as *mut u8).add(i * elt_bytes) } as *mut libc::c_void;
+        unsafe {
+            cuda_memcpy_on::<true, true>(
+                dst,
+                d_result_ptr as *const libc::c_void,
+                elt_bytes,
+                &HALO2_GPU_CTX,
+            )?;
+        }
+    }
+
+    Ok(d_out)
+}
+
+/// Device-input batch evaluation with a **single batched D2H**. Evaluates
+/// every `(d_poly, point)` pair on device via
+/// [`batch_eval_polynomial_device_out`] (no per-eval sync), then copies the
+/// whole result buffer to `eval_result` in one D2H + one `to_host_sync`. No
+/// H2D of polynomial coefficients — the device buffers stay caller-owned and
+/// resident. Replaces the former per-eval loop (one 32-byte D2H +
+/// `to_host_sync` each) with a single transfer.
 pub fn batch_eval_polynomial_d2h<F: Field>(
     d_polys: &[&DeviceBuffer<F>],
     eval_points: &[F],
@@ -140,9 +220,24 @@ pub fn batch_eval_polynomial_d2h<F: Field>(
     crate::perf_section!("batch_eval_polynomial_device");
     assert_eq!(d_polys.len(), eval_points.len());
     assert_eq!(d_polys.len(), eval_result.len());
-    for (i, (d_poly, point)) in d_polys.iter().zip(eval_points.iter()).enumerate() {
-        eval_result[i] = eval_polynomial_device(d_poly, *point)?;
+    if d_polys.is_empty() {
+        return Ok(());
     }
+
+    let d_out = batch_eval_polynomial_device_out(d_polys, eval_points)?;
+    let bytes = mem::size_of_val(eval_result);
+    // One batched D2H of the whole eval buffer (was one synced 32-byte D2H per
+    // eval). Counted so the perf/nsys workflow sees this PR's D2H reduction.
+    crate::perf_d2h!("cuda.batch_eval_polynomial_device.result", bytes);
+    unsafe {
+        cuda_memcpy_on::<true, false>(
+            eval_result.as_mut_ptr() as *mut libc::c_void,
+            d_out.as_raw_ptr(),
+            bytes,
+            &HALO2_GPU_CTX,
+        )?;
+    }
+    HALO2_GPU_CTX.stream.to_host_sync()?;
     Ok(())
 }
 
