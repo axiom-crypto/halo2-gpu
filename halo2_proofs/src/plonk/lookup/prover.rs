@@ -45,9 +45,9 @@ use std::{
 
 #[derive(Debug)]
 pub(in crate::plonk) struct Permuted<C: CurveAffine> {
-    pub(in crate::plonk) compressed_input_expression: Polynomial<C::Scalar, LagrangeCoeff>,
+    pub(in crate::plonk) compressed_input_expression: MaybeDevice<C::Scalar, LagrangeCoeff>,
     pub(in crate::plonk) permuted_input_expression: MaybeDevice<C::Scalar, LagrangeCoeff>,
-    pub(in crate::plonk) compressed_table_expression: Polynomial<C::Scalar, LagrangeCoeff>,
+    pub(in crate::plonk) compressed_table_expression: MaybeDevice<C::Scalar, LagrangeCoeff>,
     pub(in crate::plonk) permuted_table_expression: MaybeDevice<C::Scalar, LagrangeCoeff>,
 }
 
@@ -197,40 +197,20 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
             permuted_input_expression,
             permuted_table_expression,
         ) = if let Some((d_ci, d_ct, d_pi, d_pt)) = fused_device {
-            // `lookup_product_gpu` (called in `commit_product`) takes host
-            // slices for the compressed pair; D2H here at the producer
-            // boundary keeps that consumer signature untouched while the
-            // permuted pair stays device-resident. Both copies queue on
-            // the canonical stream back-to-back and share a single sync.
-            let mut compressed_input_host: Vec<C::Scalar> = Vec::with_capacity(d_ci.len());
-            let mut compressed_table_host: Vec<C::Scalar> = Vec::with_capacity(d_ct.len());
-            unsafe {
-                compressed_input_host.set_len(d_ci.len());
-                compressed_table_host.set_len(d_ct.len());
-                let bytes_ci = std::mem::size_of::<C::Scalar>() * d_ci.len();
-                let bytes_ct = std::mem::size_of::<C::Scalar>() * d_ct.len();
-                cuda_memcpy_on::<true, false>(
-                    compressed_input_host.as_mut_ptr() as *mut libc::c_void,
-                    d_ci.as_raw_ptr(),
-                    bytes_ci,
-                    &HALO2_GPU_CTX,
-                )
-                .map_err(HaloGpuError::from)?;
-                cuda_memcpy_on::<true, false>(
-                    compressed_table_host.as_mut_ptr() as *mut libc::c_void,
-                    d_ct.as_raw_ptr(),
-                    bytes_ct,
-                    &HALO2_GPU_CTX,
-                )
-                .map_err(HaloGpuError::from)?;
-            }
-            HALO2_GPU_CTX
-                .stream
-                .to_host_sync()
-                .map_err(HaloGpuError::from)?;
+            // All four device-fused buffers stay device-resident. The
+            // compressed pair (`d_ci`/`d_ct`) is carried as
+            // `MaybeDevice::Device` alongside the permuted pair; `commit_product`
+            // consumes both straight from their `DeviceBuffer`s via
+            // `lookup_product_device` (already `&DeviceBuffer`-typed), so there
+            // is no producer D2H nor consumer H2D round-trip on the compressed
+            // pair.
             (
-                pk.domain.lagrange_from_vec(compressed_input_host),
-                pk.domain.lagrange_from_vec(compressed_table_host),
+                MaybeDevice::Device(Polynomial::<C::Scalar, LagrangeCoeff, Device>::from_device(
+                    d_ci,
+                )),
+                MaybeDevice::Device(Polynomial::<C::Scalar, LagrangeCoeff, Device>::from_device(
+                    d_ct,
+                )),
                 MaybeDevice::Device(Polynomial::<C::Scalar, LagrangeCoeff, Device>::from_device(
                     d_pi,
                 )),
@@ -264,8 +244,8 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
             end_timer!(permute_time);
 
             (
-                compressed_input_expression,
-                compressed_table_expression,
+                MaybeDevice::Host(compressed_input_expression),
+                MaybeDevice::Host(compressed_table_expression),
                 MaybeDevice::Host(permuted_input_expression),
                 MaybeDevice::Host(permuted_table_expression),
             )
@@ -378,25 +358,42 @@ impl<C: CurveAffine> Permuted<C> {
                 }
             };
 
-            // compressed_*_expression is host-resident in the `Permuted`
-            // carrier, so each compressed side is uploaded with one H2D
-            // before the device-pointer launcher is invoked.
-            let d_compressed_input = self
-                .compressed_input_expression
-                .values()
-                .to_device_on(&HALO2_GPU_CTX)
-                .map_err(HaloGpuError::from)?;
-            let d_compressed_table = self
-                .compressed_table_expression
-                .values()
-                .to_device_on(&HALO2_GPU_CTX)
-                .map_err(HaloGpuError::from)?;
+            // The compressed pair follows the same residency dispatch as the
+            // permuted pair: the Device arm (common device-fused path) borrows
+            // the existing `DeviceBuffer<F>` with zero copy; the Host fallback
+            // H2D's the host slice into a fresh `DeviceBuffer<F>` bound to this
+            // scope. This deletes the pre-C3 producer D2H + consumer H2D
+            // round-trip on the compressed pair.
+            let compressed_input_owned: DeviceBuffer<C::Scalar>;
+            let d_compressed_input: &DeviceBuffer<C::Scalar> =
+                match &self.compressed_input_expression {
+                    MaybeDevice::Device(p) => p.device_buf(),
+                    MaybeDevice::Host(p) => {
+                        compressed_input_owned = p
+                            .values()
+                            .to_device_on(&HALO2_GPU_CTX)
+                            .map_err(HaloGpuError::from)?;
+                        &compressed_input_owned
+                    }
+                };
+            let compressed_table_owned: DeviceBuffer<C::Scalar>;
+            let d_compressed_table: &DeviceBuffer<C::Scalar> =
+                match &self.compressed_table_expression {
+                    MaybeDevice::Device(p) => p.device_buf(),
+                    MaybeDevice::Host(p) => {
+                        compressed_table_owned = p
+                            .values()
+                            .to_device_on(&HALO2_GPU_CTX)
+                            .map_err(HaloGpuError::from)?;
+                        &compressed_table_owned
+                    }
+                };
 
             lookup_product_device(
                 d_permuted_input,
                 d_permuted_table,
-                &d_compressed_input,
-                &d_compressed_table,
+                d_compressed_input,
+                d_compressed_table,
                 *beta,
                 *gamma,
             )?
