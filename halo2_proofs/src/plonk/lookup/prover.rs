@@ -4,7 +4,8 @@ use super::super::{
 };
 use super::Argument;
 use crate::cuda::funcs::{
-    grand_product_device, lookup_product_device, permute_expression_pair_device, ColumnPool,
+    batch_eval_polynomial_d2h, grand_product_device, lookup_product_device,
+    permute_expression_pair_device, ColumnPool,
 };
 use crate::cuda::utils::HALO2_GPU_CTX;
 use crate::cuda::HaloGpuError;
@@ -15,8 +16,8 @@ use crate::{
     arithmetic::CurveAffine,
     poly::{
         commitment::{Blind, Params},
-        Coeff, Device, DevicePolyExt, EvaluationDomain, LagrangeCoeff, MaybeDevice, PolyEvalAt,
-        Polynomial, ProverQuery, Rotation,
+        Coeff, Device, DevicePolyExt, EvaluationDomain, LagrangeCoeff, MaybeDevice, Polynomial,
+        ProverQuery, Rotation,
     },
     transcript::{EncodedChallenge, TranscriptWrite},
 };
@@ -475,41 +476,26 @@ impl<C: CurveAffine> CommittedUnpacked<C> {
         let x_inv = domain.rotate_omega(*x, Rotation::prev());
         let x_next = domain.rotate_omega(*x, Rotation::next());
 
-        // Storage-agnostic eval via `Polynomial::eval_at`. The host
-        // arm runs rayon CPU Horner; the device arm dispatches to the
-        // device-input Horner FFI when the polynomial is
-        // device-resident.
-        let (
-            product_eval,
-            product_next_eval,
-            permuted_input_eval,
-            permuted_input_inv_eval,
-            permuted_table_eval,
-        ) = {
-            crate::perf_section!("lookup.evaluate.eval_at_block");
-            let product_eval = self.product_poly.eval_at(*x);
-            let product_next_eval = self.product_poly.eval_at(x_next);
-            let permuted_input_eval = self.permuted_input_poly.eval_at(*x);
-            let permuted_input_inv_eval = self.permuted_input_poly.eval_at(x_inv);
-            let permuted_table_eval = self.permuted_table_poly.eval_at(*x);
-            (
-                product_eval,
-                product_next_eval,
-                permuted_input_eval,
-                permuted_input_inv_eval,
-                permuted_table_eval,
-            )
-        };
-
-        // Hash each advice evaluation
-        for eval in iter::empty()
-            .chain(Some(product_eval))
-            .chain(Some(product_next_eval))
-            .chain(Some(permuted_input_eval))
-            .chain(Some(permuted_input_inv_eval))
-            .chain(Some(permuted_table_eval))
+        // All five lookup polys are device-resident. Collect them with their
+        // eval points in the exact `write_scalar` order, then do ONE
+        // device-out batch eval + ONE batched D2H — was five synced 32-byte
+        // D2Hs (one per `.eval_at()`). Order: product@x, product@x_next,
+        // permuted_input@x, permuted_input@x_inv, permuted_table@x.
         {
-            transcript.write_scalar(eval)?;
+            crate::perf_section!("lookup.evaluate.eval_at_block");
+            let d_polys: [&DeviceBuffer<C::Scalar>; 5] = [
+                self.product_poly.device_buf(),
+                self.product_poly.device_buf(),
+                self.permuted_input_poly.device_buf(),
+                self.permuted_input_poly.device_buf(),
+                self.permuted_table_poly.device_buf(),
+            ];
+            let eval_points = [*x, x_next, *x, x_inv, *x];
+            let mut evals = [C::Scalar::ZERO; 5];
+            batch_eval_polynomial_d2h(&d_polys, &eval_points, &mut evals)?;
+            for eval in evals {
+                transcript.write_scalar(eval)?;
+            }
         }
 
         Ok(Evaluated {

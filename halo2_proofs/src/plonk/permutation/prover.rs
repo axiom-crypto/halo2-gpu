@@ -7,19 +7,19 @@ use log::info;
 use openvm_cuda_common::copy::{cuda_memcpy_on, MemCopyH2D};
 use openvm_cuda_common::d_buffer::DeviceBuffer;
 use rand_core::RngCore;
-use std::iter::{self, ExactSizeIterator};
+use std::iter;
 
 use super::super::{circuit::GpuAny, ChallengeBeta, ChallengeGamma, ChallengeX};
 use super::Argument;
 use crate::{
     arithmetic::CurveAffine,
-    cuda::funcs::{grand_product_device, permutation_product_device},
+    cuda::funcs::{batch_eval_polynomial_d2h, grand_product_device, permutation_product_device},
     cuda::utils::{FFITraitObject, HALO2_GPU_CTX},
     cuda::HaloGpuError,
     plonk::{self, GpuError},
     poly::{
         commitment::{Blind, Params},
-        Coeff, Device, DevicePolyExt, LagrangeCoeff, PolyEvalAt, Polynomial, ProverQuery, Rotation,
+        Coeff, Device, DevicePolyExt, LagrangeCoeff, Polynomial, ProverQuery, Rotation,
     },
     transcript::{EncodedChallenge, TranscriptWrite},
 };
@@ -308,33 +308,36 @@ impl<C: CurveAffine> Constructed<C> {
         let blinding_factors = pk.cs.blinding_factors();
 
         {
-            let mut sets = self.sets.iter();
+            crate::perf_section!("permutation.evaluate.eval_at_loop");
+            // Collect (device poly, point) pairs in the exact `write_scalar`
+            // order, then do ONE device-out batch eval + ONE batched D2H (was:
+            // a synced 32-byte D2H per `.eval_at()`). Order per set:
+            // product@x, product@x_next, and — for every set except the last —
+            // product@x^{-(blinding+1)} to chain each set's last running-product
+            // value to the next set's first.
+            let x_next = domain.rotate_omega(*x, Rotation::next());
+            let x_last = domain.rotate_omega(*x, Rotation(-((blinding_factors + 1) as i32)));
+            let num_sets = self.sets.len();
 
-            while let Some(set) = sets.next() {
-                crate::perf_section!("permutation.evaluate.eval_at_loop");
-                let permutation_product_eval = set.permutation_product_poly.eval_at(*x);
-
-                let permutation_product_next_eval = set
-                    .permutation_product_poly
-                    .eval_at(domain.rotate_omega(*x, Rotation::next()));
-
-                // Hash permutation product evals
-                for eval in iter::empty()
-                    .chain(Some(&permutation_product_eval))
-                    .chain(Some(&permutation_product_next_eval))
-                {
-                    transcript.write_scalar(*eval)?;
+            let mut d_polys: Vec<&DeviceBuffer<C::Scalar>> = Vec::with_capacity(3 * num_sets);
+            let mut eval_points: Vec<C::Scalar> = Vec::with_capacity(3 * num_sets);
+            for (i, set) in self.sets.iter().enumerate() {
+                let d = set.permutation_product_poly.device_buf();
+                d_polys.push(d);
+                eval_points.push(*x);
+                d_polys.push(d);
+                eval_points.push(x_next);
+                if i + 1 < num_sets {
+                    d_polys.push(d);
+                    eval_points.push(x_last);
                 }
+            }
 
-                // If we have any remaining sets to process, evaluate this set at omega^u
-                // so we can constrain the last value of its running product to equal the
-                // first value of the next set's running product, chaining them together.
-                if sets.len() > 0 {
-                    let permutation_product_last_eval = set.permutation_product_poly.eval_at(
-                        domain.rotate_omega(*x, Rotation(-((blinding_factors + 1) as i32))),
-                    );
-
-                    transcript.write_scalar(permutation_product_last_eval)?;
+            if !d_polys.is_empty() {
+                let mut evals = vec![C::Scalar::ZERO; d_polys.len()];
+                batch_eval_polynomial_d2h(&d_polys, &eval_points, &mut evals)?;
+                for eval in evals {
+                    transcript.write_scalar(eval)?;
                 }
             }
         }
