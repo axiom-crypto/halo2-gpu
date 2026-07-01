@@ -93,10 +93,8 @@ pub(crate) fn extended_from_lagrange_vec_device<F>(
     // host-resident; each element points at a device buffer) and H2D
     // it into a throwaway device buffer.
     let ptrs_device: Vec<*const c_void> = d_parts.iter().map(|b| b.as_raw_ptr()).collect();
-    let d_ptr_table = ptrs_device
-        .as_slice()
-        .to_device_on(&HALO2_GPU_CTX)
-        .map_err(HaloGpuError::from)?;
+    let d_ptr_table =
+        ptrs_device.as_slice().to_device_on(&HALO2_GPU_CTX).map_err(HaloGpuError::from)?;
     let status = unsafe {
         _halo2_extended_from_lagrange_vec_device(
             d_out.as_mut_raw_ptr(),
@@ -124,9 +122,7 @@ pub(crate) fn distribute_powers_zeta_device<F>(
 ) -> Result<(), HaloGpuError> {
     crate::perf_section!("distribute_powers_zeta_device");
     ensure_current_device_matches_ctx()?;
-    let d_coset_powers = coset_powers
-        .to_device_on(&HALO2_GPU_CTX)
-        .map_err(HaloGpuError::from)?;
+    let d_coset_powers = coset_powers.to_device_on(&HALO2_GPU_CTX).map_err(HaloGpuError::from)?;
     let n = d_a.len() as u64;
     let status = unsafe {
         _halo2_distribute_powers_zeta(
@@ -333,19 +329,14 @@ pub(crate) fn cosetfft_many_h2d<F>(
     // true output shape exactly.
     let coset_fft_id = NttType::CosetFFT as u32;
     let icoset_fft_id = NttType::iCosetFFT as u32;
-    let output_log_n = if ntt_type == coset_fft_id || ntt_type == icoset_fft_id {
-        extend_log_n
-    } else {
-        log_n
-    };
+    let output_log_n =
+        if ntt_type == coset_fft_id || ntt_type == icoset_fft_id { extend_log_n } else { log_n };
     let output_len = 1usize << output_log_n;
     let out_bufs: Vec<DeviceBuffer<F>> = (0..num_many)
         .map(|_| DeviceBuffer::<F>::with_capacity_on(output_len, &HALO2_GPU_CTX))
         .collect();
-    let out_objs: Vec<FFITraitObject> = out_bufs
-        .iter()
-        .map(|b| FFITraitObject::new(b.as_raw_ptr() as usize))
-        .collect();
+    let out_objs: Vec<FFITraitObject> =
+        out_bufs.iter().map(|b| FFITraitObject::new(b.as_raw_ptr() as usize)).collect();
 
     let omega_device = std::slice::from_ref(&omega).to_device_on(&HALO2_GPU_CTX)?;
     let divisor_obj = FFITraitObject::from_ref(&divisor);
@@ -396,19 +387,14 @@ pub(crate) fn cosetfft_many_device<F>(
 
     let coset_fft_id = NttType::CosetFFT as u32;
     let icoset_fft_id = NttType::iCosetFFT as u32;
-    let output_log_n = if ntt_type == coset_fft_id || ntt_type == icoset_fft_id {
-        extend_log_n
-    } else {
-        log_n
-    };
+    let output_log_n =
+        if ntt_type == coset_fft_id || ntt_type == icoset_fft_id { extend_log_n } else { log_n };
     let output_len = 1usize << output_log_n;
     let out_bufs: Vec<DeviceBuffer<F>> = (0..num_many)
         .map(|_| DeviceBuffer::<F>::with_capacity_on(output_len, &HALO2_GPU_CTX))
         .collect();
-    let out_objs: Vec<FFITraitObject> = out_bufs
-        .iter()
-        .map(|b| FFITraitObject::new(b.as_raw_ptr() as usize))
-        .collect();
+    let out_objs: Vec<FFITraitObject> =
+        out_bufs.iter().map(|b| FFITraitObject::new(b.as_raw_ptr() as usize)).collect();
 
     let omega_device = std::slice::from_ref(&omega).to_device_on(&HALO2_GPU_CTX)?;
     let divisor_obj = FFITraitObject::from_ref(&divisor);
@@ -543,17 +529,12 @@ where
         return Ok(vec![]);
     }
     let n = 1usize << log_n;
-    let in_objs: Vec<FFITraitObject> = in_many
-        .iter()
-        .map(|p| FFITraitObject::from_slice(p.values()))
-        .collect();
-    let out_bufs: Vec<DeviceBuffer<F>> = (0..num_many)
-        .map(|_| DeviceBuffer::<F>::with_capacity_on(n, &HALO2_GPU_CTX))
-        .collect();
-    let out_objs: Vec<FFITraitObject> = out_bufs
-        .iter()
-        .map(|b| FFITraitObject::new(b.as_raw_ptr() as usize))
-        .collect();
+    let in_objs: Vec<FFITraitObject> =
+        in_many.iter().map(|p| FFITraitObject::from_slice(p.values())).collect();
+    let out_bufs: Vec<DeviceBuffer<F>> =
+        (0..num_many).map(|_| DeviceBuffer::<F>::with_capacity_on(n, &HALO2_GPU_CTX)).collect();
+    let out_objs: Vec<FFITraitObject> =
+        out_bufs.iter().map(|b| FFITraitObject::new(b.as_raw_ptr() as usize)).collect();
     let omega_device = std::slice::from_ref(&omega).to_device_on(&HALO2_GPU_CTX)?;
     let divisor_obj = FFITraitObject::from_ref(&divisor);
     let ntt_type = crate::poly::NttType::iFFT as u32;
@@ -617,13 +598,10 @@ where
         return Ok(vec![]);
     }
     let n = 1usize << log_n;
-    let out_bufs: Vec<DeviceBuffer<F>> = (0..num_many)
-        .map(|_| DeviceBuffer::<F>::with_capacity_on(n, &HALO2_GPU_CTX))
-        .collect();
-    let out_objs: Vec<FFITraitObject> = out_bufs
-        .iter()
-        .map(|b| FFITraitObject::new(b.as_raw_ptr() as usize))
-        .collect();
+    let out_bufs: Vec<DeviceBuffer<F>> =
+        (0..num_many).map(|_| DeviceBuffer::<F>::with_capacity_on(n, &HALO2_GPU_CTX)).collect();
+    let out_objs: Vec<FFITraitObject> =
+        out_bufs.iter().map(|b| FFITraitObject::new(b.as_raw_ptr() as usize)).collect();
     let omega_device = std::slice::from_ref(&omega).to_device_on(&HALO2_GPU_CTX)?;
     let divisor_obj = FFITraitObject::from_ref(&divisor);
     let ntt_type = NttType::iFFT as u32;

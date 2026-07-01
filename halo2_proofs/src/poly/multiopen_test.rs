@@ -124,11 +124,7 @@ mod test {
             .chain(Some(VerifierQuery::new_commitment(&b, x.get_scalar(), avx)))
             .chain(Some(VerifierQuery::new_commitment(&c, y.get_scalar(), cvy)));
 
-        let queries = if should_fail {
-            invalid_queries.clone()
-        } else {
-            valid_queries.clone()
-        };
+        let queries = if should_fail { invalid_queries.clone() } else { valid_queries.clone() };
 
         {
             let strategy = Strategy::new(params);
@@ -156,7 +152,8 @@ mod test {
     where
         Scheme::Scalar: WithSmallOrderMulGroup<3>,
     {
-        let domain = EvaluationDomain::new(1, params.k());
+        let domain = halo2_axiom::poly::EvaluationDomain::new(1, params.k());
+        let domain = EvaluationDomain::from_host_domain(&domain);
 
         let mut ax = domain.empty_coeff();
         for (i, a) in ax.iter_mut().enumerate() {
@@ -215,9 +212,7 @@ mod test {
         .to_vec();
 
         let prover = P::new(params);
-        prover
-            .create_proof(&mut OsRng, &mut transcript, queries)
-            .unwrap();
+        prover.create_proof(&mut OsRng, &mut transcript, queries).unwrap();
 
         transcript.finalize()
     }

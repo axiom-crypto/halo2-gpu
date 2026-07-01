@@ -42,16 +42,10 @@ fn run_one(log_n: u32) {
         )
         .expect("D2H for poly_multiply_add test");
     }
-    HALO2_GPU_CTX
-        .stream
-        .to_host_sync()
-        .expect("stream sync after D2H");
+    HALO2_GPU_CTX.stream.to_host_sync().expect("stream sync after D2H");
 
     for (i, (e, a)) in expected.iter().zip(actual.iter()).enumerate() {
-        assert_eq!(
-            e, a,
-            "poly_multiply_add_device byte mismatch at log_n={log_n}, idx={i}"
-        );
+        assert_eq!(e, a, "poly_multiply_add_device byte mismatch at log_n={log_n}, idx={i}");
     }
 }
 

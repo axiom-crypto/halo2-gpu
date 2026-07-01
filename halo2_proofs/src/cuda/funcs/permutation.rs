@@ -298,22 +298,13 @@ pub fn permutation_quotient_gpu<F: WithSmallOrderMulGroup<3>>(
         assert_eq!(s.len(), length);
     }
 
-    crate::perf_h2d!(
-        "cuda.permutation_quotient_gpu.values()",
-        mem::size_of_val(values)
-    );
+    crate::perf_h2d!("cuda.permutation_quotient_gpu.values()", mem::size_of_val(values));
     let values_device = values.to_device_on(&HALO2_GPU_CTX)?;
     crate::perf_h2d!("cuda.permutation_quotient_gpu.l0", mem::size_of_val(l0));
     let l0_device = l0.to_device_on(&HALO2_GPU_CTX)?;
-    crate::perf_h2d!(
-        "cuda.permutation_quotient_gpu.l_last",
-        mem::size_of_val(l_last)
-    );
+    crate::perf_h2d!("cuda.permutation_quotient_gpu.l_last", mem::size_of_val(l_last));
     let l_last_device = l_last.to_device_on(&HALO2_GPU_CTX)?;
-    crate::perf_h2d!(
-        "cuda.permutation_quotient_gpu.l_active_row",
-        mem::size_of_val(l_active_row)
-    );
+    crate::perf_h2d!("cuda.permutation_quotient_gpu.l_active_row", mem::size_of_val(l_active_row));
     let l_active_row_device = l_active_row.to_device_on(&HALO2_GPU_CTX)?;
 
     // The permutation kernel reads `perm_prod_cosets` and `perm_cosets`
@@ -350,10 +341,8 @@ pub fn permutation_quotient_gpu<F: WithSmallOrderMulGroup<3>>(
         "cuda.permutation_quotient_gpu.column_values",
         column_values.len() * length * mem::size_of::<F>()
     );
-    let column_value_devs: Vec<DeviceBuffer<F>> = column_values
-        .iter()
-        .map(|s| s.to_device_on(&HALO2_GPU_CTX))
-        .collect::<Result<_, _>>()?;
+    let column_value_devs: Vec<DeviceBuffer<F>> =
+        column_values.iter().map(|s| s.to_device_on(&HALO2_GPU_CTX)).collect::<Result<_, _>>()?;
     let column_value_ptrs_device: Vec<*const c_void> =
         column_value_devs.iter().map(|b| b.as_raw_ptr()).collect();
 

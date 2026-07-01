@@ -132,14 +132,7 @@ impl<'params, C: CurveAffine> Params<'params, C> for ParamsIPA<C> {
         let w = C::read(reader)?;
         let u = C::read(reader)?;
 
-        Ok(Self {
-            k,
-            n,
-            g,
-            g_lagrange,
-            w,
-            u,
-        })
+        Ok(Self { k, n, g, g_lagrange, w, u })
     }
 }
 
@@ -197,14 +190,7 @@ impl<'params, C: CurveAffine> ParamsProver<'params, C> for ParamsIPA<C> {
         let w = hasher(&[1]).to_affine();
         let u = hasher(&[2]).to_affine();
 
-        ParamsIPA {
-            k,
-            n,
-            g,
-            g_lagrange,
-            w,
-            u,
-        }
+        ParamsIPA { k, n, g, g_lagrange, w, u }
     }
 
     /// This computes a commitment to a polynomial described by the provided
@@ -259,7 +245,8 @@ mod test {
         use halo2curves::pasta::{EpAffine, Fq};
 
         let params = ParamsIPA::<EpAffine>::new(K);
-        let domain = EvaluationDomain::new(1, K);
+        let domain = halo2_axiom::poly::EvaluationDomain::new(1, K);
+        let domain = EvaluationDomain::from_host_domain(&domain);
 
         let mut a = domain.empty_lagrange();
 
@@ -287,7 +274,8 @@ mod test {
         use halo2curves::pasta::{EqAffine, Fp};
 
         let params: ParamsIPA<EqAffine> = ParamsIPA::<EqAffine>::new(K);
-        let domain = EvaluationDomain::new(1, K);
+        let domain = halo2_axiom::poly::EvaluationDomain::new(1, K);
+        let domain = EvaluationDomain::from_host_domain(&domain);
 
         let mut a = domain.empty_lagrange();
 
@@ -327,7 +315,8 @@ mod test {
         <ParamsIPA<_> as Params<_>>::write(&params, &mut params_buffer).unwrap();
         let params: ParamsIPA<EpAffine> = Params::read::<_>(&mut &params_buffer[..]).unwrap();
 
-        let domain = EvaluationDomain::new(1, K);
+        let domain = halo2_axiom::poly::EvaluationDomain::new(1, K);
+        let domain = EvaluationDomain::from_host_domain(&domain);
 
         let mut px = domain.empty_coeff();
 

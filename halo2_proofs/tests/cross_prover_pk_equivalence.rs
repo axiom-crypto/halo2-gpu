@@ -58,10 +58,7 @@ impl Circuit<Fr> for MulCircuit {
     type Params = ();
 
     fn without_witnesses(&self) -> Self {
-        Self {
-            public: Value::unknown(),
-            b: Value::unknown(),
-        }
+        Self { public: Value::unknown(), b: Value::unknown() }
     }
 
     fn configure(meta: &mut ConstraintSystem<Fr>) -> MulConfig {
@@ -82,13 +79,7 @@ impl Circuit<Fr> for MulCircuit {
             vec![q * (a * b - c)]
         });
 
-        MulConfig {
-            a,
-            b,
-            c,
-            q,
-            instance,
-        }
+        MulConfig { a, b, c, q, instance }
     }
 
     fn synthesize(&self, config: MulConfig, mut layouter: impl Layouter<Fr>) -> Result<(), Error> {
@@ -149,10 +140,7 @@ mod cpu {
         type Params = ();
 
         fn without_witnesses(&self) -> Self {
-            Self {
-                public: Value::unknown(),
-                b: Value::unknown(),
-            }
+            Self { public: Value::unknown(), b: Value::unknown() }
         }
 
         fn configure(meta: &mut ConstraintSystem<Fr>) -> MulConfig {
@@ -173,13 +161,7 @@ mod cpu {
                 vec![q * (a * b - c)]
             });
 
-            MulConfig {
-                a,
-                b,
-                c,
-                q,
-                instance,
-            }
+            MulConfig { a, b, c, q, instance }
         }
 
         fn synthesize(
@@ -213,10 +195,7 @@ mod cpu {
         let params =
             ParamsKZG::<Bn256>::read_custom(&mut &srs_bytes[..], SerdeFormat::RawBytesUnchecked)
                 .expect("read shared SRS into halo2-axiom ParamsKZG");
-        let circuit = MulCircuit {
-            public: Value::unknown(),
-            b: Value::unknown(),
-        };
+        let circuit = MulCircuit { public: Value::unknown(), b: Value::unknown() };
         let vk = keygen_vk(&params, &circuit).expect("cpu keygen_vk");
         keygen_pk(&params, vk, &circuit).expect("cpu keygen_pk")
     }
@@ -256,10 +235,7 @@ fn cross_prover_pk_bytes_equivalence() {
     let gpu_params = ParamsKZG::<Bn256>::setup(K, OsRng);
     let mut srs_bytes = Vec::new();
     gpu_params
-        .write_custom(
-            &mut srs_bytes,
-            halo2_axiom_gpu::SerdeFormat::RawBytesUnchecked,
-        )
+        .write_custom(&mut srs_bytes, halo2_axiom_gpu::SerdeFormat::RawBytesUnchecked)
         .expect("write shared SRS");
 
     // 2. Canonical CPU keygen on the shared SRS, then serialize the pk.
@@ -269,7 +245,7 @@ fn cross_prover_pk_bytes_equivalence() {
 
     // 3. Serde-identity guard: wrapping the CPU pk in a GpuProvingKey serializes
     //    to byte-identical output.
-    let gpk_guard = GpuProvingKey::<G1Affine>::from_host(cpu_pk.clone());
+    let gpk_guard = GpuProvingKey::<G1Affine>::from_host(&cpu_pk);
     assert_eq!(
         gpk_guard.to_bytes(fmt),
         bytes,
@@ -291,10 +267,7 @@ fn cross_prover_pk_bytes_equivalence() {
     // GPU prove with concrete witnesses: public = 7, b = 3, c = 21.
     let public = Fr::from(7);
     let b = Fr::from(3);
-    let circuit = MulCircuit {
-        public: Value::known(public),
-        b: Value::known(b),
-    };
+    let circuit = MulCircuit { public: Value::known(public), b: Value::known(b) };
     let pubinputs = [public];
     let instances: &[&[&[Fr]]] = &[&[&pubinputs[..]]];
 

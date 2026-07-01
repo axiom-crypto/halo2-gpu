@@ -106,10 +106,7 @@ impl Argument {
         info!("domain.k() = {}", domain.k());
         info!("domain.extended_k() = {}", domain.extended_k());
         info!("columns.len() = {}", self.columns.len());
-        info!(
-            "pkey.permutations.len() = {}",
-            pk.inner.permutation().permutations().len()
-        );
+        info!("pkey.permutations.len() = {}", pk.inner.permutation().permutations().len());
         info!("chunk_len = {}", chunk_len);
 
         let n = params.n() as usize;
@@ -124,10 +121,8 @@ impl Argument {
         let modified_values_bytes = n * scalar_bytes;
         let acc_len = n - blinding_factors;
 
-        for (columns, permutations_chunk) in self
-            .columns
-            .chunks(chunk_len)
-            .zip(permutations_device.chunks(chunk_len))
+        for (columns, permutations_chunk) in
+            self.columns.chunks(chunk_len).zip(permutations_device.chunks(chunk_len))
         {
             // Goal is to compute the products of fractions
             //
@@ -232,9 +227,8 @@ impl Argument {
 
             // Host-RNG blinding factors, uploaded with a single tail H2D so the
             // n-element accumulator stays device-resident.
-            let host_blind: Vec<C::Scalar> = (0..blinding_factors)
-                .map(|_| C::Scalar::random(&mut rng))
-                .collect();
+            let host_blind: Vec<C::Scalar> =
+                (0..blinding_factors).map(|_| C::Scalar::random(&mut rng)).collect();
             unsafe {
                 cuda_memcpy_on::<false, true>(
                     (d_z.as_mut_raw_ptr() as *mut u8).add(acc_len * scalar_bytes)
@@ -258,24 +252,17 @@ impl Argument {
                 )
                 .map_err(HaloGpuError::from)?;
             }
-            HALO2_GPU_CTX
-                .stream
-                .to_host_sync()
-                .map_err(HaloGpuError::from)?;
+            HALO2_GPU_CTX.stream.to_host_sync().map_err(HaloGpuError::from)?;
 
             let z = Polynomial::<C::Scalar, LagrangeCoeff, Device>::from_device(d_z);
 
             // Commit Z_i(X) via device-scalars MSM, then device-input iFFT to
             // coeff form. No PCIe traffic on Z_i.
-            let commitment = params
-                .commit_lagrange_device(&z, Blind::default())
-                .to_affine();
+            let commitment = params.commit_lagrange_device(&z, Blind::default()).to_affine();
             commitments.push(commitment);
             let permutation_product_poly = domain.lagrange_to_coeff_device_input(z)?;
 
-            sets.push(CommittedSet {
-                permutation_product_poly,
-            });
+            sets.push(CommittedSet { permutation_product_poly });
         }
         drop(d_ones_template);
 
@@ -314,9 +301,8 @@ impl<C: CurveAffine> Constructed<C> {
                 crate::perf_section!("permutation.evaluate.eval_at_loop");
                 let permutation_product_eval = set.permutation_product_poly.eval_at(*x);
 
-                let permutation_product_next_eval = set
-                    .permutation_product_poly
-                    .eval_at(domain.rotate_omega(*x, Rotation::next()));
+                let permutation_product_next_eval =
+                    set.permutation_product_poly.eval_at(domain.rotate_omega(*x, Rotation::next()));
 
                 // Hash permutation product evals
                 for eval in iter::empty()
@@ -351,9 +337,7 @@ impl<C: CurveAffine> Evaluated<C> {
     ) -> impl Iterator<Item = ProverQuery<'a, C>> + Clone {
         let blinding_factors = pk.cs.blinding_factors();
         let x_next = pk.domain.rotate_omega(*x, Rotation::next());
-        let x_last = pk
-            .domain
-            .rotate_omega(*x, Rotation(-((blinding_factors + 1) as i32)));
+        let x_last = pk.domain.rotate_omega(*x, Rotation(-((blinding_factors + 1) as i32)));
 
         iter::empty()
             .chain(self.constructed.sets.iter().flat_map(move |set| {
@@ -371,18 +355,8 @@ impl<C: CurveAffine> Evaluated<C> {
             // Open it at \omega^{last} x for all but the last set. This rotation is only
             // sensical for the first row, but we only use this rotation in a constraint
             // that is gated on l_0.
-            .chain(
-                self.constructed
-                    .sets
-                    .iter()
-                    .rev()
-                    .skip(1)
-                    .flat_map(move |set| {
-                        Some(ProverQuery {
-                            point: x_last,
-                            poly: (&set.permutation_product_poly).into(),
-                        })
-                    }),
-            )
+            .chain(self.constructed.sets.iter().rev().skip(1).flat_map(move |set| {
+                Some(ProverQuery { point: x_last, poly: (&set.permutation_product_poly).into() })
+            }))
     }
 }

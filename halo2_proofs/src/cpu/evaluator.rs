@@ -24,14 +24,14 @@ use crate::{
 /// with `omega`); see the equivalence test in
 /// `cuda::tests::test_fft_normal_to_device_coset_part_vs_cpu`.
 fn coeff_to_extended_part_cpu<F: WithSmallOrderMulGroup<3>>(
-    domain: &EvaluationDomain<F>,
+    domain: &EvaluationDomain<'_, F>,
     input: &Polynomial<F, Coeff>,
     extended_omega_factor: F,
 ) -> Polynomial<F, LagrangeCoeff> {
     let log_n = domain.k();
     let n = 1usize << log_n;
     let omega = domain.get_omega();
-    let coset_shift = domain.g_coset * extended_omega_factor;
+    let coset_shift = domain.inner.g_coset * extended_omega_factor;
     let fft_data = domain.get_fft_data(n);
 
     let mut a = input.values().to_vec();
@@ -47,7 +47,7 @@ fn coeff_to_extended_part_cpu<F: WithSmallOrderMulGroup<3>>(
 /// Batched CPU equivalent of [`EvaluationDomain::coeff_to_extended_part_many_device`].
 /// See [`coeff_to_extended_part_cpu`] for the per-poly semantics.
 fn coeff_to_extended_part_many_cpu<F: WithSmallOrderMulGroup<3>>(
-    domain: &EvaluationDomain<F>,
+    domain: &EvaluationDomain<'_, F>,
     inputs: Vec<&Polynomial<F, Coeff>>,
     extended_omega_factor: F,
 ) -> Vec<Polynomial<F, LagrangeCoeff>> {
@@ -278,9 +278,7 @@ where
                         // permutation_product_poly is device-resident on the
                         // input; the D2H here is unavoidable for the CPU path.
                         let permutation_product_polys_host: Vec<Polynomial<C::Scalar, Coeff>> =
-                            sets.iter()
-                                .map(|set| set.permutation_product_poly.to_host())
-                                .collect();
+                            sets.iter().map(|set| set.permutation_product_poly.to_host()).collect();
 
                         let column_values_cold: Vec<&[C::Scalar]> = p
                             .columns
@@ -304,10 +302,7 @@ where
                         );
 
                         let permutation_product_coset_slices: Vec<&[C::Scalar]> =
-                            permutation_product_cosets
-                                .iter()
-                                .map(|p| p.values())
-                                .collect();
+                            permutation_product_cosets.iter().map(|p| p.values()).collect();
                         let permutation_coset_slices: Vec<&[C::Scalar]> =
                             permutation_cosets.iter().map(|p| p.values()).collect();
 
@@ -429,7 +424,8 @@ mod tests {
         let n = 1usize << k;
         let n_polys = 5;
 
-        let domain = EvaluationDomain::<Fr>::new(j, k);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(j, k);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let mut rng = ChaCha20Rng::seed_from_u64(0xC0FFEE);
 
         let host_polys: Vec<Polynomial<Fr, Coeff>> = (0..n_polys)
@@ -451,11 +447,7 @@ mod tests {
             assert_eq!(cpu_out.len(), gpu_out.len(), "part {part_idx}");
             for (i, (cpu, gpu_buf)) in cpu_out.iter().zip(gpu_out.iter()).enumerate() {
                 let gpu_host: Vec<Fr> = gpu_buf.to_host_on(&HALO2_GPU_CTX).unwrap();
-                assert_eq!(
-                    cpu.values(),
-                    gpu_host.as_slice(),
-                    "part {part_idx} poly {i}"
-                );
+                assert_eq!(cpu.values(), gpu_host.as_slice(), "part {part_idx} poly {i}");
             }
             factor *= extended_omega;
         }
@@ -573,11 +565,7 @@ mod test_eval {
             // both `n_perm_cols <= n_sets * chunk_len` and
             // `n_perm_cols + chunk_len > n_sets * chunk_len` in `evaluate_h_inner`.
             let chunk_len = view.cs_degree.saturating_sub(2).max(1);
-            let n_sets = if nperm == 0 {
-                0
-            } else {
-                nperm.div_ceil(chunk_len)
-            };
+            let n_sets = if nperm == 0 { 0 } else { nperm.div_ceil(chunk_len) };
             let permutations: Vec<permutation::prover::Committed<C>> = vec![{
                 let sets: Vec<permutation::prover::CommittedSet<C>> = (0..n_sets)
                     .map(|_| permutation::prover::CommittedSet {
@@ -665,11 +653,7 @@ mod test_eval {
     }
 
     fn fixed(column_index: usize, rotation: i32) -> Expression<F> {
-        Expression::Fixed(FixedQuery {
-            index: None,
-            column_index,
-            rotation: Rotation(rotation),
-        })
+        Expression::Fixed(FixedQuery { index: None, column_index, rotation: Rotation(rotation) })
     }
 
     fn advice(column_index: usize, rotation: i32) -> Expression<F> {
@@ -696,9 +680,7 @@ mod test_eval {
     fn challenges(count: usize) -> Vec<Expression<F>> {
         let mut cs = ConstraintSystem::<F>::default();
         cs.advice_column();
-        (0..count)
-            .map(|_| cs.challenge_usable_after(FirstPhase).expr())
-            .collect()
+        (0..count).map(|_| cs.challenge_usable_after(FirstPhase).expr()).collect()
     }
 
     fn lookup_argument(
@@ -706,11 +688,7 @@ mod test_eval {
         input_expressions: Vec<Expression<F>>,
         table_expressions: Vec<Expression<F>>,
     ) -> lookup::Argument<F> {
-        lookup::Argument {
-            name: name.to_string(),
-            input_expressions,
-            table_expressions,
-        }
+        lookup::Argument { name: name.to_string(), input_expressions, table_expressions }
     }
 
     fn random_leaf(
@@ -746,64 +724,39 @@ mod test_eval {
 
         match rng.gen_range(0..7) {
             0 => {
-                random_expression(
-                    rng,
-                    depth - 1,
-                    n_fixed,
-                    n_advice,
-                    n_instance,
-                    challenge_exprs,
-                ) + random_expression(
-                    rng,
-                    depth - 1,
-                    n_fixed,
-                    n_advice,
-                    n_instance,
-                    challenge_exprs,
-                )
+                random_expression(rng, depth - 1, n_fixed, n_advice, n_instance, challenge_exprs)
+                    + random_expression(
+                        rng,
+                        depth - 1,
+                        n_fixed,
+                        n_advice,
+                        n_instance,
+                        challenge_exprs,
+                    )
             }
             1 => {
-                random_expression(
-                    rng,
-                    depth - 1,
-                    n_fixed,
-                    n_advice,
-                    n_instance,
-                    challenge_exprs,
-                ) - random_expression(
-                    rng,
-                    depth - 1,
-                    n_fixed,
-                    n_advice,
-                    n_instance,
-                    challenge_exprs,
-                )
+                random_expression(rng, depth - 1, n_fixed, n_advice, n_instance, challenge_exprs)
+                    - random_expression(
+                        rng,
+                        depth - 1,
+                        n_fixed,
+                        n_advice,
+                        n_instance,
+                        challenge_exprs,
+                    )
             }
             2 => {
-                random_expression(
-                    rng,
-                    depth - 1,
-                    n_fixed,
-                    n_advice,
-                    n_instance,
-                    challenge_exprs,
-                ) * random_expression(
-                    rng,
-                    depth - 1,
-                    n_fixed,
-                    n_advice,
-                    n_instance,
-                    challenge_exprs,
-                )
+                random_expression(rng, depth - 1, n_fixed, n_advice, n_instance, challenge_exprs)
+                    * random_expression(
+                        rng,
+                        depth - 1,
+                        n_fixed,
+                        n_advice,
+                        n_instance,
+                        challenge_exprs,
+                    )
             }
-            3 => -random_expression(
-                rng,
-                depth - 1,
-                n_fixed,
-                n_advice,
-                n_instance,
-                challenge_exprs,
-            ),
+            3 => -random_expression(rng, depth - 1, n_fixed, n_advice, n_instance, challenge_exprs),
             4 => {
                 let expr = random_expression(
                     rng,
@@ -895,7 +848,8 @@ mod test_eval {
     ) {
         let n = 1 << k;
 
-        let domain = EvaluationDomain::<F>::new(expansion, k);
+        let domain = halo2_axiom::poly::EvaluationDomain::<F>::new(expansion, k);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let view = EvaluatorVkView {
             blinding_factors: 2,
             cs_degree: 3,
@@ -979,18 +933,12 @@ mod test_eval {
                 let l0_d = l0.to_device_on(&HALO2_GPU_CTX).unwrap();
                 let l_last_d = l_last.to_device_on(&HALO2_GPU_CTX).unwrap();
                 let l_active_row_d = l_active_row.to_device_on(&HALO2_GPU_CTX).unwrap();
-                let fixed_values_d: Vec<_> = fixed_values
-                    .iter()
-                    .map(|v| v.to_device_on(&HALO2_GPU_CTX).unwrap())
-                    .collect();
-                let fixed_polys_d: Vec<_> = fixed_polys
-                    .iter()
-                    .map(|v| v.to_device_on(&HALO2_GPU_CTX).unwrap())
-                    .collect();
-                let perm_polys_d: Vec<_> = perm_polys
-                    .iter()
-                    .map(|v| v.to_device_on(&HALO2_GPU_CTX).unwrap())
-                    .collect();
+                let fixed_values_d: Vec<_> =
+                    fixed_values.iter().map(|v| v.to_device_on(&HALO2_GPU_CTX).unwrap()).collect();
+                let fixed_polys_d: Vec<_> =
+                    fixed_polys.iter().map(|v| v.to_device_on(&HALO2_GPU_CTX).unwrap()).collect();
+                let perm_polys_d: Vec<_> =
+                    perm_polys.iter().map(|v| v.to_device_on(&HALO2_GPU_CTX).unwrap()).collect();
                 let advice_d = advice
                     .iter()
                     .map(|polys| {
@@ -1167,10 +1115,7 @@ mod test_eval {
             lookup_argument(
                 "second_lookup",
                 vec![advice(2, 0), fixed(4, -2) * F::from(11)],
-                vec![
-                    fixed(0, 0) - advice(0, 1),
-                    instance(2, -1) + challenge[0].clone(),
-                ],
+                vec![fixed(0, 0) - advice(0, 1), instance(2, -1) + challenge[0].clone()],
             ),
         ];
 
@@ -1275,11 +1220,7 @@ mod test_eval {
             n_instance,
             &challenge,
         );
-        let lookups = vec![lookup_argument(
-            "rng_large_lookup",
-            lookup_inputs,
-            lookup_tables,
-        )];
+        let lookups = vec![lookup_argument("rng_large_lookup", lookup_inputs, lookup_tables)];
 
         let mut perm_arg = permutation::Argument::new();
         perm_arg.add_column(Column::new(0, Any::advice()));
@@ -1330,18 +1271,14 @@ mod test_eval {
         };
         let rand_coeff_device = |rng: &mut ChaCha20Rng| -> Polynomial<F, Coeff, Device> {
             let v = rand_vec(rng);
-            let buf = v
-                .as_slice()
-                .to_device_on(&HALO2_GPU_CTX)
-                .expect("upload random poly to device");
+            let buf =
+                v.as_slice().to_device_on(&HALO2_GPU_CTX).expect("upload random poly to device");
             Polynomial::from_device(buf)
         };
 
         for _ in 0..extra {
-            data.advice_polys
-                .push((0..n_advice).map(|_| rand_coeff(&mut rng)).collect());
-            data.instance_polys
-                .push((0..n_instance).map(|_| rand_coeff(&mut rng)).collect());
+            data.advice_polys.push((0..n_advice).map(|_| rand_coeff(&mut rng)).collect());
+            data.instance_polys.push((0..n_instance).map(|_| rand_coeff(&mut rng)).collect());
             data.lookups.push(
                 (0..nlookups)
                     .map(|_| lookup::prover::Committed {
@@ -1379,27 +1316,16 @@ mod test_eval {
         // Matches `view.cs_degree = 3` set inside `assert_close_cpu_gpu_with_data`
         // and the `n_sets` derivation in `EvaluateHData::new`.
         let chunk_len = 3usize.saturating_sub(2).max(1);
-        let n_sets = if n_perm == 0 {
-            0
-        } else {
-            n_perm.div_ceil(chunk_len)
-        };
+        let n_sets = if n_perm == 0 { 0 } else { n_perm.div_ceil(chunk_len) };
 
         let mut perm_arg = permutation::Argument::new();
         perm_arg.add_column(Column::new(0, Any::advice()));
         perm_arg.add_column(Column::new(1, Any::Fixed));
         perm_arg.add_column(Column::new(2, Any::Instance));
 
-        let cs_gates = vec![make_gate(vec![
-            constant(1) + fixed(1, 1),
-            advice(2, 1) * fixed(0, 1),
-        ])];
+        let cs_gates = vec![make_gate(vec![constant(1) + fixed(1, 1), advice(2, 1) * fixed(0, 1)])];
         let lookup_exprs = vec![constant(1) + fixed(1, 1), advice(2, 1) * fixed(0, 1)];
-        let lookups = vec![lookup_argument(
-            "multi_circuit",
-            lookup_exprs.clone(),
-            lookup_exprs,
-        )];
+        let lookups = vec![lookup_argument("multi_circuit", lookup_exprs.clone(), lookup_exprs)];
 
         assert_close_cpu_gpu_with_data(
             perm_arg,

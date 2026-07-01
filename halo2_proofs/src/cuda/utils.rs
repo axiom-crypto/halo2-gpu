@@ -82,10 +82,7 @@ impl FFITraitObject {
     /// Panics if `slice` is empty. Matches the panicking behavior of the
     /// `transmute(&slice[0])` pattern this replaces.
     pub fn from_slice<T>(slice: &[T]) -> Self {
-        assert!(
-            !slice.is_empty(),
-            "FFITraitObject::from_slice requires a non-empty slice"
-        );
+        assert!(!slice.is_empty(), "FFITraitObject::from_slice requires a non-empty slice");
         Self::new(slice.as_ptr() as usize)
     }
 }
@@ -268,10 +265,7 @@ mod tests {
     #[test]
     fn ffi_trait_object_from_slice_matches_from_ref_on_single_element() {
         let v: [u64; 1] = [42];
-        assert_eq!(
-            FFITraitObject::from_slice(&v).ptr,
-            FFITraitObject::from_ref(&v[0]).ptr,
-        );
+        assert_eq!(FFITraitObject::from_slice(&v).ptr, FFITraitObject::from_ref(&v[0]).ptr,);
     }
 
     #[test]

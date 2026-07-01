@@ -11,19 +11,16 @@ use rand_core::OsRng;
 
 fn run_one(log_n: u32) {
     let j: u32 = 4;
-    let domain = EvaluationDomain::<Fr>::new(j, log_n);
+    let domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(j, log_n);
+    let domain = EvaluationDomain::from_host_domain(&domain);
     let n: usize = 1usize << log_n;
     let num_parts: usize = domain.extended_len() >> log_n;
 
-    let mut parts_host: Vec<Vec<Fr>> = (0..num_parts)
-        .map(|_| (0..n).map(|_| Fr::random(OsRng)).collect::<Vec<Fr>>())
-        .collect();
+    let mut parts_host: Vec<Vec<Fr>> =
+        (0..num_parts).map(|_| (0..n).map(|_| Fr::random(OsRng)).collect::<Vec<Fr>>()).collect();
 
-    let host_polys: Vec<Polynomial<Fr, LagrangeCoeff>> = parts_host
-        .iter()
-        .cloned()
-        .map(Polynomial::<Fr, LagrangeCoeff>::new)
-        .collect();
+    let host_polys: Vec<Polynomial<Fr, LagrangeCoeff>> =
+        parts_host.iter().cloned().map(Polynomial::<Fr, LagrangeCoeff>::new).collect();
     let host_out = domain.extended_from_lagrange_vec(host_polys);
     let host_out_vec = host_out.values().to_vec();
 
@@ -38,9 +35,8 @@ fn run_one(log_n: u32) {
             MaybeDevice::Device(Polynomial::<Fr, LagrangeCoeff, Device>::from_device(d_buf))
         })
         .collect();
-    let device_out = domain
-        .extended_from_lagrange_vec_device(device_polys)
-        .expect("device arm failed");
+    let device_out =
+        domain.extended_from_lagrange_vec_device(device_polys).expect("device arm failed");
     let device_out_device = match device_out {
         MaybeDevice::Device(p) => p,
         MaybeDevice::Host(_) => {
@@ -50,11 +46,7 @@ fn run_one(log_n: u32) {
     let device_out_host = device_out_device.to_host();
     let device_out_slice = device_out_host.values();
 
-    assert_eq!(
-        host_out_vec.len(),
-        device_out_slice.len(),
-        "length mismatch at log_n={log_n}"
-    );
+    assert_eq!(host_out_vec.len(), device_out_slice.len(), "length mismatch at log_n={log_n}");
     for (i, (h, d)) in host_out_vec.iter().zip(device_out_slice.iter()).enumerate() {
         assert_eq!(
             h, d,

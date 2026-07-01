@@ -1,16 +1,18 @@
 //! This module provides common utilities, traits and structures for group,
 //! field and polynomial arithmetic.
 
-use crate::cpu::arithmetic::parallelize;
-use crate::{cuda::funcs::multiexp_gpu_many, fft::recursive::FFTData};
+use crate::cuda::funcs::multiexp_gpu_many;
 pub use ff::Field;
-use ff::{BatchInvert, PrimeField};
-use group::{prime::PrimeCurveAffine, Curve, Group as _, GroupOpsOwned, ScalarMulOwned};
+use ff::PrimeField;
+use group::Group as _;
 pub use halo2curves::{CurveAffine, CurveExt};
 
-// `powers(base)` yields `base^0, base^1, …`, re-exported from canonical halo2-axiom
-// so host folds share one source of truth with downstream consumers.
-pub use halo2_axiom::arithmetic::powers;
+// GPU-neutral items re-exported from canonical halo2-axiom so host folds share
+// one source of truth with downstream consumers.
+pub use halo2_axiom::arithmetic::{
+    best_fft, compute_inner_product, eval_polynomial, evaluate_vanishing_polynomial, g_to_lagrange,
+    lagrange_interpolate, powers, FftGroup,
+};
 
 /// Mirrors `DENSE_POWER_DEGREE` in `halo2_proofs/cuda/include/kernel/omega.h`.
 /// The GPU omega LUT layout assumes this value — changing one side without
@@ -28,21 +30,6 @@ cfg_if::cfg_if!(
         pub const GPU_MAX_MSM_LOG: usize = 26;
     }
 );
-
-/// This represents an element of a group with basic operations that can be
-/// performed. This allows an FFT implementation (for example) to operate
-/// generically over either a field or elliptic curve group.
-pub trait FftGroup<Scalar: Field>:
-    Copy + Send + Sync + 'static + GroupOpsOwned + ScalarMulOwned<Scalar>
-{
-}
-
-impl<T, Scalar> FftGroup<Scalar> for T
-where
-    Scalar: Field,
-    T: Copy + Send + Sync + 'static + GroupOpsOwned + ScalarMulOwned<Scalar>,
-{
-}
 
 /// Performs a small multi-exponentiation operation.
 /// Uses the double-and-add algorithm with doublings shared across points.
@@ -80,171 +67,12 @@ pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cu
     multiexp_gpu_many(coeffs, bases).expect("multiexp_gpu_many failed in best_multiexp")
 }
 
-/// Dispatcher
-pub fn best_fft<Scalar: Field, G: FftGroup<Scalar>>(
-    a: &mut [G],
-    omega: Scalar,
-    log_n: u32,
-    data: &FFTData<Scalar>,
-    inverse: bool,
-) {
-    crate::fft::fft(a, omega, log_n, data, inverse);
-}
-
-/// Convert coefficient bases group elements to lagrange basis by inverse FFT.
-pub fn g_to_lagrange<C: PrimeCurveAffine>(g_projective: Vec<C::Curve>, k: u32) -> Vec<C> {
-    let n_inv = C::Scalar::TWO_INV.pow_vartime([k as u64, 0, 0, 0]);
-    let omega = C::Scalar::ROOT_OF_UNITY;
-    let mut omega_inv = C::Scalar::ROOT_OF_UNITY_INV;
-    for _ in k..C::Scalar::S {
-        omega_inv = omega_inv.square();
-    }
-
-    let mut g_lagrange_projective = g_projective;
-    let n = g_lagrange_projective.len();
-    let fft_data = FFTData::new(n, omega, omega_inv);
-
-    best_fft(&mut g_lagrange_projective, omega_inv, k, &fft_data, true);
-    parallelize(&mut g_lagrange_projective, |g, _| {
-        for g in g.iter_mut() {
-            *g *= n_inv;
-        }
-    });
-
-    let mut g_lagrange = vec![C::identity(); 1 << k];
-    parallelize(&mut g_lagrange, |g_lagrange, starts| {
-        C::Curve::batch_normalize(
-            &g_lagrange_projective[starts..(starts + g_lagrange.len())],
-            g_lagrange,
-        );
-    });
-
-    g_lagrange
-}
-
-/// This evaluates a provided polynomial (in coefficient form) at `point`.
-pub fn eval_polynomial<F: Field>(poly: &[F], point: F) -> F {
-    fn evaluate<F: Field>(poly: &[F], point: F) -> F {
-        poly.iter()
-            .rev()
-            .fold(F::ZERO, |acc, coeff| acc * point + coeff)
-    }
-    let n = poly.len();
-    let num_threads = rayon::current_num_threads();
-    if n * 2 < num_threads {
-        evaluate(poly, point)
-    } else {
-        let chunk_size = n.div_ceil(num_threads);
-        let mut parts = vec![F::ZERO; num_threads];
-        rayon::scope(|scope| {
-            for (chunk_idx, (out, poly)) in
-                parts.chunks_mut(1).zip(poly.chunks(chunk_size)).enumerate()
-            {
-                scope.spawn(move |_| {
-                    let start = chunk_idx * chunk_size;
-                    out[0] = evaluate(poly, point) * point.pow_vartime([start as u64, 0, 0, 0]);
-                });
-            }
-        });
-        parts.iter().fold(F::ZERO, |acc, coeff| acc + coeff)
-    }
-}
-
-/// This computes the inner product of two vectors `a` and `b`.
-///
-/// This function will panic if the two vectors are not the same size.
-pub fn compute_inner_product<F: Field>(a: &[F], b: &[F]) -> F {
-    assert_eq!(a.len(), b.len());
-
-    let mut acc = F::ZERO;
-    for (a, b) in a.iter().zip(b.iter()) {
-        acc += (*a) * (*b);
-    }
-
-    acc
-}
-
-/// Returns coefficients of an n - 1 degree polynomial given a set of n points
-/// and their evaluations. This function will panic if two values in `points`
-/// are the same.
-pub fn lagrange_interpolate<F: Field>(points: &[F], evals: &[F]) -> Vec<F> {
-    assert_eq!(points.len(), evals.len());
-    if points.len() == 1 {
-        // Constant polynomial
-        vec![evals[0]]
-    } else {
-        let mut denoms = Vec::with_capacity(points.len());
-        for (j, x_j) in points.iter().enumerate() {
-            let mut denom = Vec::with_capacity(points.len() - 1);
-            for x_k in points
-                .iter()
-                .enumerate()
-                .filter(|&(k, _)| k != j)
-                .map(|a| a.1)
-            {
-                denom.push(*x_j - x_k);
-            }
-            denoms.push(denom);
-        }
-        // Compute (x_j - x_k)^(-1) for each j != i
-        denoms.iter_mut().flat_map(|v| v.iter_mut()).batch_invert();
-
-        let mut final_poly = vec![F::ZERO; points.len()];
-        for (j, (denoms, eval)) in denoms.into_iter().zip(evals.iter()).enumerate() {
-            let mut tmp: Vec<F> = Vec::with_capacity(points.len());
-            let mut product = Vec::with_capacity(points.len() - 1);
-            tmp.push(F::ONE);
-            for (x_k, denom) in points
-                .iter()
-                .enumerate()
-                .filter(|&(k, _)| k != j)
-                .map(|a| a.1)
-                .zip(denoms)
-            {
-                product.resize(tmp.len() + 1, F::ZERO);
-                for ((a, b), product) in tmp
-                    .iter()
-                    .chain(std::iter::once(&F::ZERO))
-                    .zip(std::iter::once(&F::ZERO).chain(tmp.iter()))
-                    .zip(product.iter_mut())
-                {
-                    *product = *a * (-denom * x_k) + *b * denom;
-                }
-                std::mem::swap(&mut tmp, &mut product);
-            }
-            assert_eq!(tmp.len(), points.len());
-            assert_eq!(product.len(), points.len() - 1);
-            for (final_coeff, interpolation_coeff) in final_poly.iter_mut().zip(tmp) {
-                *final_coeff += interpolation_coeff * eval;
-            }
-        }
-        final_poly
-    }
-}
-
-pub(crate) fn evaluate_vanishing_polynomial<F: Field>(roots: &[F], z: F) -> F {
-    fn evaluate<F: Field>(roots: &[F], z: F) -> F {
-        roots.iter().fold(F::ONE, |acc, point| (z - point) * acc)
-    }
-    let n = roots.len();
-    let num_threads = rayon::current_num_threads();
-    if n * 2 < num_threads {
-        evaluate(roots, z)
-    } else {
-        let chunk_size = n.div_ceil(num_threads);
-        let mut parts = vec![F::ONE; num_threads];
-        rayon::scope(|scope| {
-            for (out, roots) in parts.chunks_mut(1).zip(roots.chunks(chunk_size)) {
-                scope.spawn(move |_| out[0] = evaluate(roots, z));
-            }
-        });
-        parts.iter().fold(F::ONE, |acc, part| acc * part)
-    }
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
+    use ff::BatchInvert;
+
     use super::*;
+    use crate::cpu::arithmetic::parallelize;
 
     #[test]
     fn test_lagrange_interpolate() {
@@ -281,9 +109,8 @@ pub(crate) mod tests {
         let gamma = Fr::random(OsRng);
         for n in 16..=max_n {
             println!("========= {} =========", n);
-            let mut scalars: Vec<Fr> = (0..(1 << n))
-                .map(|i| Fr::from((i + 1) as u64) * beta + gamma)
-                .collect();
+            let mut scalars: Vec<Fr> =
+                (0..(1 << n)).map(|i| Fr::from((i + 1) as u64) * beta + gamma).collect();
             let mut scalars_clone = scalars.clone();
 
             let batch_invert_time = Instant::now();
@@ -296,10 +123,7 @@ pub(crate) mod tests {
                 scalars.batch_invert();
             });
             let batch_invert_par_time = batch_invert_par_time.elapsed();
-            println!(
-                "batch invert multiple thread took {:?}",
-                batch_invert_par_time
-            );
+            println!("batch invert multiple thread took {:?}", batch_invert_par_time);
 
             println!(
                 "speedup: {}",

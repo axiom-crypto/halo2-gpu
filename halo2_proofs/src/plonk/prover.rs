@@ -64,7 +64,7 @@ pub fn create_proof<
 ) -> Result<(), GpuError>
 where
     // `FromUniformBytes<64>` is needed to build the GPU proving-key view via
-    // `GpuProvingKey::from_host_ref` → `ProvingKey::get_vk`.
+    // `GpuProvingKey::from_host` → `ProvingKey::get_vk`.
     Scheme::Scalar: Hash + WithSmallOrderMulGroup<3> + FromUniformBytes<64>,
     // The prover spawns a scoped thread that borrows `params`, so it needs Sync
     // (the `ParamsProver` trait itself does not, to match CPU halo2's API).
@@ -79,15 +79,13 @@ where
 
     // Build the GPU proving-key view by borrowing the canonical key (no host-poly
     // clone; device mirrors stay lazy).
-    let gpu_pk = GpuProvingKey::from_host_ref(pk);
+    let gpu_pk = GpuProvingKey::from_host(pk);
     let pk = &gpu_pk;
 
     let num_instance = pk.cs.num_instance_columns;
     for instance in instances.iter() {
         if instance.len() != num_instance {
-            return Err(GpuError::Canonical(
-                halo2_axiom::plonk::Error::InvalidInstances,
-            ));
+            return Err(GpuError::Canonical(halo2_axiom::plonk::Error::InvalidInstances));
         }
     }
     pk.hash_into(transcript)?;
@@ -135,7 +133,7 @@ where
     {
         params: &'params Scheme::ParamsProver,
         params_n: usize,
-        domain: &'b EvaluationDomain<Scheme::Scalar>,
+        domain: &'b EvaluationDomain<'b, Scheme::Scalar>,
         current_phase: sealed::Phase,
         #[allow(dead_code)]
         num_instance_columns: usize,
@@ -231,10 +229,8 @@ where
             );
 
             // 3-4% witness-gen speedup vs `get_mut` + bounds checks.
-            let advice_get_mut = unsafe {
-                self.advice
-                    .get_unchecked_mut(column.index() * self.params_n + row)
-            };
+            let advice_get_mut =
+                unsafe { self.advice.get_unchecked_mut(column.index() * self.params_n + row) };
             // `Value::assign()` is `pub(crate)`; extract the known `Assigned` via
             // the public `map`, preserving the panic-on-unknown contract.
             let mut assigned = None;
@@ -306,12 +302,11 @@ where
                             values.len() <= self.unusable_rows_start,
                             "GpuError: InstanceTooLarge"
                         );
-                        poly.values_mut()
-                            .par_iter_mut()
-                            .zip(values.par_iter())
-                            .for_each(|(poly, value)| {
+                        poly.values_mut().par_iter_mut().zip(values.par_iter()).for_each(
+                            |(poly, value)| {
                                 *poly = *value;
-                            });
+                            },
+                        );
                         poly
                     })
                     .collect::<Vec<_>>();
@@ -383,18 +378,14 @@ where
                 for _ in 0..num_instance_commitments {
                     self.transcript
                         .common_point(
-                            commitments
-                                .next()
-                                .expect("Did not commit to instance polynomials"),
+                            commitments.next().expect("Did not commit to instance polynomials"),
                         )
                         .unwrap();
                 }
             }
 
             for commitment in commitments {
-                self.transcript
-                    .write_point(commitment)
-                    .expect("absorb commitment point");
+                self.transcript.write_point(commitment).expect("absorb commitment point");
             }
             let column_indices = self.column_indices[phase].iter().copied();
             let advice_values = advice_values.into_iter();
@@ -407,10 +398,9 @@ where
             }
 
             for challenge_index in self.challenge_indices[phase].iter() {
-                let existing = self.challenges.insert(
-                    *challenge_index,
-                    *self.transcript.squeeze_challenge_scalar::<()>(),
-                );
+                let existing = self
+                    .challenges
+                    .insert(*challenge_index, *self.transcript.squeeze_challenge_scalar::<()>());
                 assert!(existing.is_none());
             }
             self.current_phase = self.current_phase.next();
@@ -421,18 +411,11 @@ where
 
     fn new_gpu_thread<Scheme, C>(
         params: &Scheme::ParamsProver,
-        domain: &EvaluationDomain<C::Scalar>,
+        domain: &EvaluationDomain<'_, C::Scalar>,
         instance_values: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
         advice_values: &[Polynomial<C::Scalar, LagrangeCoeff, Device>],
         query_instance: bool,
-    ) -> Result<
-        (
-            InstanceSingle<C>,
-            Vec<Polynomial<C::Scalar, Coeff, Device>>,
-            Vec<C>,
-        ),
-        GpuError,
-    >
+    ) -> Result<(InstanceSingle<C>, Vec<Polynomial<C::Scalar, Coeff, Device>>, Vec<C>), GpuError>
     where
         Scheme: CommitmentScheme<Curve = C, Scalar = C::ScalarExt>,
         C: CurveAffine,
@@ -499,17 +482,13 @@ where
                         .values()
                         .to_device_on(&HALO2_GPU_CTX)
                         .map_err(crate::cuda::HaloGpuError::from)?;
-                    Ok(Polynomial::<C::Scalar, LagrangeCoeff, Device>::from_device(
-                        d_buf,
-                    ))
+                    Ok(Polynomial::<C::Scalar, LagrangeCoeff, Device>::from_device(d_buf))
                 })
                 .collect::<Result<_, _>>()?
         };
 
-        let instance_single = InstanceSingle {
-            instance_values: instance_values_device,
-            instance_polys,
-        };
+        let instance_single =
+            InstanceSingle { instance_values: instance_values_device, instance_polys };
         #[cfg(feature = "profile")]
         let batch_time = start_timer!(|| "batch normalize projective points");
         let commitments_projective = commitments;
@@ -610,22 +589,11 @@ where
                 #[cfg(feature = "profile")]
                 end_timer!(witness_assign_time);
 
-                let advice_values = witness
-                    .advice_single
-                    .advice_values
-                    .into_iter()
-                    .map(|c| c.unwrap())
-                    .collect();
-                let advice_polys = witness
-                    .advice_single
-                    .advice_polys
-                    .into_iter()
-                    .map(|c| c.unwrap())
-                    .collect();
-                advice.push(AdviceSingle::<Scheme::Curve> {
-                    advice_values,
-                    advice_polys,
-                });
+                let advice_values =
+                    witness.advice_single.advice_values.into_iter().map(|c| c.unwrap()).collect();
+                let advice_polys =
+                    witness.advice_single.advice_polys.into_iter().map(|c| c.unwrap()).collect();
+                advice.push(AdviceSingle::<Scheme::Curve> { advice_values, advice_polys });
                 instance.push(witness.instance_single);
             }
 
@@ -672,24 +640,22 @@ where
                 pk.cs
                     .lookups
                     .iter()
-                    .map(
-                        |lookup| -> Result<lookup::prover::Permuted<Scheme::Curve>, GpuError> {
-                            let (permuted, input_c, table_c) = lookup.commit_permuted(
-                                pk,
-                                params,
-                                domain,
-                                theta,
-                                &advice.advice_values,
-                                pk.inner.fixed_values(),
-                                &instance.instance_values,
-                                &challenges,
-                                pool_ref,
-                            )?;
-                            transcript.write_point(input_c)?;
-                            transcript.write_point(table_c)?;
-                            Ok(permuted)
-                        },
-                    )
+                    .map(|lookup| -> Result<lookup::prover::Permuted<Scheme::Curve>, GpuError> {
+                        let (permuted, input_c, table_c) = lookup.commit_permuted(
+                            pk,
+                            params,
+                            domain,
+                            theta,
+                            &advice.advice_values,
+                            pk.inner.fixed_values(),
+                            &instance.instance_values,
+                            &challenges,
+                            pool_ref,
+                        )?;
+                        transcript.write_point(input_c)?;
+                        transcript.write_point(table_c)?;
+                        Ok(permuted)
+                    })
                     .collect::<Result<Vec<_>, GpuError>>()
             })
             .collect::<Result<Vec<_>, GpuError>>()?;
@@ -775,11 +741,7 @@ where
     info!("cals: {:?}", pk.ev.custom_gates.calculations.len());
     info!(
         "num_of_gates: {}",
-        pk.cs
-            .gates
-            .iter()
-            .map(|gate| gate.polynomials().len())
-            .sum::<usize>()
+        pk.cs.gates.iter().map(|gate| gate.polynomials().len()).sum::<usize>()
     );
     info!("rotations: {:?}", pk.ev.custom_gates.rotations.len());
 
@@ -790,14 +752,8 @@ where
         evaluation::evaluate_h_device(
             &pk.ev,
             pk,
-            &advice
-                .iter()
-                .map(|a| a.advice_polys.as_slice())
-                .collect::<Vec<_>>(),
-            &instance
-                .iter()
-                .map(|i| i.instance_polys.as_slice())
-                .collect::<Vec<_>>(),
+            &advice.iter().map(|a| a.advice_polys.as_slice()).collect::<Vec<_>>(),
+            &instance.iter().map(|i| i.instance_polys.as_slice()).collect::<Vec<_>>(),
             &challenges,
             *y,
             *beta,
@@ -830,7 +786,7 @@ where
 
         {
             fn materialize_polys_for_batch_eval<'a, C: CurveAffine>(
-                domain: &EvaluationDomain<C::ScalarExt>,
+                domain: &EvaluationDomain<'_, C::ScalarExt>,
                 x: &C::ScalarExt,
                 polys: &'a [Polynomial<C::ScalarExt, Coeff, Device>],
                 queries_indexed: &[(usize, crate::poly::Rotation)],
@@ -849,18 +805,12 @@ where
                 for instance in instance.iter() {
                     let batch_size = meta.instance_queries.len();
                     info!("    batch_size: {}", batch_size);
-                    info!(
-                        "    instance.instance_polys.len: {}",
-                        instance.instance_polys.len()
-                    );
+                    info!("    instance.instance_polys.len: {}", instance.instance_polys.len());
                     if batch_size == 0 || instance.instance_polys.is_empty() {
                         continue;
                     }
-                    let queries_idx: Vec<_> = meta
-                        .instance_queries
-                        .iter()
-                        .map(|(c, at)| (c.index(), *at))
-                        .collect();
+                    let queries_idx: Vec<_> =
+                        meta.instance_queries.iter().map(|(c, at)| (c.index(), *at)).collect();
                     let (poly_in_many_ori, eval_points) =
                         materialize_polys_for_batch_eval::<Scheme::Curve>(
                             domain,
@@ -888,20 +838,15 @@ where
                 if advice.advice_polys.is_empty() {
                     continue;
                 }
-                let queries_idx: Vec<_> = meta
-                    .advice_queries
-                    .iter()
-                    .map(|(c, at)| (c.index(), *at))
-                    .collect();
+                let queries_idx: Vec<_> =
+                    meta.advice_queries.iter().map(|(c, at)| (c.index(), *at)).collect();
                 // Per-query DeviceBuffer references borrowed from `advice_polys`.
                 let d_polys: Vec<&DeviceBuffer<Scheme::Scalar>> = queries_idx
                     .iter()
                     .map(|(col_idx, _)| advice.advice_polys[*col_idx].device_buf())
                     .collect();
-                let eval_points: Vec<Scheme::Scalar> = queries_idx
-                    .iter()
-                    .map(|(_, at)| domain.rotate_omega(*x, *at))
-                    .collect();
+                let eval_points: Vec<Scheme::Scalar> =
+                    queries_idx.iter().map(|(_, at)| domain.rotate_omega(*x, *at)).collect();
                 let mut advice_evals = vec![Scheme::Scalar::ZERO; batch_size];
                 batch_eval_polynomial_d2h(&d_polys, &eval_points, &mut advice_evals)?;
                 for eval in advice_evals.iter() {
@@ -913,11 +858,8 @@ where
             info!("fixed batch size: {}", batch_size);
             info!("    pk.fixed_polys.len: {}", pk.inner.fixed_polys().len());
             if batch_size > 0 && !pk.inner.fixed_polys().is_empty() {
-                let queries_idx: Vec<_> = meta
-                    .fixed_queries
-                    .iter()
-                    .map(|(c, at)| (c.index(), *at))
-                    .collect();
+                let queries_idx: Vec<_> =
+                    meta.fixed_queries.iter().map(|(c, at)| (c.index(), *at)).collect();
                 let (poly_in_many_ori, eval_points) =
                     materialize_polys_for_batch_eval::<Scheme::Curve>(
                         domain,
@@ -949,28 +891,26 @@ where
         let unpack_timer = start_timer!(|| "lagrange_to_coeff_timer");
         let lookups = lookups
             .into_iter()
-            .map(
-                |lookups| -> Result<Vec<lookup::prover::CommittedUnpacked<Scheme::Curve>>, _> {
-                    lookups
-                        .into_iter()
-                        .map(|p| {
-                            // Device-output iFFT for the lookup permuted polys,
-                            // which then flow into multiopen via `ProverQuery`.
-                            let permuted_input_poly = domain.lagrange_to_coeff_device(
-                                p.permuted_input_expression.into_host_polynomial(),
-                            )?;
-                            let permuted_table_poly = domain.lagrange_to_coeff_device(
-                                p.permuted_table_expression.into_host_polynomial(),
-                            )?;
-                            Ok(CommittedUnpacked {
-                                permuted_input_poly,
-                                permuted_table_poly,
-                                product_poly: p.product_poly,
-                            })
+            .map(|lookups| -> Result<Vec<lookup::prover::CommittedUnpacked<Scheme::Curve>>, _> {
+                lookups
+                    .into_iter()
+                    .map(|p| {
+                        // Device-output iFFT for the lookup permuted polys,
+                        // which then flow into multiopen via `ProverQuery`.
+                        let permuted_input_poly = domain.lagrange_to_coeff_device(
+                            p.permuted_input_expression.into_host_polynomial(),
+                        )?;
+                        let permuted_table_poly = domain.lagrange_to_coeff_device(
+                            p.permuted_table_expression.into_host_polynomial(),
+                        )?;
+                        Ok(CommittedUnpacked {
+                            permuted_input_poly,
+                            permuted_table_poly,
+                            product_poly: p.product_poly,
                         })
-                        .collect::<Result<Vec<_>, _>>()
-                },
-            )
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
             .collect::<Result<Vec<_>, GpuError>>()?;
         #[cfg(feature = "profile")]
         end_timer!(unpack_timer);
@@ -978,10 +918,7 @@ where
         let lookups: Vec<Vec<lookup::prover::Evaluated<Scheme::Curve>>> = lookups
             .into_iter()
             .map(|lookups| -> Vec<_> {
-                lookups
-                    .into_iter()
-                    .map(|p| p.evaluate(pk, x, transcript).unwrap())
-                    .collect()
+                lookups.into_iter().map(|p| p.evaluate(pk, x, transcript).unwrap()).collect()
             })
             .collect();
         #[cfg(feature = "profile")]
@@ -1024,15 +961,10 @@ where
                             .into_iter()
                             .flatten(),
                     )
-                    .chain(
-                        pk.cs
-                            .advice_queries
-                            .iter()
-                            .map(move |&(column, at)| ProverQuery {
-                                point: domain.rotate_omega(*x, at),
-                                poly: (&advice.advice_polys[column.index()]).into(),
-                            }),
-                    )
+                    .chain(pk.cs.advice_queries.iter().map(move |&(column, at)| ProverQuery {
+                        point: domain.rotate_omega(*x, at),
+                        poly: (&advice.advice_polys[column.index()]).into(),
+                    }))
                     .chain(permutation.open(pk, x))
                     .chain(lookups.iter().flat_map(move |p| p.open(pk, x)))
             })
@@ -1041,10 +973,7 @@ where
                     Some(d) => crate::poly::PolyRef::Device(&d[column.index()]),
                     None => crate::poly::PolyRef::Host(&pk.inner.fixed_polys()[column.index()]),
                 };
-                ProverQuery {
-                    point: domain.rotate_omega(*x, at),
-                    poly,
-                }
+                ProverQuery { point: domain.rotate_omega(*x, at), poly }
             }))
             .chain((0..permutation_host_polys.len()).map(|idx| {
                 let poly = match permutation_polys_device_opt {

@@ -161,10 +161,7 @@ pub(crate) fn module_quotient_lookups(
     poly_length: usize,
 ) -> Result<(), HaloGpuError> {
     crate::perf_section!("quotient_lookups");
-    debug_assert!(
-        poly_length > 0,
-        "module_quotient_lookups: poly_length must be > 0"
-    );
+    debug_assert!(poly_length > 0, "module_quotient_lookups: poly_length must be > 0");
     debug_assert!(
         !values_mem.is_null()
             && !table_values_mem.is_null()

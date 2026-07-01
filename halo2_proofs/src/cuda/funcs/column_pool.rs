@@ -121,11 +121,7 @@ impl<F: Field> ColumnPool<F> {
             Some(m) => !m.is_empty() && (fixed_values.is_empty() || m.len() == fixed_values.len()),
             None => false,
         };
-        let n_fixed_for_gate = if fixed_borrowed {
-            0
-        } else {
-            fixed_values.len()
-        };
+        let n_fixed_for_gate = if fixed_borrowed { 0 } else { fixed_values.len() };
         if !self.is_gpu_memory_enough(n_fixed_for_gate, 0, 0) {
             return Err(HaloGpuError::InsufficientGpuMemory {
                 context: "ColumnPool::try_init_device",
@@ -151,9 +147,7 @@ impl<F: Field> ColumnPool<F> {
         } else {
             for col in fixed_values {
                 debug_assert_eq!(col.len(), self.n);
-                let d = col
-                    .to_device_on(&HALO2_GPU_CTX)
-                    .map_err(HaloGpuError::from)?;
+                let d = col.to_device_on(&HALO2_GPU_CTX).map_err(HaloGpuError::from)?;
                 self.fixed_ptrs_device.push(d.as_raw_ptr());
                 self.fixed_d.push(d);
             }
@@ -164,8 +158,7 @@ impl<F: Field> ColumnPool<F> {
         }
         for poly in instance_values_device {
             debug_assert_eq!(poly.len(), self.n);
-            self.instance_ptrs_device
-                .push(poly.device_buf().as_raw_ptr());
+            self.instance_ptrs_device.push(poly.device_buf().as_raw_ptr());
         }
         self.initialized = true;
         Ok(())
@@ -185,14 +178,9 @@ impl<F: Field> ColumnPool<F> {
         // matches `fixed_values` shape (same column count + same per-column
         // length), the fixed-col block is borrowed (zero pool VRAM cost
         // for those columns). Drop fixed from the gate's column count.
-        let fixed_borrowed = pk_fixed_lagrange_mirror
-            .map(|m| m.len() == fixed_values.len())
-            .unwrap_or(false);
-        let n_fixed_for_gate = if fixed_borrowed {
-            0
-        } else {
-            fixed_values.len()
-        };
+        let fixed_borrowed =
+            pk_fixed_lagrange_mirror.map(|m| m.len() == fixed_values.len()).unwrap_or(false);
+        let n_fixed_for_gate = if fixed_borrowed { 0 } else { fixed_values.len() };
         if !self.is_gpu_memory_enough(n_fixed_for_gate, advice_values.len(), instance_values.len())
         {
             return Err(HaloGpuError::InsufficientGpuMemory {
@@ -227,26 +215,20 @@ impl<F: Field> ColumnPool<F> {
             // device buffer owned by this pool.
             for col in fixed_values {
                 debug_assert_eq!(col.len(), self.n);
-                let d = col
-                    .to_device_on(&HALO2_GPU_CTX)
-                    .map_err(HaloGpuError::from)?;
+                let d = col.to_device_on(&HALO2_GPU_CTX).map_err(HaloGpuError::from)?;
                 self.fixed_ptrs_device.push(d.as_raw_ptr());
                 self.fixed_d.push(d);
             }
         }
         for col in advice_values {
             debug_assert_eq!(col.len(), self.n);
-            let d = col
-                .to_device_on(&HALO2_GPU_CTX)
-                .map_err(HaloGpuError::from)?;
+            let d = col.to_device_on(&HALO2_GPU_CTX).map_err(HaloGpuError::from)?;
             self.advice_ptrs_device.push(d.as_raw_ptr());
             self.advice_d.push(d);
         }
         for col in instance_values {
             debug_assert_eq!(col.len(), self.n);
-            let d = col
-                .to_device_on(&HALO2_GPU_CTX)
-                .map_err(HaloGpuError::from)?;
+            let d = col.to_device_on(&HALO2_GPU_CTX).map_err(HaloGpuError::from)?;
             self.instance_ptrs_device.push(d.as_raw_ptr());
             self.instance_d.push(d);
         }
