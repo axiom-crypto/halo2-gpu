@@ -1449,7 +1449,7 @@ fn test_permutation_grand_product_cross_set_carry() {
     // per-set Z must be byte-identical.
     let log_n = 12u32;
     let n = 1usize << log_n;
-    let blinding = 6usize; // representative blinding-factor count
+    let blinding = 6usize;
     let acc_len = n - blinding;
     let num_sets = 3usize;
     let scalar_bytes = std::mem::size_of::<Fr>();

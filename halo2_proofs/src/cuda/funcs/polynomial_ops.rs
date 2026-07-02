@@ -132,19 +132,12 @@ pub fn batch_eval_polynomial_gpu<F: Field>(
 /// synced 32-byte D2Hs.
 ///
 /// # Contract
-/// - **Ownership**: `d_polys` are caller-owned device buffers; the returned
-///   `DeviceBuffer<F>` (length `d_polys.len()`) is caller-owned. Per-eval
-///   Horner scratch is allocated + freed within the loop — both are
-///   stream-ordered async ops (`cudaMallocAsync` / `cudaFreeAsync`), so
-///   there is no host sync. The scratch free enqueues after the result copy
-///   on the same stream, so the D→D copy reads the result before the block
-///   is reclaimed.
-/// - **Sync**: all work enqueues on `HALO2_GPU_CTX.stream`; the function
-///   returns BEFORE completion. Callers that read on host must D2H +
-///   stream-sync; same-stream downstream kernels see the result directly.
-/// - **Ordering**: result slot `i` corresponds to input pair `i`, so callers
-///   iterating the D2H'd buffer in order preserve the `write_scalar` absorb
-///   order.
+/// Caller-owned `d_polys` in, caller-owned `DeviceBuffer<F>` (length
+/// `d_polys.len()`) out; result slot `i` corresponds to input pair `i`. Work
+/// enqueues on `HALO2_GPU_CTX.stream` and returns before completion, so host
+/// readers must D2H + stream-sync. Per-eval Horner scratch is freed
+/// stream-ordered after the result copy, so the D→D copy reads the result
+/// before the block is reclaimed.
 pub fn batch_eval_polynomial_device_out<F: Field>(
     d_polys: &[&DeviceBuffer<F>],
     eval_points: &[F],
@@ -210,8 +203,7 @@ pub fn batch_eval_polynomial_device_out<F: Field>(
 /// [`batch_eval_polynomial_device_out`] (no per-eval sync), then copies the
 /// whole result buffer to `eval_result` in one D2H + one `to_host_sync`. No
 /// H2D of polynomial coefficients — the device buffers stay caller-owned and
-/// resident. Replaces the former per-eval loop (one 32-byte D2H +
-/// `to_host_sync` each) with a single transfer.
+/// resident.
 pub fn batch_eval_polynomial_d2h<F: Field>(
     d_polys: &[&DeviceBuffer<F>],
     eval_points: &[F],
@@ -227,7 +219,7 @@ pub fn batch_eval_polynomial_d2h<F: Field>(
     let d_out = batch_eval_polynomial_device_out(d_polys, eval_points)?;
     let bytes = mem::size_of_val(eval_result);
     // One batched D2H of the whole eval buffer (was one synced 32-byte D2H per
-    // eval). Counted so the perf/nsys workflow sees this PR's D2H reduction.
+    // eval). Counted so the perf/nsys workflow sees the D2H reduction.
     crate::perf_d2h!("cuda.batch_eval_polynomial_device.result", bytes);
     unsafe {
         cuda_memcpy_on::<true, false>(

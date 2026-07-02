@@ -146,24 +146,17 @@ pub struct EvaluationDomain<F: Field> {
 
     // Recursive stuff.
     //
-    // Lazily-materialized host FFT twiddle tables, keyed by FFT length. On the
-    // GPU prove/keygen path the twiddles are computed on-device (the CUDA NTT
-    // wrappers take scalar `omega`/`divisor`, see `cuda/funcs/ntt.rs`), so
-    // `get_fft_data` is never called and none of these tables are ever built —
-    // eagerly precomputing them in `new` was pure host `Fr`-mul dead work. The
-    // only callers that read a table are the host CPU reference paths (e.g.
-    // `cpu/evaluator.rs`, `arithmetic::g_to_lagrange`'s own local table, and
-    // tests); for them `get_fft_data` materializes the table on first access,
-    // byte-identically to the former eager `FFTData::new(len, omega, omega_inv)`.
+    // Lazily-materialized host twiddle tables, keyed by length. The GPU path
+    // computes twiddles on-device and never calls `get_fft_data`, so eager
+    // precompute in `new` was dead host work; host CPU reference paths
+    // materialize a table on first access, byte-identical to the former eager
+    // build.
     fft_data: HashMap<usize, LazyFftData<F>>,
 }
 
-/// A twiddle table (`FFTData`) that is materialized on first access rather than
-/// eagerly at `EvaluationDomain::new` time. Holds the `(omega, omega_inv)` the
-/// table would be built from and a `OnceLock` cache slot. `get_or_init` is
-/// deterministic (same `(len, omega, omega_inv)` every time), so the cached
-/// table is byte-identical to the former eager construction, and the
-/// thread-safe `OnceLock` keeps concurrent host callers correct.
+/// A twiddle table (`FFTData`) materialized on first access: `get_or_init` is
+/// deterministic, so the table is byte-identical to the former eager build, and
+/// `OnceLock` keeps concurrent host readers correct.
 #[derive(Clone, Debug)]
 struct LazyFftData<F: Field> {
     len: usize,
@@ -1530,12 +1523,8 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         self.n
     }
 
-    /// Get the private `fft_data`.
-    ///
-    /// Materializes the host twiddle table for length `l` on first access
-    /// (lazy — see `LazyFftData`) and caches it for subsequent calls. Returns a
-    /// table byte-identical to the former eager `FFTData::new(l, omega,
-    /// omega_inv)`.
+    /// Get the private `fft_data`, materializing the length-`l` twiddle table on
+    /// first access (see `LazyFftData`).
     pub fn get_fft_data(&self, l: usize) -> &FFTData<F> {
         self.fft_data
             .get(&l)

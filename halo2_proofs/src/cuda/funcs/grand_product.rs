@@ -69,11 +69,7 @@ fn grand_product_device_chunk_size(output_len: usize) -> usize {
     let max_len = unsafe {
         _halo2_grand_product_max_len(output_len, query_device_free_bytes_for_chunking() as u64)
     };
-    if output_len > max_len {
-        max_len
-    } else {
-        output_len
-    }
+    output_len.min(max_len)
 }
 
 /// Device-input variant of `grand_product_gpu`. Scans the first
@@ -183,10 +179,9 @@ pub(crate) fn grand_product_device_chunked<F: Field>(
             return Err(status.into());
         }
         if offset + chunk_size < output_len {
-            // Cross-chunk carry (was: D2H last scalar + `to_host_sync` + H2D
-            // re-stage). The last scanned scalar of THIS chunk is the next
-            // chunk's running prefix; copy it device→device into the rolling
-            // buffer. Stream-ordered before the next FFI, so no host
+            // Cross-chunk carry. The last scanned scalar of THIS chunk is the
+            // next chunk's running prefix; copy it device→device into the
+            // rolling buffer. Stream-ordered before the next FFI, so no host
             // round-trip and no stream sync are needed.
             let last_idx = offset + chunk_size - 1;
             let roll = rolling
