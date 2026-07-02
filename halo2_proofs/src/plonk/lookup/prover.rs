@@ -362,8 +362,7 @@ impl<C: CurveAffine> Permuted<C> {
             // permuted pair: the Device arm (common device-fused path) borrows
             // the existing `DeviceBuffer<F>` with zero copy; the Host fallback
             // H2D's the host slice into a fresh `DeviceBuffer<F>` bound to this
-            // scope. This deletes the pre-C3 producer D2H + consumer H2D
-            // round-trip on the compressed pair.
+            // scope.
             let compressed_input_owned: DeviceBuffer<C::Scalar>;
             let d_compressed_input: &DeviceBuffer<C::Scalar> =
                 match &self.compressed_input_expression {
@@ -475,9 +474,9 @@ impl<C: CurveAffine> CommittedUnpacked<C> {
 
         // All five lookup polys are device-resident. Collect them with their
         // eval points in the exact `write_scalar` order, then do ONE
-        // device-out batch eval + ONE batched D2H — was five synced 32-byte
-        // D2Hs (one per `.eval_at()`). Order: product@x, product@x_next,
-        // permuted_input@x, permuted_input@x_inv, permuted_table@x.
+        // device-out batch eval + ONE batched D2H. Order: product@x,
+        // product@x_next, permuted_input@x, permuted_input@x_inv,
+        // permuted_table@x.
         {
             crate::perf_section!("lookup.evaluate.eval_at_block");
             let d_polys: [&DeviceBuffer<C::Scalar>; 5] = [

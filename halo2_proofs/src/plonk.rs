@@ -259,7 +259,7 @@ impl<'a, C: CurveAffine> GpuProvingKey<'a, C> {
             // D2H per eval). Counted so the perf/nsys workflow attributes it.
             let mut evals = vec![C::Scalar::ZERO; n];
             let bytes = n * std::mem::size_of::<C::Scalar>();
-            crate::perf_d2h!("cuda.permutation_sigma_eval.result", bytes as u64);
+            crate::perf_d2h!("cuda.permutation_sigma_eval.result", bytes);
             unsafe {
                 cuda_memcpy_on::<true, false>(
                     evals.as_mut_ptr() as *mut libc::c_void,

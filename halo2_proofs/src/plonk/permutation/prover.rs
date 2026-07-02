@@ -325,11 +325,10 @@ impl<C: CurveAffine> Constructed<C> {
         {
             crate::perf_section!("permutation.evaluate.eval_at_loop");
             // Collect (device poly, point) pairs in the exact `write_scalar`
-            // order, then do ONE device-out batch eval + ONE batched D2H (was:
-            // a synced 32-byte D2H per `.eval_at()`). Order per set:
-            // product@x, product@x_next, and — for every set except the last —
-            // product@x^{-(blinding+1)} to chain each set's last running-product
-            // value to the next set's first.
+            // order, then do ONE device-out batch eval + ONE batched D2H.
+            // Order per set: product@x, product@x_next, and — for every set
+            // except the last — product@x^{-(blinding+1)} to chain each set's
+            // last running-product value to the next set's first.
             let x_next = domain.rotate_omega(*x, Rotation::next());
             let x_last = domain.rotate_omega(*x, Rotation(-((blinding_factors + 1) as i32)));
             let num_sets = self.sets.len();
