@@ -135,9 +135,10 @@ pub fn batch_eval_polynomial_gpu<F: Field>(
 /// Caller-owned `d_polys` in, caller-owned `DeviceBuffer<F>` (length
 /// `d_polys.len()`) out; result slot `i` corresponds to input pair `i`. Work
 /// enqueues on `HALO2_GPU_CTX.stream` and returns before completion, so host
-/// readers must D2H + stream-sync. Per-eval Horner scratch is freed
-/// stream-ordered after the result copy, so the D→D copy reads the result
-/// before the block is reclaimed.
+/// readers must D2H + stream-sync. A single Horner scratch (sized to the max
+/// poly workspace) is allocated once and reused across all evals; the shared
+/// stream serializes eval_i → result-copy_i → eval_{i+1}, so each result is
+/// copied out of the scratch before the next eval overwrites it.
 pub fn batch_eval_polynomial_device_out<F: Field>(
     d_polys: &[&DeviceBuffer<F>],
     eval_points: &[F],
@@ -154,6 +155,19 @@ pub fn batch_eval_polynomial_device_out<F: Field>(
     let elt_bytes = mem::size_of::<F>();
     let d_out = DeviceBuffer::<F>::with_capacity_on(n, &HALO2_GPU_CTX);
 
+    // One Horner scratch reused across every eval. Sized to the MAX workspace
+    // over all polys so a shorter poly always fits (robust if a caller ever
+    // mixes lengths; the eval workspace is currently length-independent, so
+    // this equals every per-eval size). All eval kernels and the D→D result
+    // copies enqueue on the single `HALO2_GPU_CTX.stream`, which serializes
+    // them (eval_i → copy_i → eval_{i+1}); so eval_i's result is copied out of
+    // the shared scratch before eval_{i+1} overwrites it — one reused scratch
+    // is safe. Collapses N alloc/async-free pairs into 1.
+    let max_len = d_polys.iter().map(|p| p.len()).max().unwrap();
+    let max_scratch_bytes =
+        unsafe { _halo2_eval_polynomial_workspace_size(max_len as u64) } as usize;
+    let scratch = DeviceBuffer::<u8>::with_capacity_on(max_scratch_bytes, &HALO2_GPU_CTX);
+
     for (i, (d_poly, point)) in d_polys.iter().zip(eval_points.iter()).enumerate() {
         debug_assert!(
             !d_poly.is_empty(),
@@ -161,8 +175,10 @@ pub fn batch_eval_polynomial_device_out<F: Field>(
         );
         let len = d_poly.len();
         let point_obj = FFITraitObject::from_ref(point);
+        // Per-poly workspace size (≤ `max_scratch_bytes`; the reused buffer is
+        // ≥ this). Passing the per-len size keeps the kernel correct for
+        // shorter polys even if the workspace ever becomes length-dependent.
         let scratch_bytes = unsafe { _halo2_eval_polynomial_workspace_size(len as u64) } as usize;
-        let scratch = DeviceBuffer::<u8>::with_capacity_on(scratch_bytes, &HALO2_GPU_CTX);
 
         let mut d_result_ptr: *mut libc::c_void = std::ptr::null_mut();
         let status = unsafe {
@@ -180,9 +196,10 @@ pub fn batch_eval_polynomial_device_out<F: Field>(
             return Err(status.into());
         }
 
-        // Device-to-device copy of the 32-byte result into slot `i`. Enqueued
-        // on the stream before `scratch` drops, so it reads the result before
-        // the scratch block's (stream-ordered) async free.
+        // Device-to-device copy of the 32-byte result into slot `i`, enqueued on
+        // the stream so it reads the result out of the shared scratch before the
+        // next iteration's eval overwrites it (reuse-ordering; see the scratch
+        // note above).
         let dst =
             unsafe { (d_out.as_mut_raw_ptr() as *mut u8).add(i * elt_bytes) } as *mut libc::c_void;
         unsafe {

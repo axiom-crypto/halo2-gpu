@@ -134,6 +134,23 @@ fn mixed_poly_sizes_in_one_batch() {
 }
 
 #[test]
+fn ascending_mixed_poly_sizes_largest_last() {
+    // Strictly ascending lengths with the LARGEST poly LAST. The single hoisted
+    // scratch must be sized to the MAX workspace over all polys up front: a
+    // buffer sized to the first (or any earlier) poly would be too small for
+    // the later, larger one. Complements `mixed_poly_sizes_in_one_batch` (max
+    // not last) and guards the max-len sizing + per-iteration `scratch_bytes`.
+    let x = Fr::random(OsRng);
+    let polys = vec![rand_poly(1 << 8), rand_poly(1 << 10), rand_poly(1 << 12)];
+    let points = vec![
+        x,
+        EvaluationDomain::<Fr>::new(1, 10).rotate_omega(x, Rotation::next()),
+        EvaluationDomain::<Fr>::new(1, 12).rotate_omega(x, Rotation::prev()),
+    ];
+    check(&polys, &points);
+}
+
+#[test]
 fn production_size_batch() {
     // Production-representative "large" batch.
     let k = 16;
