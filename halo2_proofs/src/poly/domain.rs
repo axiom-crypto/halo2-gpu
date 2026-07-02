@@ -1,6 +1,7 @@
 //! Contains utilities for performing polynomial arithmetic over an evaluation
 //! domain that is of a suitable size for the application.
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use std::ops::{Deref, DerefMut};
 use std::panic;
@@ -143,8 +144,42 @@ pub struct EvaluationDomain<F: Field> {
     t_evaluations: Vec<F>,
     barycentric_weight: F,
 
-    // Recursive stuff
-    fft_data: HashMap<usize, FFTData<F>>,
+    // Recursive stuff.
+    //
+    // Lazily-materialized host twiddle tables, keyed by length. The GPU path
+    // computes twiddles on-device and never calls `get_fft_data`, so eager
+    // precompute in `new` was dead host work; host CPU reference paths
+    // materialize a table on first access, byte-identical to the former eager
+    // build.
+    fft_data: HashMap<usize, LazyFftData<F>>,
+}
+
+/// A twiddle table (`FFTData`) materialized on first access: `get_or_init` is
+/// deterministic, so the table is byte-identical to the former eager build, and
+/// `OnceLock` keeps concurrent host readers correct.
+#[derive(Clone, Debug)]
+struct LazyFftData<F: Field> {
+    len: usize,
+    omega: F,
+    omega_inv: F,
+    cell: OnceLock<FFTData<F>>,
+}
+
+impl<F: Field> LazyFftData<F> {
+    fn new(len: usize, omega: F, omega_inv: F) -> Self {
+        Self {
+            len,
+            omega,
+            omega_inv,
+            cell: OnceLock::new(),
+        }
+    }
+
+    /// Materialize (once) and return the twiddle table.
+    fn get(&self) -> &FFTData<F> {
+        self.cell
+            .get_or_init(|| FFTData::new(self.len, self.omega, self.omega_inv))
+    }
 }
 
 impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
@@ -243,11 +278,16 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
 
         let omega_inv = omegas_inv[0];
         let extended_omega_inv = *omegas_inv.last().unwrap();
+        // Register the twiddle-table parameters for every intermediate FFT
+        // length, but DO NOT build the tables here: the host `Fr`-mul twiddle
+        // loop in `FFTData::new` is dead work on the GPU path (the CUDA NTT
+        // computes its own twiddles from scalar `omega`). Tables are built
+        // lazily on the first `get_fft_data(len)` call — see `LazyFftData`.
         let mut fft_data = HashMap::new();
         for (i, (omega, omega_inv)) in omegas.into_iter().zip(omegas_inv).enumerate() {
             let intermediate_k = k as usize + i;
             let len = 1usize << intermediate_k;
-            fft_data.insert(len, FFTData::<F>::new(len, omega, omega_inv));
+            fft_data.insert(len, LazyFftData::<F>::new(len, omega, omega_inv));
         }
 
         EvaluationDomain {
@@ -1483,11 +1523,13 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         self.n
     }
 
-    /// Get the private `fft_data`
+    /// Get the private `fft_data`, materializing the length-`l` twiddle table on
+    /// first access (see `LazyFftData`).
     pub fn get_fft_data(&self, l: usize) -> &FFTData<F> {
         self.fft_data
             .get(&l)
             .expect("log_2(l) must be in k..=extended_k")
+            .get()
     }
 }
 
@@ -1533,6 +1575,108 @@ mod tests {
             domain.distribute_powers_zeta(a, false);
         }
         Ok(())
+    }
+
+    // --- C1 (T1): lazy host FFT twiddle precompute ---------------------------
+    //
+    // These guard the invariant behind eliminating the eager `FFTData::new`
+    // twiddle loop from `EvaluationDomain::new`: `get_fft_data` must still hand
+    // back tables byte-identical to the former eager construction, and the
+    // construction must actually be lazy (no host `Fr`-mul work at `new` time).
+
+    /// Independent oracle for the `2^m`-th primitive root of unity and its
+    /// inverse, derived straight from `PrimeField::ROOT_OF_UNITY` (the
+    /// `2^S`-th root) without touching any `EvaluationDomain` internals. This
+    /// mirrors, from first principles, the per-length omega the domain assigns
+    /// to the FFT of length `1 << m`.
+    fn canonical_root_of_unity<F: ff::PrimeField>(m: u32) -> (F, F) {
+        let mut w = F::ROOT_OF_UNITY;
+        for _ in m..F::S {
+            w = w.square();
+        }
+        (w, w.invert().unwrap())
+    }
+
+    /// Byte-identity gate on the production shapes k = 22 and k = 23: for a
+    /// `j = 1` domain the sole FFT length is `1 << k`, and the lazily-built
+    /// twiddle table must equal a freshly, independently constructed
+    /// `FFTData::new(1 << k, omega, omega_inv)`.
+    #[test]
+    fn fft_data_twiddles_byte_identical_production_shapes() {
+        use halo2curves::bn256::Fr;
+
+        for k in [22u32, 23u32] {
+            let domain = EvaluationDomain::<Fr>::new(1, k);
+            // j = 1 => extended_k == k => exactly one FFT length.
+            assert_eq!(domain.extended_k(), k);
+            let len = 1usize << k;
+
+            let (omega, omega_inv) = canonical_root_of_unity::<Fr>(k);
+            let reference = FFTData::new(len, omega, omega_inv);
+
+            assert_eq!(
+                domain.get_fft_data(len),
+                &reference,
+                "lazy twiddle table diverged from eager reference at k = {k}",
+            );
+        }
+    }
+
+    /// Byte-identity gate across an *extended* domain (`j > 1`), which registers
+    /// several intermediate FFT lengths `1 << (k..=extended_k)`. This exercises
+    /// the per-length `(omega, omega_inv)` mapping that a single-length shape
+    /// cannot. Small `k` keeps it cheap while still covering the mapping.
+    #[test]
+    fn fft_data_twiddles_byte_identical_extended_domain() {
+        use halo2curves::bn256::Fr;
+
+        let domain = EvaluationDomain::<Fr>::new(4, 5);
+        assert!(
+            domain.extended_k() > domain.k(),
+            "test needs a genuinely extended domain (multiple FFT lengths)",
+        );
+
+        for m in domain.k()..=domain.extended_k() {
+            let len = 1usize << m;
+            let (omega, omega_inv) = canonical_root_of_unity::<Fr>(m);
+            let reference = FFTData::new(len, omega, omega_inv);
+            assert_eq!(
+                domain.get_fft_data(len),
+                &reference,
+                "lazy twiddle table diverged from eager reference at len = 2^{m}",
+            );
+        }
+    }
+
+    /// The precompute must be lazy: `EvaluationDomain::new` builds no twiddle
+    /// tables, and `get_fft_data` materializes exactly the one requested.
+    #[test]
+    fn fft_data_lazy_no_eager_precompute() {
+        use halo2curves::bn256::Fr;
+
+        let domain = EvaluationDomain::<Fr>::new(4, 5);
+        // More than one length so "only the requested one" is meaningful.
+        assert!(domain.fft_data.len() > 1);
+
+        // Nothing built at construction time.
+        for lazy in domain.fft_data.values() {
+            assert!(
+                lazy.cell.get().is_none(),
+                "EvaluationDomain::new eagerly built a twiddle table",
+            );
+        }
+
+        // First access materializes exactly that length.
+        let target = 1usize << domain.k();
+        let _ = domain.get_fft_data(target);
+        for (&len, lazy) in domain.fft_data.iter() {
+            let built = lazy.cell.get().is_some();
+            assert_eq!(
+                built,
+                len == target,
+                "unexpected materialization state for len = {len}",
+            );
+        }
     }
 
     #[test]

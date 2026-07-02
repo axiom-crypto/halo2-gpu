@@ -956,12 +956,28 @@ where
                         .map(|p| {
                             // Device-output iFFT for the lookup permuted polys,
                             // which then flow into multiopen via `ProverQuery`.
-                            let permuted_input_poly = domain.lagrange_to_coeff_device(
-                                p.permuted_input_expression.into_host_polynomial(),
-                            )?;
-                            let permuted_table_poly = domain.lagrange_to_coeff_device(
-                                p.permuted_table_expression.into_host_polynomial(),
-                            )?;
+                            // Route on residency: the device-fused lookup path
+                            // yields `MaybeDevice::Device`, so feed its device
+                            // buffer straight into the device-input iFFT
+                            // (device-in → device-out, no PCIe round-trip). The
+                            // `Host` arm (VRAM fallback) keeps the H2D+iFFT path
+                            // and doubles as the byte-identity oracle.
+                            let permuted_input_poly = match p.permuted_input_expression {
+                                crate::poly::MaybeDevice::Device(dp) => {
+                                    domain.lagrange_to_coeff_device_input(dp)?
+                                }
+                                crate::poly::MaybeDevice::Host(hp) => {
+                                    domain.lagrange_to_coeff_device(hp)?
+                                }
+                            };
+                            let permuted_table_poly = match p.permuted_table_expression {
+                                crate::poly::MaybeDevice::Device(dp) => {
+                                    domain.lagrange_to_coeff_device_input(dp)?
+                                }
+                                crate::poly::MaybeDevice::Host(hp) => {
+                                    domain.lagrange_to_coeff_device(hp)?
+                                }
+                            };
                             Ok(CommittedUnpacked {
                                 permuted_input_poly,
                                 permuted_table_poly,
