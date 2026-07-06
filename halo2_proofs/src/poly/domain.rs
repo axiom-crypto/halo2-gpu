@@ -13,7 +13,6 @@ use crate::cuda::funcs::{
     ifft_many_device, ifft_many_h2d, split_radix_fft_gpu, split_radix_fft_inout_gpu,
 };
 use crate::cuda::modules::ifft_cosetfftpart_gpu;
-use crate::cuda::utils::query_device_free_bytes_for_chunking;
 use crate::cuda::utils::{FFITraitObject, HALO2_GPU_CTX};
 use crate::cuda::HaloGpuError;
 use crate::{
@@ -321,9 +320,9 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
 
     /// Device-side variant of `extended_from_lagrange_vec`.
     ///
-    /// If every part is device-resident and there is enough free VRAM for the
-    /// output, this gathers the parts on the GPU and returns a device-resident
-    /// polynomial. Otherwise, it materializes the inputs and uses the host path.
+    /// When every part is device-resident, this gathers the parts on the GPU
+    /// and returns a device-resident polynomial. (Under the `vram-fallback`
+    /// feature, non-device-resident inputs materialize and use the host path.)
     pub fn extended_from_lagrange_vec_device(
         &self,
         values: Vec<super::MaybeDevice<F, LagrangeCoeff>>,
@@ -353,35 +352,6 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             return crate::cpu::poly::domain::extended_from_lagrange_vec_not_all_device(
                 self, values,
             );
-        }
-
-        let extended_bytes = self.extended_len() * std::mem::size_of::<F>();
-        let free_bytes = query_device_free_bytes_for_chunking();
-        if free_bytes < extended_bytes {
-            #[cfg(not(feature = "vram-fallback"))]
-            {
-                tracing::error!(
-                    target: "halo2_vram_fallback",
-                    site = "extended_from_lagrange_vec_device.vram_tight",
-                    free_bytes,
-                    needed_bytes = extended_bytes,
-                    "VRAM-tight: returning InsufficientGpuMemory (vram-fallback feature disabled)"
-                );
-                return Err(GpuError::HaloGpu(HaloGpuError::InsufficientGpuMemory {
-                    context: "extended_from_lagrange_vec_device.vram_tight",
-                    magnitude: extended_bytes as u64,
-                    free_bytes: free_bytes as u64,
-                }));
-            }
-            #[cfg(feature = "vram-fallback")]
-            {
-                return crate::cpu::poly::domain::extended_from_lagrange_vec_vram_tight(
-                    self,
-                    values,
-                    free_bytes,
-                    extended_bytes,
-                );
-            }
         }
 
         // All values are Device-resident.
@@ -510,11 +480,6 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     /// Device-input batch iFFT: `Vec<Polynomial<F, LagrangeCoeff, Device>>`
     /// → `Vec<Polynomial<F, Coeff, Device>>`. Both endpoints device-resident,
     /// no PCIe traffic. Dispatches `ifft_many_device`.
-    ///
-    /// VRAM gating: per-batch check on aggregate device bytes
-    /// (`in_many.len() * n_bytes`); on tight VRAM either returns
-    /// `HaloGpuError::InsufficientGpuMemory` (default) or, under the
-    /// `vram-fallback` feature, D2H's inputs → host iFFT → H2D's outputs.
     pub(crate) fn lagrange_to_coeff_many_device_inputs(
         &self,
         in_many: &[Polynomial<F, LagrangeCoeff, Device>],
@@ -526,42 +491,6 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         );
         if in_many.is_empty() {
             return Ok(vec![]);
-        }
-
-        // VRAM gating: mirror the sibling `lagrange_to_coeff_many_device`.
-        // Aggregate output bytes drive the budget; on tight VRAM either
-        // return `InsufficientGpuMemory` or fall back to the host arm
-        // (D2H inputs → host iFFT → H2D outputs) so producer sites never
-        // OOM.
-        let n_bytes = (1usize << self.k) * std::mem::size_of::<F>();
-        let total_bytes = in_many.len() * n_bytes;
-        let free_bytes = query_device_free_bytes_for_chunking();
-        if free_bytes < total_bytes {
-            #[cfg(not(feature = "vram-fallback"))]
-            {
-                tracing::error!(
-                    target: "halo2_vram_fallback",
-                    site = "lagrange_to_coeff_many_device_inputs.vram_tight",
-                    free_bytes,
-                    needed_bytes = total_bytes,
-                    batch_len = in_many.len(),
-                    "VRAM-tight: returning InsufficientGpuMemory (vram-fallback feature disabled)"
-                );
-                return Err(GpuError::HaloGpu(HaloGpuError::InsufficientGpuMemory {
-                    context: "lagrange_to_coeff_many_device_inputs.vram_tight",
-                    magnitude: total_bytes as u64,
-                    free_bytes: free_bytes as u64,
-                }));
-            }
-            #[cfg(feature = "vram-fallback")]
-            {
-                return crate::cpu::poly::domain::lagrange_to_coeff_many_device_inputs_host_arm(
-                    self,
-                    in_many,
-                    free_bytes,
-                    total_bytes,
-                );
-            }
         }
 
         let in_objs: Vec<FFITraitObject> = in_many
@@ -580,43 +509,12 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     /// signature of `lagrange_to_coeff`). Internally dispatches the
     /// `_halo2_fft_many_to_device` FFI (Host-input, Device-output batch
     /// iFFT) with `num_many = 1`.
-    ///
-    /// VRAM gating: if the per-poly Device output would push the GPU
-    /// memory budget past `query_device_free_bytes_for_chunking()`, the
-    /// implementation falls back to the existing host arm
-    /// (`lagrange_to_coeff`) so producer sites never OOM.
     pub fn lagrange_to_coeff_device(
         &self,
         a: Polynomial<F, LagrangeCoeff>,
     ) -> Result<Polynomial<F, Coeff, Device>, GpuError> {
         crate::perf_section!("domain.lagrange_to_coeff_device");
         assert_eq!(a.len(), 1 << self.k);
-
-        let n_bytes = (1usize << self.k) * std::mem::size_of::<F>();
-        let free_bytes = query_device_free_bytes_for_chunking();
-        if free_bytes < n_bytes {
-            #[cfg(not(feature = "vram-fallback"))]
-            {
-                tracing::error!(
-                    target: "halo2_vram_fallback",
-                    site = "lagrange_to_coeff_device.vram_tight",
-                    free_bytes,
-                    needed_bytes = n_bytes,
-                    "VRAM-tight: returning InsufficientGpuMemory (vram-fallback feature disabled)"
-                );
-                return Err(GpuError::HaloGpu(HaloGpuError::InsufficientGpuMemory {
-                    context: "lagrange_to_coeff_device.vram_tight",
-                    magnitude: n_bytes as u64,
-                    free_bytes: free_bytes as u64,
-                }));
-            }
-            #[cfg(feature = "vram-fallback")]
-            {
-                return crate::cpu::poly::domain::lagrange_to_coeff_device_host_arm(
-                    self, a, free_bytes, n_bytes,
-                );
-            }
-        }
 
         let outs = ifft_many_h2d::<F>(&[a], self.k, self.omega_inv, self.ifft_divisor)
             .map_err(GpuError::HaloGpu)?;
@@ -632,45 +530,12 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     /// PCIe traffic. Dispatches the device-input batch iFFT
     /// (`ifft_many_device`) with `num_many = 1`, mirroring
     /// the batch arm `lagrange_to_coeff_many_device`.
-    ///
-    /// VRAM gating: if the per-poly Device output would push the GPU
-    /// memory budget past `query_device_free_bytes_for_chunking()`, the
-    /// implementation either returns `HaloGpuError::InsufficientGpuMemory`
-    /// (default) or, under the `vram-fallback` feature, D2H's the input,
-    /// runs the host iFFT (`lagrange_to_coeff`), then H2D's the output —
-    /// mirroring the sibling `lagrange_to_coeff_device`.
     pub fn lagrange_to_coeff_device_input(
         &self,
         a: Polynomial<F, LagrangeCoeff, Device>,
     ) -> Result<Polynomial<F, Coeff, Device>, GpuError> {
         crate::perf_section!("domain.lagrange_to_coeff_device_input");
         assert_eq!(a.len(), 1 << self.k);
-
-        let n_bytes = (1usize << self.k) * std::mem::size_of::<F>();
-        let free_bytes = query_device_free_bytes_for_chunking();
-        if free_bytes < n_bytes {
-            #[cfg(not(feature = "vram-fallback"))]
-            {
-                tracing::error!(
-                    target: "halo2_vram_fallback",
-                    site = "lagrange_to_coeff_device_input.vram_tight",
-                    free_bytes,
-                    needed_bytes = n_bytes,
-                    "VRAM-tight: returning InsufficientGpuMemory (vram-fallback feature disabled)"
-                );
-                return Err(GpuError::HaloGpu(HaloGpuError::InsufficientGpuMemory {
-                    context: "lagrange_to_coeff_device_input.vram_tight",
-                    magnitude: n_bytes as u64,
-                    free_bytes: free_bytes as u64,
-                }));
-            }
-            #[cfg(feature = "vram-fallback")]
-            {
-                return crate::cpu::poly::domain::lagrange_to_coeff_device_input_host_arm(
-                    self, a, free_bytes, n_bytes,
-                );
-            }
-        }
 
         let in_objs = vec![FFITraitObject::new(a.device_buf().as_raw_ptr() as usize)];
         let out_bufs = ifft_many_device::<F>(in_objs, self.k, self.omega_inv, self.ifft_divisor)
@@ -684,12 +549,6 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     ///
     /// Returns a `Vec<Polynomial<F, Coeff>>` where each entry is a
     /// Device-resident polynomial. Inputs are consumed.
-    ///
-    /// VRAM gating: per-batch check on aggregate device bytes
-    /// (`in_many.len() * n_bytes`); falls back to the host arm
-    /// (`lagrange_to_coeff_many`) when device memory is tight, so the
-    /// producer sites never OOM. Producer sites that prefer per-poly
-    /// gating can chunk their input batches manually.
     pub fn lagrange_to_coeff_many_device(
         &self,
         in_many: &[Polynomial<F, LagrangeCoeff>],
@@ -701,36 +560,6 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         );
         if in_many.is_empty() {
             return Ok(vec![]);
-        }
-        let n_bytes = (1usize << self.k) * std::mem::size_of::<F>();
-        let total_bytes = in_many.len() * n_bytes;
-        let free_bytes = query_device_free_bytes_for_chunking();
-        if free_bytes < total_bytes {
-            #[cfg(not(feature = "vram-fallback"))]
-            {
-                tracing::error!(
-                    target: "halo2_vram_fallback",
-                    site = "lagrange_to_coeff_many_device.vram_tight",
-                    free_bytes,
-                    needed_bytes = total_bytes,
-                    batch_len = in_many.len(),
-                    "VRAM-tight: returning InsufficientGpuMemory (vram-fallback feature disabled)"
-                );
-                return Err(GpuError::HaloGpu(HaloGpuError::InsufficientGpuMemory {
-                    context: "lagrange_to_coeff_many_device.vram_tight",
-                    magnitude: total_bytes as u64,
-                    free_bytes: free_bytes as u64,
-                }));
-            }
-            #[cfg(feature = "vram-fallback")]
-            {
-                return crate::cpu::poly::domain::lagrange_to_coeff_many_device_host_arm(
-                    self,
-                    in_many,
-                    free_bytes,
-                    total_bytes,
-                );
-            }
         }
         let outs = ifft_many_h2d::<F>(in_many, self.k, self.omega_inv, self.ifft_divisor)
             .map_err(GpuError::HaloGpu)?;

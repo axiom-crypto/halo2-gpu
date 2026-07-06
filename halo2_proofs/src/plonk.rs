@@ -7,7 +7,7 @@
 use group::ff::FromUniformBytes;
 
 use crate::arithmetic::CurveAffine;
-use crate::cuda::utils::{query_device_free_bytes_for_chunking, HALO2_GPU_CTX};
+use crate::cuda::utils::HALO2_GPU_CTX;
 use crate::poly::{Coeff, DevicePolyExt, EvaluationDomain, HostPolyExt, LagrangeCoeff, Polynomial};
 use crate::transcript::{ChallengeScalar, EncodedChallenge, Transcript, TranscriptWrite};
 use crate::{SerdeCurveAffine, SerdePrimeField};
@@ -404,8 +404,8 @@ where
     }
 }
 
-/// Shared lazy initializer for the slice-valued PK device mirrors: VRAM gate,
-/// per-poly H2D loop, and `perf_h2d!` byte-trace.
+/// Shared lazy initializer for the slice-valued PK device mirrors: per-poly
+/// H2D loop and `perf_h2d!` byte-trace.
 fn try_init_pk_device_mirror<'pk, C: CurveAffine, B>(
     host: &[Polynomial<C::Scalar, B, crate::poly::Host>],
     perf_tag: &'static str,
@@ -416,21 +416,6 @@ where
 {
     let elem_bytes = std::mem::size_of::<C::Scalar>();
     let total_bytes: usize = host.iter().map(|p| p.len() * elem_bytes).sum();
-    let free_bytes = query_device_free_bytes_for_chunking();
-    // Require >= 2x the mirror size free, leaving room for a transient pool
-    // peak co-resident; fail open (return None for the host fallback) rather
-    // than panic.
-    if free_bytes < total_bytes.saturating_mul(2) {
-        tracing::warn!(
-            target: "halo2_vram_fallback",
-            site = "try_init_pk_device_mirror.headroom_gate",
-            perf_tag,
-            free_bytes = free_bytes as u64,
-            needed_bytes = total_bytes as u64,
-            "VRAM fallback fired: PK device mirror skipped (2× headroom gate failed); caller falls back to host arm"
-        );
-        return None;
-    }
     let mut mirror: Vec<Polynomial<C::Scalar, B, crate::poly::Device>> =
         Vec::with_capacity(host.len());
     for poly in host {
@@ -466,18 +451,6 @@ where
     B: 'static,
 {
     let total_bytes: usize = host.len() * std::mem::size_of::<C::Scalar>();
-    let free_bytes = query_device_free_bytes_for_chunking();
-    if free_bytes < total_bytes {
-        tracing::error!(
-            target: "halo2_vram_fallback",
-            site = "try_init_pk_device_mirror_one.headroom_gate",
-            perf_tag,
-            free_bytes = free_bytes as u64,
-            needed_bytes = total_bytes as u64,
-            "not enough vram"
-        );
-        return None;
-    }
     let mirror = match host.to_device_on(&HALO2_GPU_CTX) {
         Ok(d) => d,
         Err(e) => {
