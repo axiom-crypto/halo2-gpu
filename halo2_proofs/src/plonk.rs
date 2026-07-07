@@ -246,8 +246,8 @@ impl<'a, C: CurveAffine> GpuProvingKey<'a, C> {
         Ok(())
     }
 
-    /// Lazy device mirror of `inner.fixed_polys()` (Coeff form). `None` if
-    /// VRAM-gated out or H2D fails, leaving the host-arm fallback to upload.
+    /// Lazy device mirror of `inner.fixed_polys()` (Coeff form). `None` only if
+    /// the H2D upload fails.
     pub(crate) fn fixed_polys_device(
         &self,
     ) -> Option<&[Polynomial<C::Scalar, Coeff, crate::poly::Device>]> {
@@ -263,7 +263,7 @@ impl<'a, C: CurveAffine> GpuProvingKey<'a, C> {
     }
 
     /// Lazy device mirror of `inner.fixed_values()` (Lagrange form). Returns
-    /// `None` if VRAM-gated out.
+    /// `None` only if the H2D upload fails.
     pub(crate) fn fixed_values_device(
         &self,
     ) -> Option<&[Polynomial<C::Scalar, LagrangeCoeff, crate::poly::Device>]> {
@@ -309,7 +309,7 @@ impl<'a, C: CurveAffine> GpuProvingKey<'a, C> {
         .map(|v| v.as_slice())
     }
 
-    /// Lazy device mirror of `inner.l0()`. Returns `None` if VRAM-gated out.
+    /// Lazy device mirror of `inner.l0()`. Returns `None` only if the H2D upload fails.
     pub(crate) fn l0_device(&self) -> Option<&Polynomial<C::Scalar, Coeff, crate::poly::Device>> {
         if let Some(v) = self.l0_device.get() {
             return Some(v);
