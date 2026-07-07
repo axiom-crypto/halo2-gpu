@@ -88,7 +88,6 @@ namespace pippenger {
                 W++;
                 i -= win_bit;
             }
-            __syncthreads();
         }
     }
 
