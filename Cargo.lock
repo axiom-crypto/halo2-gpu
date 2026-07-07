@@ -787,7 +787,7 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "benchmarks"
-version = "1.0.0-rc.0"
+version = "1.0.0"
 dependencies = [
  "dashmap",
  "eyre",
@@ -2161,7 +2161,7 @@ dependencies = [
 
 [[package]]
 name = "halo2-axiom-gpu"
-version = "1.0.0-rc.0"
+version = "1.0.0"
 dependencies = [
  "ahash",
  "anyhow",
