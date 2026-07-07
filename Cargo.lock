@@ -2141,7 +2141,7 @@ dependencies = [
 [[package]]
 name = "halo2-axiom"
 version = "0.5.1"
-source = "git+https://github.com/axiom-crypto/halo2?branch=main#5f2df84fa4043d7b1f3ae8a98c08e2829e1d5d94"
+source = "git+https://github.com/axiom-crypto/halo2?branch=main#c9e642dd14561274de4f6f11625aa3ae73ea74d0"
 dependencies = [
  "blake2b_simd",
  "crossbeam",
