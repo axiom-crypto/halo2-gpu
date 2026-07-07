@@ -10,9 +10,11 @@ pub use halo2curves::{CurveAffine, CurveExt};
 // GPU-neutral items re-exported from canonical halo2-axiom so host folds share
 // one source of truth with downstream consumers.
 pub use halo2_axiom::arithmetic::{
-    best_fft, compute_inner_product, eval_polynomial, evaluate_vanishing_polynomial, g_to_lagrange,
+    compute_inner_product, eval_polynomial, evaluate_vanishing_polynomial, g_to_lagrange,
     lagrange_interpolate, powers, FftGroup,
 };
+
+use crate::fft::recursive::FFTData;
 
 /// Mirrors `DENSE_POWER_DEGREE` in `halo2_proofs/cuda/include/kernel/omega.h`.
 /// The GPU omega LUT layout assumes this value — changing one side without
@@ -30,6 +32,17 @@ cfg_if::cfg_if!(
         pub const GPU_MAX_MSM_LOG: usize = 26;
     }
 );
+
+/// Dispatcher for FFTs performed through halo2-axiom-gpu.
+pub fn best_fft<Scalar: Field, G: FftGroup<Scalar>>(
+    a: &mut [G],
+    omega: Scalar,
+    log_n: u32,
+    data: &FFTData<Scalar>,
+    inverse: bool,
+) {
+    crate::fft::fft(a, omega, log_n, data, inverse);
+}
 
 /// Performs a small multi-exponentiation operation.
 /// Uses the double-and-add algorithm with doublings shared across points.

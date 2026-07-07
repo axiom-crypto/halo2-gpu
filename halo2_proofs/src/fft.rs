@@ -1,7 +1,27 @@
-//! halo2-axiom-gpu re-exports the canonical FFT modules from halo2-axiom.
-//! The local fork carried verbatim copies of the dispatcher and submodules;
-//! consolidation lets the GPU build share the upstream implementations.
-pub use halo2_axiom::fft::{baseline, fft, parallel, recursive};
+//! FFT modules re-exported from canonical halo2-axiom, with a GPU-local
+//! dispatcher that keeps the recursive path.
+
+use ff::Field;
+use halo2_axiom::arithmetic::FftGroup;
+
+pub use halo2_axiom::fft::{baseline, parallel, recursive};
+
+use self::recursive::FFTData;
+
+/// Runtime dispatcher used by halo2-axiom-gpu.
+///
+/// The GPU prover deliberately avoids the x86 parallel FFT dispatcher because
+/// that path can conflict with the crate's device-memory scheduling. The
+/// canonical halo2-axiom dispatcher remains unchanged for non-GPU users.
+pub fn fft<Scalar: Field, G: FftGroup<Scalar>>(
+    a: &mut [G],
+    omega: Scalar,
+    log_n: u32,
+    data: &FFTData<Scalar>,
+    inverse: bool,
+) {
+    recursive::fft(a, omega, log_n, data, inverse)
+}
 
 #[cfg(test)]
 mod tests {
