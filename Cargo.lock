@@ -2142,7 +2142,7 @@ dependencies = [
 [[package]]
 name = "halo2-axiom"
 version = "0.5.1"
-source = "git+https://github.com/axiom-crypto/halo2?branch=fix%2Fperf-regression#b32ae1cf0f0bd236c30163e0d295ede86124a3ca"
+source = "git+https://github.com/axiom-crypto/halo2?branch=main#c9e642dd14561274de4f6f11625aa3ae73ea74d0"
 dependencies = [
  "blake2b_simd",
  "crossbeam",
@@ -2179,7 +2179,7 @@ dependencies = [
  "getrandom 0.2.17",
  "git-version",
  "group 0.13.0",
- "halo2-axiom 0.5.1 (git+https://github.com/axiom-crypto/halo2?branch=fix%2Fperf-regression)",
+ "halo2-axiom 0.5.1 (git+https://github.com/axiom-crypto/halo2?branch=main)",
  "halo2_legacy_pdqsort",
  "halo2curves-axiom 0.7.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "itertools 0.11.0",
