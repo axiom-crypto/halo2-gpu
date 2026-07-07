@@ -25,7 +25,8 @@ fn run_one(log_n: u32) {
     // `j` (blowup factor) only affects the extended domain; the base-n iFFT
     // exercised here is independent of it.
     let j: u32 = 4;
-    let domain = EvaluationDomain::<Fr>::new(j, log_n);
+    let cpu_domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(j, log_n);
+    let domain = EvaluationDomain::from_host_domain(&cpu_domain);
     let n = 1usize << log_n;
 
     // One source of Lagrange values feeds both routes.

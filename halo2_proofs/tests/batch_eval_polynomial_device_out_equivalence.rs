@@ -73,7 +73,8 @@ fn rand_poly(len: usize) -> Vec<Fr> {
 
 /// The four phase-5 rotation flavours of a base challenge `x`.
 fn phase5_points(k: u32, x: Fr) -> Vec<Fr> {
-    let domain = EvaluationDomain::<Fr>::new(1, k);
+    let cpu_domain = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, k);
+    let domain = EvaluationDomain::from_host_domain(&cpu_domain);
     let blinding = 5i32;
     vec![
         x,                                        // cur (instance/advice/fixed at Rotation::cur, product@x)
@@ -124,10 +125,14 @@ fn mixed_poly_sizes_in_one_batch() {
         rand_poly(1 << 10),
         rand_poly(1 << 4),
     ];
+    let cpu_domain_12 = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, 12);
+    let domain_12 = EvaluationDomain::from_host_domain(&cpu_domain_12);
+    let cpu_domain_10 = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, 10);
+    let domain_10 = EvaluationDomain::from_host_domain(&cpu_domain_10);
     let points = vec![
         x,
-        EvaluationDomain::<Fr>::new(1, 12).rotate_omega(x, Rotation::next()),
-        EvaluationDomain::<Fr>::new(1, 10).rotate_omega(x, Rotation::prev()),
+        domain_12.rotate_omega(x, Rotation::next()),
+        domain_10.rotate_omega(x, Rotation::prev()),
         Fr::random(OsRng),
     ];
     check(&polys, &points);
@@ -142,10 +147,14 @@ fn ascending_mixed_poly_sizes_largest_last() {
     // not last) and guards the max-len sizing + per-iteration `scratch_bytes`.
     let x = Fr::random(OsRng);
     let polys = vec![rand_poly(1 << 8), rand_poly(1 << 10), rand_poly(1 << 12)];
+    let cpu_domain_10 = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, 10);
+    let domain_10 = EvaluationDomain::from_host_domain(&cpu_domain_10);
+    let cpu_domain_12 = halo2_axiom::poly::EvaluationDomain::<Fr>::new(1, 12);
+    let domain_12 = EvaluationDomain::from_host_domain(&cpu_domain_12);
     let points = vec![
         x,
-        EvaluationDomain::<Fr>::new(1, 10).rotate_omega(x, Rotation::next()),
-        EvaluationDomain::<Fr>::new(1, 12).rotate_omega(x, Rotation::prev()),
+        domain_10.rotate_omega(x, Rotation::next()),
+        domain_12.rotate_omega(x, Rotation::prev()),
     ];
     check(&polys, &points);
 }
