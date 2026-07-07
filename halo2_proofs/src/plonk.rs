@@ -8,7 +8,7 @@ use group::ff::FromUniformBytes;
 
 use crate::arithmetic::CurveAffine;
 use crate::cuda::funcs::batch_eval_polynomial_device_out;
-use crate::cuda::utils::{query_device_free_bytes_for_chunking, HALO2_GPU_CTX};
+use crate::cuda::utils::HALO2_GPU_CTX;
 use crate::cuda::HaloGpuError;
 use crate::poly::{Coeff, DevicePolyExt, EvaluationDomain, HostPolyExt, LagrangeCoeff, Polynomial};
 use crate::transcript::{ChallengeScalar, EncodedChallenge, Transcript, TranscriptWrite};
