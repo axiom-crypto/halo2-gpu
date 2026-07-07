@@ -81,11 +81,10 @@ phase-check = []
 profile = ["ark-std/print-trace"]
 profile_assign = []
 circuit-params = []
-# Opt-in: retain the CPU host-arm fallback in the three `_device`-named
-# domain helpers (`extended_from_lagrange_vec_device`,
-# `lagrange_to_coeff_device`, `lagrange_to_coeff_many_device`). Default
-# builds return `HaloGpuError::InsufficientGpuMemory` on VRAM-tight
-# conditions instead of silently materializing intermediates to host.
+# Opt-in: in `extended_from_lagrange_vec_device`, when a gather input part is
+# host- (not device-) resident, materialize the remaining parts and run the
+# host gather instead of erroring. Default builds return
+# `HaloGpuError::InsufficientGpuMemory` for that case.
 vram-fallback = []
 
 [lib]
