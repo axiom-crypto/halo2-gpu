@@ -64,7 +64,7 @@ pub fn create_proof<
 ) -> Result<(), GpuError>
 where
     // `FromUniformBytes<64>` is needed to build the GPU proving-key view via
-    // `GpuProvingKey::from_host_ref` → `ProvingKey::get_vk`.
+    // `GpuProvingKey::from_host` → `ProvingKey::get_vk`.
     Scheme::Scalar: Hash + WithSmallOrderMulGroup<3> + FromUniformBytes<64>,
     // The prover spawns a scoped thread that borrows `params`, so it needs Sync
     // (the `ParamsProver` trait itself does not, to match CPU halo2's API).
@@ -79,7 +79,7 @@ where
 
     // Build the GPU proving-key view by borrowing the canonical key (no host-poly
     // clone; device mirrors stay lazy).
-    let gpu_pk = GpuProvingKey::from_host_ref(pk);
+    let gpu_pk = GpuProvingKey::from_host(pk);
     let pk = &gpu_pk;
 
     let num_instance = pk.cs.num_instance_columns;
@@ -135,7 +135,7 @@ where
     {
         params: &'params Scheme::ParamsProver,
         params_n: usize,
-        domain: &'b EvaluationDomain<Scheme::Scalar>,
+        domain: &'b EvaluationDomain<'b, Scheme::Scalar>,
         current_phase: sealed::Phase,
         #[allow(dead_code)]
         num_instance_columns: usize,
@@ -421,7 +421,7 @@ where
 
     fn new_gpu_thread<Scheme, C>(
         params: &Scheme::ParamsProver,
-        domain: &EvaluationDomain<C::Scalar>,
+        domain: &EvaluationDomain<'_, C::Scalar>,
         instance_values: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
         advice_values: &[Polynomial<C::Scalar, LagrangeCoeff, Device>],
         query_instance: bool,
@@ -830,7 +830,7 @@ where
 
         {
             fn materialize_polys_for_batch_eval<'a, C: CurveAffine>(
-                domain: &EvaluationDomain<C::ScalarExt>,
+                domain: &EvaluationDomain<'_, C::ScalarExt>,
                 x: &C::ScalarExt,
                 polys: &'a [Polynomial<C::ScalarExt, Coeff, Device>],
                 queries_indexed: &[(usize, crate::poly::Rotation)],

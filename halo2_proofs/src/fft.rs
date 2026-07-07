@@ -1,14 +1,18 @@
-//! This is a module for dispatching between different FFT implementations at runtime based on environment variable `FFT`.
+//! FFT modules re-exported from canonical halo2-axiom, with a GPU-local
+//! dispatcher that keeps the recursive path.
 
 use ff::Field;
+use halo2_axiom::arithmetic::FftGroup;
+
+pub use halo2_axiom::fft::{baseline, parallel, recursive};
 
 use self::recursive::FFTData;
-use crate::arithmetic::FftGroup;
 
-pub mod baseline;
-pub mod recursive;
-
-/// Runtime dispatcher to concrete FFT implementation
+/// Runtime dispatcher used by halo2-axiom-gpu.
+///
+/// The GPU prover deliberately avoids the x86 parallel FFT dispatcher because
+/// that path can conflict with the crate's device-memory scheduling. The
+/// canonical halo2-axiom dispatcher remains unchanged for non-GPU users.
 pub fn fft<Scalar: Field, G: FftGroup<Scalar>>(
     a: &mut [G],
     omega: Scalar,
@@ -27,12 +31,14 @@ mod tests {
     use rand_core::OsRng;
 
     use crate::{arithmetic::best_fft, fft, multicore, poly::EvaluationDomain};
+    use halo2_axiom::poly::EvaluationDomain as EvaluationDomainCPU;
 
     #[test]
     fn test_fft_recursive() {
         let k = 22;
 
-        let domain = EvaluationDomain::<Scalar>::new(1, k);
+        let domain = EvaluationDomainCPU::<Scalar>::new(1, k);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let n = domain.get_n() as usize;
 
         let input = vec![Scalar::random(OsRng); n];
@@ -72,7 +78,8 @@ mod tests {
     fn test_ifft_recursive() {
         let k = 22;
 
-        let domain = EvaluationDomain::<Scalar>::new(1, k);
+        let domain = EvaluationDomainCPU::<Scalar>::new(1, k);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let n = domain.get_n() as usize;
 
         let input = vec![Scalar::random(OsRng); n];
@@ -102,9 +109,9 @@ mod tests {
 
     #[test]
     fn test_mem_leak() {
-        let j = 1;
         let k = 3;
-        let domain = EvaluationDomain::new(j, k);
+        let domain = EvaluationDomainCPU::<Scalar>::new(1, k);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let omega = domain.get_omega();
         let l = 1 << k;
         let data = domain.get_fft_data(l);

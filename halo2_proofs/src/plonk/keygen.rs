@@ -25,18 +25,14 @@ use crate::poly::{
     commitment::{Blind, Params},
     EvaluationDomain, LagrangeCoeff, Polynomial,
 };
+use halo2_axiom::poly::EvaluationDomain as EvaluationDomainCPU;
 
 /// Runs `Circuit::configure` to build the GPU evaluation domain, the canonical
 /// constraint system, and the circuit config. The vk's canonical-typed domain
 /// is reconstructed identically from `(degree, k)` by the callers.
-fn create_domain<C, ConcreteCircuit>(
-    k: u32,
+fn create_constraint_system<C, ConcreteCircuit>(
     #[cfg(feature = "circuit-params")] params: ConcreteCircuit::Params,
-) -> (
-    EvaluationDomain<C::Scalar>,
-    ConstraintSystem<C::Scalar>,
-    ConcreteCircuit::Config,
-)
+) -> (ConstraintSystem<C::Scalar>, ConcreteCircuit::Config)
 where
     C: CurveAffine,
     ConcreteCircuit: Circuit<C::Scalar>,
@@ -47,10 +43,7 @@ where
     #[cfg(not(feature = "circuit-params"))]
     let config = ConcreteCircuit::configure(&mut cs);
 
-    let degree = cs.degree();
-    let domain = EvaluationDomain::new(degree as u32, k);
-
-    (domain, cs, config)
+    (cs, config)
 }
 
 /// Assembly accumulator for keygen synthesis; implements the canonical `Assignment` trait.
@@ -232,12 +225,13 @@ where
     ConcreteCircuit: Circuit<C::Scalar>,
     C::Scalar: FromUniformBytes<64>,
 {
-    let (domain, cs, config) = create_domain::<C, ConcreteCircuit>(
-        params.k(),
+    let (cs, config) = create_constraint_system::<C, ConcreteCircuit>(
         #[cfg(feature = "circuit-params")]
         circuit.params(),
     );
     let degree = cs.degree();
+    let cpu_domain = EvaluationDomainCPU::new(degree as u32, params.k());
+    let domain = EvaluationDomain::from_host_domain(&cpu_domain);
 
     if (params.n() as usize) < cs.minimum_rows() {
         return Err(GpuError::not_enough_rows_available(params.k()));
@@ -352,12 +346,13 @@ where
     P: Params<'params, C> + Sync,
     ConcreteCircuit: Circuit<C::Scalar>,
 {
-    let (domain, cs, config) = create_domain::<C, ConcreteCircuit>(
-        params.k(),
+    let (cs, config) = create_constraint_system::<C, ConcreteCircuit>(
         #[cfg(feature = "circuit-params")]
         circuit.params(),
     );
     let degree = cs.degree();
+    let cpu_domain = EvaluationDomainCPU::new(degree as u32, params.k());
+    let domain = EvaluationDomain::from_host_domain(&cpu_domain);
 
     if (params.n() as usize) < cs.minimum_rows() {
         return Err(GpuError::not_enough_rows_available(params.k()));

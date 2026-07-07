@@ -1,7 +1,5 @@
 //! Contains utilities for performing polynomial arithmetic over an evaluation
 //! domain that is of a suitable size for the application.
-use std::collections::HashMap;
-
 use std::ops::{Deref, DerefMut};
 use std::panic;
 
@@ -21,6 +19,7 @@ use crate::{
     fft::recursive::FFTData,
     plonk::{Assigned, GpuError},
 };
+use halo2_axiom::poly;
 use openvm_cuda_common::copy::MemCopyH2D;
 use openvm_cuda_common::d_buffer::DeviceBuffer;
 
@@ -35,7 +34,7 @@ use super::{
 pub trait LagrangeToCoeffManyInput<F: Field>: Sized {
     type Output;
     fn lagrange_to_coeff_many_impl(
-        domain: &EvaluationDomain<F>,
+        domain: &EvaluationDomain<'_, F>,
         in_many: &[Self],
     ) -> Result<Vec<Self::Output>, GpuError>;
 }
@@ -45,7 +44,7 @@ impl<F: WithSmallOrderMulGroup<3>> LagrangeToCoeffManyInput<F>
 {
     type Output = Polynomial<F, Coeff, Host>;
     fn lagrange_to_coeff_many_impl(
-        domain: &EvaluationDomain<F>,
+        domain: &EvaluationDomain<'_, F>,
         in_many: &[Self],
     ) -> Result<Vec<Self::Output>, GpuError> {
         crate::cpu::poly::domain::lagrange_to_coeff_many_host(domain, in_many)
@@ -57,7 +56,7 @@ impl<F: WithSmallOrderMulGroup<3>> LagrangeToCoeffManyInput<F>
 {
     type Output = Polynomial<F, Coeff, Device>;
     fn lagrange_to_coeff_many_impl(
-        domain: &EvaluationDomain<F>,
+        domain: &EvaluationDomain<'_, F>,
         in_many: &[Self],
     ) -> Result<Vec<Self::Output>, GpuError> {
         domain.lagrange_to_coeff_many_device_inputs(in_many)
@@ -69,7 +68,7 @@ impl<F: WithSmallOrderMulGroup<3>> LagrangeToCoeffManyInput<F>
 /// `Vec<DeviceBuffer<F>>` outputs (the kernel always writes to device memory).
 pub trait CoeffToExtendedPartManyDeviceInput<F: Field>: Sized {
     fn coeff_to_extended_part_many_device_impl(
-        domain: &EvaluationDomain<F>,
+        domain: &EvaluationDomain<'_, F>,
         in_many: Vec<&Self>,
         extended_omega_factor: F,
     ) -> Result<Vec<DeviceBuffer<F>>, GpuError>;
@@ -79,7 +78,7 @@ impl<F: WithSmallOrderMulGroup<3>> CoeffToExtendedPartManyDeviceInput<F>
     for Polynomial<F, Coeff, Host>
 {
     fn coeff_to_extended_part_many_device_impl(
-        domain: &EvaluationDomain<F>,
+        domain: &EvaluationDomain<'_, F>,
         in_many: Vec<&Self>,
         extended_omega_factor: F,
     ) -> Result<Vec<DeviceBuffer<F>>, GpuError> {
@@ -91,7 +90,7 @@ impl<F: WithSmallOrderMulGroup<3>> CoeffToExtendedPartManyDeviceInput<F>
     for Polynomial<F, Coeff, Device>
 {
     fn coeff_to_extended_part_many_device_impl(
-        domain: &EvaluationDomain<F>,
+        domain: &EvaluationDomain<'_, F>,
         in_many: Vec<&Self>,
         extended_omega_factor: F,
     ) -> Result<Vec<DeviceBuffer<F>>, GpuError> {
@@ -99,7 +98,7 @@ impl<F: WithSmallOrderMulGroup<3>> CoeffToExtendedPartManyDeviceInput<F>
     }
 }
 
-use ff::{BatchInvert, Field, WithSmallOrderMulGroup};
+use ff::{Field, WithSmallOrderMulGroup};
 
 #[allow(non_camel_case_types)]
 #[derive(Copy, Clone, Debug)]
@@ -127,173 +126,34 @@ impl From<NttType> for u32 {
 /// performing operations on an evaluation domain of size $2^k$ and an extended
 /// domain of size $2^{k} * j$ with $j \neq 0$.
 #[derive(Clone, Debug)]
-pub struct EvaluationDomain<F: Field> {
-    n: u64,
-    k: u32,
-    extended_k: u32,
-    pub omega: F,
-    pub omega_inv: F,
-    extended_omega: F,
-    extended_omega_inv: F,
-    pub g_coset: F,
-    g_coset_inv: F,
-    quotient_poly_degree: u64,
-    pub ifft_divisor: F,
-    extended_ifft_divisor: F,
-    t_evaluations: Vec<F>,
-    barycentric_weight: F,
-
-    // Recursive stuff
-    fft_data: HashMap<usize, FFTData<F>>,
+pub struct EvaluationDomain<'pk, F: Field> {
+    pub inner: &'pk poly::EvaluationDomain<F>,
 }
 
-impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
-    /// This constructs a new evaluation domain object based on the provided
-    /// values $j, k$.
-    pub fn new(j: u32, k: u32) -> Self {
-        // quotient_poly_degree * params.n - 1 is the degree of the quotient polynomial
-        let quotient_poly_degree = (j - 1) as u64;
-
-        // n = 2^k
-        let n = 1u64 << k;
-
-        // We need to work within an extended domain, not params.k but params.k + i
-        // for some integer i such that 2^(params.k + i) is sufficiently large to
-        // describe the quotient polynomial.
-        let mut extended_k = k;
-        while (1 << extended_k) < (n * quotient_poly_degree) {
-            extended_k += 1;
-        }
-        #[cfg(feature = "profile")]
-        log::debug!("k: {}, extended_k: {}", k, extended_k);
-
-        let mut extended_omega = F::ROOT_OF_UNITY;
-
-        // Get extended_omega, the 2^{extended_k}'th root of unity
-        // The loop computes extended_omega = omega^{2 ^ (S - extended_k)}
-        // Notice that extended_omega ^ {2 ^ extended_k} = omega ^ {2^S} = 1.
-        for _ in extended_k..F::S {
-            extended_omega = extended_omega.square();
-        }
-        let extended_omega = extended_omega;
-
-        // Get omega, the 2^{k}'th root of unity (i.e. n'th root of unity)
-        // The loop computes omega = extended_omega ^ {2 ^ (extended_k - k)}
-        //           = (omega^{2 ^ (S - extended_k)})  ^ {2 ^ (extended_k - k)}
-        //           = omega ^ {2 ^ (S - k)}.
-        // Notice that omega ^ {2^k} = omega ^ {2^S} = 1.
-        let mut omegas = Vec::with_capacity((extended_k - k + 1) as usize);
-        let mut omega = extended_omega;
-        omegas.push(omega);
-        for _ in k..extended_k {
-            omega = omega.square();
-            omegas.push(omega);
-        }
-        let omega = omega;
-        omegas.reverse();
-        let mut omegas_inv = omegas.clone(); // Inversion computed later
-
-        // We use zeta here because we know it generates a coset, and it's available
-        // already.
-        // The coset evaluation domain is:
-        // zeta {1, extended_omega, extended_omega^2, ..., extended_omega^{(2^extended_k) - 1}}
-        let g_coset = F::ZETA;
-        let g_coset_inv = g_coset.square();
-
-        let mut t_evaluations = Vec::with_capacity(1 << (extended_k - k));
-        {
-            // Compute the evaluations of t(X) = X^n - 1 in the coset evaluation domain.
-            // We don't have to compute all of them, because it will repeat.
-            let orig = F::ZETA.pow_vartime([n]);
-            let step = extended_omega.pow_vartime([n]);
-            let mut cur = orig;
-            loop {
-                t_evaluations.push(cur);
-                cur *= &step;
-                if cur == orig {
-                    break;
-                }
-            }
-            assert_eq!(t_evaluations.len(), 1 << (extended_k - k));
-
-            // Subtract 1 from each to give us t_evaluations[i] = t(zeta * extended_omega^i)
-            for coeff in &mut t_evaluations {
-                *coeff -= &F::ONE;
-            }
-
-            // Invert, because we're dividing by this polynomial.
-            // We invert in a batch, below.
-        }
-
-        let mut ifft_divisor = F::from(1 << k); // Inversion computed later
-        let mut extended_ifft_divisor = F::from(1 << extended_k); // Inversion computed later
-
-        // The barycentric weight of 1 over the evaluation domain
-        // 1 / \prod_{i != 0} (1 - omega^i)
-        let mut barycentric_weight = F::from(n); // Inversion computed later
-
-        // Compute batch inversion
-        t_evaluations
-            .iter_mut()
-            .chain(Some(&mut ifft_divisor))
-            .chain(Some(&mut extended_ifft_divisor))
-            .chain(Some(&mut barycentric_weight))
-            .chain(&mut omegas_inv)
-            .batch_invert();
-
-        let omega_inv = omegas_inv[0];
-        let extended_omega_inv = *omegas_inv.last().unwrap();
-        let mut fft_data = HashMap::new();
-        for (i, (omega, omega_inv)) in omegas.into_iter().zip(omegas_inv).enumerate() {
-            let intermediate_k = k as usize + i;
-            let len = 1usize << intermediate_k;
-            fft_data.insert(len, FFTData::<F>::new(len, omega, omega_inv));
-        }
-
-        EvaluationDomain {
-            n,
-            k,
-            extended_k,
-            omega,
-            omega_inv,
-            extended_omega,
-            extended_omega_inv,
-            g_coset,
-            g_coset_inv,
-            quotient_poly_degree,
-            ifft_divisor,
-            extended_ifft_divisor,
-            t_evaluations,
-            barycentric_weight,
-            fft_data,
-        }
+impl<'pk, F: WithSmallOrderMulGroup<3>> EvaluationDomain<'pk, F> {
+    pub fn from_host_domain(domain: &'pk poly::EvaluationDomain<F>) -> Self {
+        EvaluationDomain { inner: domain }
     }
 
     /// Obtains a polynomial in Lagrange form when given a vector of Lagrange
     /// coefficients of size `n`; panics if the provided vector is the wrong
     /// length.
     pub fn lagrange_from_vec(&self, values: Vec<F>) -> Polynomial<F, LagrangeCoeff> {
-        assert_eq!(values.len(), self.n as usize);
-
-        Polynomial::new(values)
+        self.inner.lagrange_from_vec(values)
     }
 
     pub fn lagrange_assigned_from_vec(
         &self,
         values: Vec<Assigned<F>>,
     ) -> Polynomial<Assigned<F>, LagrangeCoeff> {
-        assert_eq!(values.len(), self.n as usize);
-
-        Polynomial::new(values)
+        self.inner.lagrange_assigned_from_vec(values)
     }
 
     /// Obtains a polynomial in coefficient form when given a vector of
     /// coefficients of size `n`; panics if the provided vector is the wrong
     /// length.
     pub fn coeff_from_vec(&self, values: Vec<F>) -> Polynomial<F, Coeff> {
-        assert_eq!(values.len(), self.n as usize);
-
-        Polynomial::new(values)
+        self.inner.coeff_from_vec(values)
     }
 
     /// Obtains a polynomial in ExtendedLagrange form when given a vector of
@@ -303,20 +163,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         &self,
         values: Vec<Polynomial<F, LagrangeCoeff>>,
     ) -> Polynomial<F, ExtendedLagrangeCoeff> {
-        assert_eq!(values.len(), self.extended_len() >> self.k);
-        assert_eq!(values[0].len(), self.n as usize);
-
-        // transpose the values in parallel
-        let mut transposed = vec![vec![F::ZERO; values.len()]; self.n as usize];
-        values.into_iter().enumerate().for_each(|(i, p)| {
-            parallelize(&mut transposed, |transposed, start| {
-                for (transposed, p) in transposed.iter_mut().zip(p.values()[start..].iter()) {
-                    transposed[i] = *p;
-                }
-            });
-        });
-
-        Polynomial::new(transposed.into_iter().flatten().collect())
+        self.inner.extended_from_lagrange_vec(values)
     }
 
     /// Device-side variant of `extended_from_lagrange_vec`.
@@ -328,8 +175,8 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         &self,
         values: Vec<super::MaybeDevice<F, LagrangeCoeff>>,
     ) -> Result<super::MaybeDevice<F, ExtendedLagrangeCoeff>, GpuError> {
-        assert_eq!(values.len(), self.extended_len() >> self.k);
-        assert_eq!(values[0].len(), self.n as usize);
+        assert_eq!(values.len(), self.extended_len() >> self.inner.k);
+        assert_eq!(values[0].len(), self.inner.n as usize);
 
         let all_device = values.iter().all(|p| p.is_device());
         #[cfg(not(feature = "vram-fallback"))]
@@ -396,48 +243,49 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             DeviceBuffer::<F>::with_capacity_on(self.extended_len(), &HALO2_GPU_CTX);
         let part_refs: Vec<&DeviceBuffer<F>> =
             device_values.iter().map(|p| p.device_buf()).collect();
-        extended_from_lagrange_vec_device(&d_out, &part_refs, self.n).map_err(GpuError::from)?;
+        extended_from_lagrange_vec_device(&d_out, &part_refs, self.inner.n)
+            .map_err(GpuError::from)?;
         drop(device_values);
         Ok(super::MaybeDevice::Device(Polynomial::from_device(d_out)))
     }
 
     /// Returns an empty (zero) polynomial in the coefficient basis
     pub fn empty_coeff(&self) -> Polynomial<F, Coeff> {
-        Polynomial::new(vec![F::ZERO; self.n as usize])
+        self.inner.empty_coeff()
     }
 
     pub unsafe fn empty_coeff_unsafe(&self) -> Polynomial<F, Coeff> {
-        let mut values = Vec::with_capacity(self.n as usize);
-        values.set_len(self.n as usize);
+        let mut values = Vec::with_capacity(self.inner.n as usize);
+        values.set_len(self.inner.n as usize);
 
         Polynomial::new(values)
     }
 
     /// Returns an empty (zero) polynomial in the Lagrange coefficient basis
     pub fn empty_lagrange(&self) -> Polynomial<F, LagrangeCoeff> {
-        Polynomial::new(vec![F::ZERO; self.n as usize])
+        self.inner.empty_lagrange()
     }
 
     /// Returns an empty (zero) polynomial in the Lagrange coefficient basis, with
     /// deferred inversions.
     pub(crate) fn empty_lagrange_assigned(&self) -> Polynomial<Assigned<F>, LagrangeCoeff> {
-        Polynomial::new(vec![F::ZERO.into(); self.n as usize])
+        Polynomial::new(vec![F::ZERO.into(); self.inner.n as usize])
     }
 
     /// Returns a constant polynomial in the Lagrange coefficient basis
     pub fn constant_lagrange(&self, scalar: F) -> Polynomial<F, LagrangeCoeff> {
-        Polynomial::new(vec![scalar; self.n as usize])
+        self.inner.constant_lagrange(scalar)
     }
 
     /// Returns an empty (zero) polynomial in the extended Lagrange coefficient
     /// basis
     pub fn empty_extended(&self) -> Polynomial<F, ExtendedLagrangeCoeff> {
-        Polynomial::new(vec![F::ZERO; self.extended_len()])
+        self.inner.empty_extended()
     }
 
     pub unsafe fn empty_extended_unsafe(&self) -> Polynomial<F, ExtendedLagrangeCoeff> {
-        let mut values = Vec::with_capacity(self.extended_len());
-        values.set_len(self.extended_len());
+        let mut values = Vec::with_capacity(self.inner.extended_len());
+        values.set_len(self.inner.extended_len());
 
         Polynomial::new(values)
     }
@@ -445,7 +293,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     /// Returns a constant polynomial in the extended Lagrange coefficient
     /// basis
     pub fn constant_extended(&self, scalar: F) -> Polynomial<F, ExtendedLagrangeCoeff> {
-        Polynomial::new(vec![scalar; self.extended_len()])
+        self.inner.constant_extended(scalar)
     }
 
     /// This takes us from an n-length vector into the coefficient form.
@@ -454,15 +302,9 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     /// length.
     pub fn lagrange_to_coeff(
         &self,
-        mut a: Polynomial<F, LagrangeCoeff>,
+        a: Polynomial<F, LagrangeCoeff>,
     ) -> Result<Polynomial<F, Coeff>, GpuError> {
-        crate::perf_section!("lagrange_to_coeff");
-        assert_eq!(a.len(), 1 << self.k);
-
-        // Perform inverse FFT to obtain the polynomial in coefficient form
-        self.ifft(a.values_mut(), self.omega_inv, self.k, self.ifft_divisor)?;
-
-        Ok(Polynomial::new(a.into_values()))
+        Ok(self.inner.lagrange_to_coeff(a))
     }
 
     #[allow(clippy::uninit_vec)]
@@ -471,9 +313,9 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         a: &Polynomial<F, LagrangeCoeff>,
         omega_extend_part: F,
     ) -> Result<Polynomial<F, ExtendedLagrangeCoeff>, GpuError> {
-        assert_eq!(a.len(), 1 << self.k);
+        assert_eq!(a.len(), 1 << self.inner.k);
 
-        let log_n = self.k;
+        let log_n = self.inner.k;
         let mut b: Vec<F> = Vec::with_capacity(1 << log_n);
         unsafe {
             b.set_len(1 << self.k());
@@ -484,10 +326,10 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             a.values(),
             b.values_mut(),
             log_n,
-            self.omega_inv,
-            self.ifft_divisor,
-            self.omega,
-            self.g_coset * omega_extend_part,
+            self.inner.omega_inv,
+            self.inner.ifft_divisor,
+            self.inner.omega,
+            self.inner.g_coset * omega_extend_part,
         )?;
         Ok(b)
     }
@@ -533,7 +375,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         // return `InsufficientGpuMemory` or fall back to the host arm
         // (D2H inputs → host iFFT → H2D outputs) so producer sites never
         // OOM.
-        let n_bytes = (1usize << self.k) * std::mem::size_of::<F>();
+        let n_bytes = (1usize << self.inner.k) * std::mem::size_of::<F>();
         let total_bytes = in_many.len() * n_bytes;
         let free_bytes = query_device_free_bytes_for_chunking();
         if free_bytes < total_bytes {
@@ -568,8 +410,13 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             .iter()
             .map(|p| FFITraitObject::new(p.device_buf().as_raw_ptr() as usize))
             .collect();
-        let out_bufs = ifft_many_device::<F>(in_objs, self.k, self.omega_inv, self.ifft_divisor)
-            .map_err(GpuError::HaloGpu)?;
+        let out_bufs = ifft_many_device::<F>(
+            in_objs,
+            self.inner.k,
+            self.inner.omega_inv,
+            self.inner.ifft_divisor,
+        )
+        .map_err(GpuError::HaloGpu)?;
         Ok(out_bufs.into_iter().map(Polynomial::from_device).collect())
     }
 
@@ -590,9 +437,9 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         a: Polynomial<F, LagrangeCoeff>,
     ) -> Result<Polynomial<F, Coeff, Device>, GpuError> {
         crate::perf_section!("domain.lagrange_to_coeff_device");
-        assert_eq!(a.len(), 1 << self.k);
+        assert_eq!(a.len(), 1 << self.inner.k);
 
-        let n_bytes = (1usize << self.k) * std::mem::size_of::<F>();
+        let n_bytes = (1usize << self.inner.k) * std::mem::size_of::<F>();
         let free_bytes = query_device_free_bytes_for_chunking();
         if free_bytes < n_bytes {
             #[cfg(not(feature = "vram-fallback"))]
@@ -618,8 +465,13 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             }
         }
 
-        let outs = ifft_many_h2d::<F>(&[a], self.k, self.omega_inv, self.ifft_divisor)
-            .map_err(GpuError::HaloGpu)?;
+        let outs = ifft_many_h2d::<F>(
+            &[a],
+            self.inner.k,
+            self.inner.omega_inv,
+            self.inner.ifft_divisor,
+        )
+        .map_err(GpuError::HaloGpu)?;
         let mut outs = outs;
         let out = outs.pop().expect("ifft_many_h2d returned empty vec");
         Ok(out)
@@ -644,9 +496,9 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         a: Polynomial<F, LagrangeCoeff, Device>,
     ) -> Result<Polynomial<F, Coeff, Device>, GpuError> {
         crate::perf_section!("domain.lagrange_to_coeff_device_input");
-        assert_eq!(a.len(), 1 << self.k);
+        assert_eq!(a.len(), 1 << self.inner.k);
 
-        let n_bytes = (1usize << self.k) * std::mem::size_of::<F>();
+        let n_bytes = (1usize << self.inner.k) * std::mem::size_of::<F>();
         let free_bytes = query_device_free_bytes_for_chunking();
         if free_bytes < n_bytes {
             #[cfg(not(feature = "vram-fallback"))]
@@ -673,8 +525,13 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         }
 
         let in_objs = vec![FFITraitObject::new(a.device_buf().as_raw_ptr() as usize)];
-        let out_bufs = ifft_many_device::<F>(in_objs, self.k, self.omega_inv, self.ifft_divisor)
-            .map_err(GpuError::HaloGpu)?;
+        let out_bufs = ifft_many_device::<F>(
+            in_objs,
+            self.inner.k,
+            self.inner.omega_inv,
+            self.inner.ifft_divisor,
+        )
+        .map_err(GpuError::HaloGpu)?;
         let mut out_bufs = out_bufs;
         let out = out_bufs.pop().expect("ifft_many_device returned empty vec");
         Ok(Polynomial::from_device(out))
@@ -702,7 +559,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         if in_many.is_empty() {
             return Ok(vec![]);
         }
-        let n_bytes = (1usize << self.k) * std::mem::size_of::<F>();
+        let n_bytes = (1usize << self.inner.k) * std::mem::size_of::<F>();
         let total_bytes = in_many.len() * n_bytes;
         let free_bytes = query_device_free_bytes_for_chunking();
         if free_bytes < total_bytes {
@@ -732,34 +589,23 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
                 );
             }
         }
-        let outs = ifft_many_h2d::<F>(in_many, self.k, self.omega_inv, self.ifft_divisor)
-            .map_err(GpuError::HaloGpu)?;
+        let outs = ifft_many_h2d::<F>(
+            in_many,
+            self.inner.k,
+            self.inner.omega_inv,
+            self.inner.ifft_divisor,
+        )
+        .map_err(GpuError::HaloGpu)?;
         Ok(outs)
     }
 
     /// This takes us from an n-length coefficient vector into a coset of the extended
     /// evaluation domain, rotating by `rotation` if desired.
-    // Todo: use cosetfft
     pub fn coeff_to_extended(
         &self,
         a: &Polynomial<F, Coeff>,
     ) -> Result<Polynomial<F, ExtendedLagrangeCoeff>, GpuError> {
-        crate::perf_section!("coeff_to_extended");
-        assert_eq!(a.len(), 1 << self.k);
-        let mut b: Vec<F> = Vec::with_capacity(self.extended_len());
-        unsafe {
-            b.set_len(self.extended_len());
-        }
-
-        self.cosetfft(
-            a.values(),
-            &mut b,
-            self.extended_omega,
-            self.k,
-            self.extended_k,
-        )?;
-
-        Ok(Polynomial::new(b))
+        Ok(self.inner.coeff_to_extended(a))
     }
 
     /// This takes us from an n-length coefficient vector into parts of the
@@ -774,17 +620,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         &self,
         a: &Polynomial<F, Coeff>,
     ) -> Result<Vec<Polynomial<F, LagrangeCoeff>>, GpuError> {
-        assert_eq!(a.len(), 1 << self.k);
-
-        let num_parts = self.extended_len() >> self.k;
-        let mut extended_omega_factor = F::ONE;
-        (0..num_parts)
-            .map(|_| {
-                let part = self.coeff_to_extended_part(a.clone(), extended_omega_factor);
-                extended_omega_factor *= self.extended_omega;
-                part
-            })
-            .collect()
+        Ok(self.inner.coeff_to_extended_parts(a))
     }
 
     /// This takes us from several n-length coefficient vectors each into parts
@@ -799,20 +635,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         &self,
         a: &[Polynomial<F, Coeff>],
     ) -> Result<Vec<Vec<Polynomial<F, LagrangeCoeff>>>, GpuError> {
-        assert_eq!(a[0].len(), 1 << self.k);
-
-        let mut extended_omega_factor = F::ONE;
-        let num_parts = self.extended_len() >> self.k;
-        (0..num_parts)
-            .map(|_| {
-                let a_lagrange = a
-                    .iter()
-                    .map(|poly| self.coeff_to_extended_part(poly.clone(), extended_omega_factor))
-                    .collect::<Result<Vec<_>, _>>();
-                extended_omega_factor *= self.extended_omega;
-                a_lagrange
-            })
-            .collect()
+        Ok(self.inner.batched_coeff_to_extended_parts(a))
     }
 
     /// This takes us from an n-length coefficient vector into a part of the
@@ -823,22 +646,10 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     /// where `extended_omega_factor` is `extended_omega^i` with `i` in `[0, m)`.
     pub fn coeff_to_extended_part(
         &self,
-        mut a: Polynomial<F, Coeff>,
+        a: Polynomial<F, Coeff>,
         extended_omega_factor: F,
     ) -> Result<Polynomial<F, LagrangeCoeff>, GpuError> {
-        crate::perf_section!("coeff_to_extended_part");
-        assert_eq!(a.len(), 1 << self.k);
-
-        self.distribute_powers(a.values_mut(), self.g_coset * extended_omega_factor);
-        fft_gpu(
-            NttType::FFT as u32,
-            a.values_mut(),
-            self.k,
-            self.omega,
-            F::ONE,
-        )?;
-
-        Ok(Polynomial::new(a.into_values()))
+        Ok(self.inner.coeff_to_extended_part(a, extended_omega_factor))
     }
 
     /// Device-output variant of `coeff_to_extended_part_many`. Same
@@ -848,7 +659,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     /// (e.g. `_halo2_quotient_permutation`) without paying a redundant
     /// D→H + H→D round trip.
     ///
-    /// Each returned `DeviceBuffer<F>` holds `1 << self.k` field elements
+    /// Each returned `DeviceBuffer<F>` holds `1 << self.inner.k` field elements
     /// of FFT output. The caller must keep the `Vec<DeviceBuffer<F>>`
     /// alive for the duration of the downstream kernel that reads from
     /// these pointers.
@@ -888,10 +699,10 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         Ok(cosetfft_many_h2d::<F>(
             crate::poly::NttType::CosetFFT_Part as u32,
             in_objs,
-            self.k,
-            self.k,
-            self.omega,
-            self.g_coset * extended_omega_factor,
+            self.inner.k,
+            self.inner.k,
+            self.inner.omega,
+            self.inner.g_coset * extended_omega_factor,
         )?)
     }
 
@@ -913,10 +724,10 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         Ok(cosetfft_many_device::<F>(
             crate::poly::NttType::CosetFFT_Part as u32,
             in_objs,
-            self.k,
-            self.k,
-            self.omega,
-            self.g_coset * extended_omega_factor,
+            self.inner.k,
+            self.inner.k,
+            self.inner.omega,
+            self.inner.g_coset * extended_omega_factor,
         )?)
     }
 
@@ -944,7 +755,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         self.fft_many(
             ntt_type,
             &mut inout_many,
-            self.g_coset * extended_omega_factor,
+            self.inner.g_coset * extended_omega_factor,
         )?;
         Ok(inout_many)
     }
@@ -982,17 +793,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         poly: &Polynomial<F, ExtendedLagrangeCoeff>,
         rotation: Rotation,
     ) -> Polynomial<F, ExtendedLagrangeCoeff> {
-        let new_rotation = ((1 << (self.extended_k - self.k)) * rotation.0.abs()) as usize;
-
-        let mut poly = poly.clone();
-
-        if rotation.0 >= 0 {
-            poly.values_mut().rotate_left(new_rotation);
-        } else {
-            poly.values_mut().rotate_right(new_rotation);
-        }
-
-        poly
+        self.inner.rotate_extended(poly, rotation)
     }
 
     /// This takes us from the extended evaluation domain and gets us the
@@ -1005,25 +806,9 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     /// coefficient polynomial.
     pub fn extended_to_coeff(
         &self,
-        mut a: Polynomial<F, ExtendedLagrangeCoeff, Host>,
+        a: Polynomial<F, ExtendedLagrangeCoeff, Host>,
     ) -> Result<Polynomial<F, Coeff, Host>, GpuError> {
-        crate::perf_section!("extended_to_coeff");
-        assert_eq!(a.len(), self.extended_len());
-
-        let target_len = (self.n * self.quotient_poly_degree) as usize;
-
-        self.ifft(
-            a.values_mut(),
-            self.extended_omega_inv,
-            self.extended_k,
-            self.extended_ifft_divisor,
-        )?;
-        // Distribute powers to move from coset; opposite from the
-        // transformation we performed earlier.
-        self.distribute_powers_zeta(a.values_mut(), false);
-        let mut out = a.into_values();
-        out.truncate(target_len);
-        Ok(Polynomial::<F, Coeff, Host>::new(out))
+        Ok(Polynomial::new(self.inner.extended_to_coeff(a)))
     }
 
     /// Device-residency inverse FFT + coset adjustment producing a
@@ -1035,19 +820,19 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         crate::perf_section!("domain.extended_to_coeff_device");
         assert_eq!(a.len(), self.extended_len());
 
-        let target_len = (self.n * self.quotient_poly_degree) as usize;
+        let target_len = (self.inner.n * self.inner.quotient_poly_degree) as usize;
         let extended_len = self.extended_len();
 
         let d_buf = a.into_device_buf();
         fft_normal_device(
             NttType::iFFT as u32,
-            self.extended_k,
+            self.inner.extended_k,
             &d_buf,
             &d_buf,
-            self.extended_omega_inv,
-            self.extended_ifft_divisor,
+            self.inner.extended_omega_inv,
+            self.inner.extended_ifft_divisor,
         )?;
-        let coset_powers = [self.g_coset_inv, self.g_coset];
+        let coset_powers = [self.inner.g_coset_inv, self.inner.g_coset];
         distribute_powers_zeta_device(&d_buf, &coset_powers).map_err(GpuError::HaloGpu)?;
 
         if target_len == extended_len {
@@ -1074,18 +859,9 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     /// Host-residency divide by the vanishing polynomial of the $2^k$ domain.
     pub fn divide_by_vanishing_poly(
         &self,
-        mut a: Polynomial<F, ExtendedLagrangeCoeff, Host>,
+        a: Polynomial<F, ExtendedLagrangeCoeff, Host>,
     ) -> Result<Polynomial<F, ExtendedLagrangeCoeff, Host>, GpuError> {
-        crate::perf_section!("divide_by_vanishing_poly");
-        assert_eq!(a.len(), self.extended_len());
-
-        parallelize(a.values_mut(), |h, mut index| {
-            for h in h {
-                *h *= &self.t_evaluations[index % self.t_evaluations.len()];
-                index += 1;
-            }
-        });
-        Ok(Polynomial::new(a.into_values()))
+        Ok(self.inner.divide_by_vanishing_poly(a))
     }
 
     /// Device-residency divide by the vanishing polynomial of the $2^k$ domain.
@@ -1097,6 +873,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         assert_eq!(a.len(), self.extended_len());
 
         let t_dev = self
+            .inner
             .t_evaluations
             .as_slice()
             .to_device_on(&HALO2_GPU_CTX)
@@ -1118,9 +895,9 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     /// and `false` when moving out. This toggles the choice of `zeta`.
     fn distribute_powers_zeta(&self, a: &mut [F], into_coset: bool) {
         let coset_powers = if into_coset {
-            [self.g_coset, self.g_coset_inv]
+            [self.inner.g_coset, self.inner.g_coset_inv]
         } else {
-            [self.g_coset_inv, self.g_coset]
+            [self.inner.g_coset_inv, self.inner.g_coset]
         };
         parallelize(a, |a, mut index| {
             for a in a {
@@ -1186,6 +963,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         Ok(())
     }
 
+    #[cfg(test)]
     fn cosetfft(
         &self,
         a: &[F],
@@ -1221,7 +999,12 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         let ntt_type = NttType::CosetFFT.into();
         let is_memory_enough = unsafe {
             // if normal() memory is enough, then it's enough for many()
-            _halo2_fft_normal_check_memory(ntt_type, std::ptr::null(), self.k, self.extended_k)
+            _halo2_fft_normal_check_memory(
+                ntt_type,
+                std::ptr::null(),
+                self.inner.k,
+                self.inner.extended_k,
+            )
         };
         if is_memory_enough {
             let batch_a_ffi = get_slice_polys_ffi_in(a_many);
@@ -1230,31 +1013,26 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
                 ntt_type,
                 batch_a_ffi,
                 batch_b_ffi,
-                self.k,
-                self.extended_k,
-                self.extended_omega,
+                self.inner.k,
+                self.inner.extended_k,
+                self.inner.extended_omega,
                 F::ONE,
             )?;
         } else {
             for (a, b) in a_many.iter().zip(b_many.iter_mut()) {
-                self.coset_fft_single_gpu(a, b, self.extended_omega, self.k, self.extended_k)?;
+                self.coset_fft_single_gpu(
+                    a,
+                    b,
+                    self.inner.extended_omega,
+                    self.inner.k,
+                    self.inner.extended_k,
+                )?;
             }
         }
         Ok(())
     }
 
-    /// Given a slice of group elements `[a_0, a_1, a_2, ...]`, this returns
-    /// `[a_0, [c]a_1, [c^2]a_2, [c^3]a_3, [c^4]a_4, ...]`.
-    fn distribute_powers(&self, a: &mut [F], c: F) {
-        parallelize(a, |a, index| {
-            let mut c_power = c.pow_vartime([index as u64]);
-            for a in a {
-                a.mul_assign(&c_power);
-                c_power = c_power * c;
-            }
-        });
-    }
-
+    #[cfg(test)]
     fn ifft(&self, a: &mut [F], omega_inv: F, log_n: u32, divisor: F) -> Result<(), HaloGpuError> {
         let ntt_type = NttType::iFFT.into();
         fft_gpu(ntt_type, a, log_n, omega_inv, divisor)?;
@@ -1280,21 +1058,30 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
 
         // Single-stream GPU prover: run the whole batch on gpu 0.
         let is_memory_enough = unsafe {
-            _halo2_fft_normal_check_memory(ntt_type, std::ptr::null(), self.k, self.extended_k)
+            _halo2_fft_normal_check_memory(
+                ntt_type,
+                std::ptr::null(),
+                self.inner.k,
+                self.inner.extended_k,
+            )
         };
         if is_memory_enough {
             let batch_b_ffi = get_slice_polys_ffi_out(b_many);
             fft_gpu_many::<F>(
                 ntt_type,
                 batch_b_ffi,
-                self.k,
-                self.omega,
+                self.inner.k,
+                self.inner.omega,
                 part_power, /*borrow this param slot*/
             )?;
         } else {
             for b in b_many.iter_mut() {
                 split_radix_fft_gpu(
-                    ntt_type, b, self.k, self.k, self.omega,
+                    ntt_type,
+                    b,
+                    self.inner.k,
+                    self.inner.k,
+                    self.inner.omega,
                     part_power, /*borrow this param slot*/
                 )?;
             }
@@ -1325,7 +1112,12 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         // Single-stream GPU prover: run the whole batch on gpu 0.
         let ntt_type = NttType::iFFT.into();
         let is_memory_enough = unsafe {
-            _halo2_fft_normal_check_memory(ntt_type, std::ptr::null(), self.k, self.extended_k)
+            _halo2_fft_normal_check_memory(
+                ntt_type,
+                std::ptr::null(),
+                self.inner.k,
+                self.inner.extended_k,
+            )
         };
         if is_memory_enough {
             let batch_a_ffi = get_slice_polys_ffi_in(a_many);
@@ -1334,9 +1126,9 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
                 ntt_type,
                 batch_a_ffi,
                 batch_b_ffi,
-                self.k,
-                self.omega_inv,
-                self.ifft_divisor,
+                self.inner.k,
+                self.inner.omega_inv,
+                self.inner.ifft_divisor,
             )?;
         } else {
             for (a, b) in a_many.iter().zip(b_many.iter_mut()) {
@@ -1344,10 +1136,10 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
                     ntt_type,
                     a,
                     b,
-                    self.k,
-                    self.k,
-                    self.omega_inv,
-                    self.ifft_divisor,
+                    self.inner.k,
+                    self.inner.k,
+                    self.inner.omega_inv,
+                    self.inner.ifft_divisor,
                 )?;
             }
         }
@@ -1365,47 +1157,39 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
 
     /// Get the size of the domain
     pub fn k(&self) -> u32 {
-        self.k
+        self.inner.k()
     }
 
     /// Get the size of the extended domain
     pub fn extended_k(&self) -> u32 {
-        self.extended_k
+        self.inner.extended_k()
     }
 
     /// Get the size of the extended domain
     pub fn extended_len(&self) -> usize {
-        1 << self.extended_k
+        self.inner.extended_len()
     }
 
     /// Get $\omega$, the generator of the $2^k$ order multiplicative subgroup.
     pub fn get_omega(&self) -> F {
-        self.omega
+        self.inner.get_omega()
     }
 
     /// Get $\omega^{-1}$, the inverse of the generator of the $2^k$ order
     /// multiplicative subgroup.
     pub fn get_omega_inv(&self) -> F {
-        self.omega_inv
+        self.inner.get_omega_inv()
     }
 
     /// Get the generator of the extended domain's multiplicative subgroup.
     pub fn get_extended_omega(&self) -> F {
-        self.extended_omega
+        self.inner.get_extended_omega()
     }
 
     /// Multiplies a value by some power of $\omega$, essentially rotating over
     /// the domain.
     pub fn rotate_omega(&self, value: F, rotation: Rotation) -> F {
-        let mut point = value;
-        if rotation.0 >= 0 {
-            point *= &self.get_omega().pow_vartime([rotation.0 as u64]);
-        } else {
-            point *= &self
-                .get_omega_inv()
-                .pow_vartime([(rotation.0 as i64).unsigned_abs()]);
-        }
-        point
+        self.inner.rotate_omega(value, rotation)
     }
 
     /// Computes evaluations (at the point `x`, where `xn = x^n`) of Lagrange
@@ -1441,30 +1225,12 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         xn: F,
         rotations: I,
     ) -> Vec<F> {
-        let mut results;
-        {
-            let rotations = rotations.clone().into_iter();
-            results = Vec::with_capacity(rotations.size_hint().1.unwrap_or(0));
-            for rotation in rotations {
-                let rotation = Rotation(rotation);
-                let result = x - self.rotate_omega(F::ONE, rotation);
-                results.push(result);
-            }
-            results.iter_mut().batch_invert();
-        }
-
-        let common = (xn - F::ONE) * self.barycentric_weight;
-        for (rotation, result) in rotations.into_iter().zip(results.iter_mut()) {
-            let rotation = Rotation(rotation);
-            *result = self.rotate_omega(*result * common, rotation);
-        }
-
-        results
+        self.inner.l_i_range(x, xn, rotations)
     }
 
     /// Gets the quotient polynomial's degree (as a multiple of n)
     pub fn get_quotient_poly_degree(&self) -> usize {
-        self.quotient_poly_degree as usize
+        self.inner.get_quotient_poly_degree()
     }
 
     /// Obtain a pinned version of this evaluation domain; a structure with the
@@ -1472,22 +1238,36 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     /// domain.
     pub fn pinned(&self) -> PinnedEvaluationDomain<'_, F> {
         PinnedEvaluationDomain {
-            k: &self.k,
-            extended_k: &self.extended_k,
-            omega: &self.omega,
+            k: &self.inner.k,
+            extended_k: &self.inner.extended_k,
+            omega: &self.inner.omega,
         }
     }
 
     /// Get the private field `n`
     pub fn get_n(&self) -> u64 {
-        self.n
+        self.inner.get_n()
     }
 
     /// Get the private `fft_data`
     pub fn get_fft_data(&self, l: usize) -> &FFTData<F> {
-        self.fft_data
-            .get(&l)
-            .expect("log_2(l) must be in k..=extended_k")
+        self.inner.get_fft_data(l)
+    }
+
+    pub fn omega_inv(&self) -> &F {
+        &self.inner.omega_inv
+    }
+
+    pub fn ifft_divisor(&self) -> &F {
+        &self.inner.ifft_divisor
+    }
+
+    pub fn omega(&self) -> &F {
+        &self.inner.omega
+    }
+
+    pub fn g_coset(&self) -> &F {
+        &self.inner.g_coset
     }
 }
 
@@ -1511,7 +1291,7 @@ mod tests {
     // Test-only helper: only callers are `test_fft`'s round-trip below.
     // Kept inside `mod tests` so the `#[cfg(test)]` gating stays implicit.
     fn icosetfft<F: WithSmallOrderMulGroup<3>>(
-        domain: &EvaluationDomain<F>,
+        domain: &EvaluationDomain<'_, F>,
         a: &mut [F],
         omega_inv: F,
         log_n: u32,
@@ -1540,9 +1320,11 @@ mod tests {
         use rand_core::OsRng;
 
         use crate::arithmetic::eval_polynomial;
+        use halo2_axiom::poly::EvaluationDomain as EvaluationDomainCPU;
         use halo2curves::bn256::Fr;
 
-        let domain = EvaluationDomain::<Fr>::new(1, 3);
+        let domain = EvaluationDomainCPU::<Fr>::new(1, 3);
+        let domain = EvaluationDomain::from_host_domain(&domain);
         let rng = OsRng;
 
         let mut poly = domain.empty_lagrange();
@@ -1567,11 +1349,11 @@ mod tests {
             eval_polynomial(&poly_rotated_cur[..], x)
         );
         assert_eq!(
-            eval_polynomial(&poly[..], x * domain.omega),
+            eval_polynomial(&poly[..], x * domain.inner.omega),
             eval_polynomial(&poly_rotated_next[..], x)
         );
         assert_eq!(
-            eval_polynomial(&poly[..], x * domain.omega_inv),
+            eval_polynomial(&poly[..], x * domain.inner.omega_inv),
             eval_polynomial(&poly_rotated_prev[..], x)
         );
     }
@@ -1582,12 +1364,13 @@ mod tests {
 
         use crate::arithmetic::{eval_polynomial, lagrange_interpolate};
         use halo2curves::pasta::pallas::Scalar;
-        let domain = EvaluationDomain::<Scalar>::new(1, 3);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Scalar>::new(1, 3);
+        let domain = EvaluationDomain::from_host_domain(&domain);
 
         let mut l = vec![];
         let mut points = vec![];
         for i in 0..8 {
-            points.push(domain.omega.pow([i, 0, 0, 0]));
+            points.push(domain.inner.omega.pow([i, 0, 0, 0]));
         }
         for i in 0..8 {
             let mut l_i = vec![Scalar::zero(); 8];
@@ -1646,8 +1429,9 @@ mod tests {
         let min_log_n = 10;
         let cutoff_num = 13; // cut off the last 13 elements of omega_powers
         for log_n in min_log_n..=max_log_n {
-            let domain = EvaluationDomain::<Scalar>::new(1, log_n);
-            let omega = domain.omega;
+            let domain = halo2_axiom::poly::EvaluationDomain::<Scalar>::new(1, log_n);
+            let domain = EvaluationDomain::from_host_domain(&domain);
+            let omega = domain.inner.omega;
 
             let mut omega_powers_cpu = vec![Scalar::zero(); (1 << log_n) as usize];
             parallelize(&mut omega_powers_cpu, |o, start| {
@@ -1711,8 +1495,9 @@ mod tests {
         let min_log_n = 10;
 
         for log_n in min_log_n..=max_log_n {
-            let domain = EvaluationDomain::<Scalar>::new(1, log_n);
-            let omega = domain.omega;
+            let domain = halo2_axiom::poly::EvaluationDomain::<Scalar>::new(1, log_n);
+            let domain = EvaluationDomain::from_host_domain(&domain);
+            let omega = domain.inner.omega;
 
             // correctness and warmup
             let cpu_result = generate_omega_lut_cpu(omega, log_n, DENSE_POWER_DEGREE);
@@ -1756,24 +1541,25 @@ mod tests {
         println!("----------test FFT---------");
         let ntt_type = NttType::FFT.into();
         for log_n in min_log_n..=max_log_n {
-            let domain = EvaluationDomain::<Scalar>::new(1, log_n);
+            let domain = halo2_axiom::poly::EvaluationDomain::<Scalar>::new(1, log_n);
+            let domain = EvaluationDomain::from_host_domain(&domain);
             let mut a0 = a[0..(1 << log_n)].to_vec();
             let mut a1 = a0.clone();
 
             // warm up & correct test & init gpu twiddle
-            fft_gpu(ntt_type, &mut a1, log_n, domain.omega, Scalar::one()).unwrap();
+            fft_gpu(ntt_type, &mut a1, log_n, domain.inner.omega, Scalar::one()).unwrap();
             let data = domain.get_fft_data(a0.len());
-            best_fft(&mut a0, domain.omega, log_n, data, false);
+            best_fft(&mut a0, domain.inner.omega, log_n, data, false);
             assert_eq!(a0, a1);
 
             let gpu_time = Instant::now();
-            fft_gpu(ntt_type, &mut a1, log_n, domain.omega, Scalar::one()).unwrap();
+            fft_gpu(ntt_type, &mut a1, log_n, domain.inner.omega, Scalar::one()).unwrap();
             let gpu_time = gpu_time.elapsed();
             let gpu_micros = f64::from(gpu_time.as_micros() as u32);
 
             let cpu_time = Instant::now();
             let data = domain.get_fft_data(a0.len());
-            best_fft(&mut a0, domain.omega, log_n, data, false);
+            best_fft(&mut a0, domain.inner.omega, log_n, data, false);
             let cpu_time = cpu_time.elapsed();
             let cpu_micros = f64::from(cpu_time.as_micros() as u32);
 
@@ -1789,29 +1575,35 @@ mod tests {
         println!("----------test iFFT---------");
         let _ntt_type: u32 = NttType::iFFT.into();
         for log_n in min_log_n..=max_log_n {
-            let domain = EvaluationDomain::<Scalar>::new(1, log_n);
+            let domain = halo2_axiom::poly::EvaluationDomain::<Scalar>::new(1, log_n);
+            let domain = EvaluationDomain::from_host_domain(&domain);
             let mut a0 = a[0..(1 << log_n)].to_vec();
             let mut a1 = a0.clone();
 
             // warm up & correct test & init gpu iFFT twiddle
             let data = domain.get_fft_data(a1.len());
-            best_fft(&mut a1, domain.omega_inv, log_n, data, true);
+            best_fft(&mut a1, domain.inner.omega_inv, log_n, data, true);
             parallelize(&mut a1, |a, _| {
                 for a in a {
-                    *a *= &domain.ifft_divisor;
+                    *a *= &domain.inner.ifft_divisor;
                 }
             });
             domain
-                .ifft(&mut a0, domain.omega_inv, log_n, domain.ifft_divisor)
+                .ifft(
+                    &mut a0,
+                    domain.inner.omega_inv,
+                    log_n,
+                    domain.inner.ifft_divisor,
+                )
                 .unwrap();
             assert_eq!(a1, a0);
 
             let cpu_time = Instant::now();
             let data = domain.get_fft_data(a1.len());
-            best_fft(&mut a1, domain.omega_inv, log_n, data, true);
+            best_fft(&mut a1, domain.inner.omega_inv, log_n, data, true);
             parallelize(&mut a1, |a, _| {
                 for a in a {
-                    *a *= &domain.ifft_divisor;
+                    *a *= &domain.inner.ifft_divisor;
                 }
             });
             let cpu_time = cpu_time.elapsed();
@@ -1819,7 +1611,12 @@ mod tests {
 
             let gpu_time = Instant::now();
             domain
-                .ifft(&mut a0, domain.omega_inv, log_n, domain.ifft_divisor)
+                .ifft(
+                    &mut a0,
+                    domain.inner.omega_inv,
+                    log_n,
+                    domain.inner.ifft_divisor,
+                )
                 .unwrap();
             let gpu_time = gpu_time.elapsed();
             let gpu_micros = f64::from(gpu_time.as_micros() as u32);
@@ -1837,7 +1634,8 @@ mod tests {
         println!("----------test cosetFFT---------");
         let _ntt_type: u32 = NttType::CosetFFT.into();
         for log_n in min_log_n..=max_log_n {
-            let domain = EvaluationDomain::<Scalar>::new(5, log_n);
+            let domain = halo2_axiom::poly::EvaluationDomain::<Scalar>::new(5, log_n);
+            let domain = EvaluationDomain::from_host_domain(&domain);
             let a0 = a[0..(1 << log_n)].to_vec();
             let a1 = a0.clone();
             let mut b = a0.clone();
@@ -1850,8 +1648,8 @@ mod tests {
             let data = domain.get_fft_data(c.len());
             best_fft(
                 &mut c,
-                domain.extended_omega,
-                domain.extended_k,
+                domain.inner.extended_omega,
+                domain.inner.extended_k,
                 data,
                 false,
             );
@@ -1859,9 +1657,9 @@ mod tests {
                 &domain,
                 &a0,
                 &mut b,
-                domain.extended_omega,
-                domain.k,
-                domain.extended_k,
+                domain.inner.extended_omega,
+                domain.inner.k,
+                domain.inner.extended_k,
             )
             .unwrap();
             assert_eq!(c, b);
@@ -1873,8 +1671,8 @@ mod tests {
             let data = domain.get_fft_data(c.len());
             best_fft(
                 &mut c,
-                domain.extended_omega,
-                domain.extended_k,
+                domain.inner.extended_omega,
+                domain.inner.extended_k,
                 data,
                 false,
             );
@@ -1886,9 +1684,9 @@ mod tests {
                 &domain,
                 &a0,
                 &mut b,
-                domain.extended_omega,
-                domain.k,
-                domain.extended_k,
+                domain.inner.extended_omega,
+                domain.inner.k,
+                domain.inner.extended_k,
             )
             .unwrap();
             let gpu_time = gpu_time.elapsed();
@@ -1896,7 +1694,7 @@ mod tests {
 
             println!(
                 "  [extended_log_n = {}] cpu_time: {:?}, gpu_time: {:?}, speedup: {}",
-                domain.extended_k,
+                domain.inner.extended_k,
                 cpu_time,
                 gpu_time,
                 cpu_micros / gpu_micros
@@ -1906,7 +1704,8 @@ mod tests {
         println!("----------test icosetFFT---------");
         let _ntt_type: u32 = NttType::iCosetFFT.into(); // icosetFFT
         for log_n in min_log_n..=max_log_n {
-            let domain = EvaluationDomain::<Scalar>::new(5, log_n);
+            let domain = halo2_axiom::poly::EvaluationDomain::<Scalar>::new(5, log_n);
+            let domain = EvaluationDomain::from_host_domain(&domain);
             let a0 = a[0..(1 << log_n)].to_vec();
             let a1 = a0.clone();
 
@@ -1916,14 +1715,14 @@ mod tests {
             let data = domain.get_fft_data(c.len());
             best_fft(
                 &mut c,
-                domain.extended_omega_inv,
-                domain.extended_k,
+                domain.inner.extended_omega_inv,
+                domain.inner.extended_k,
                 data,
                 true,
             );
             parallelize(&mut c, |c, _| {
                 for c in c {
-                    *c *= &domain.extended_ifft_divisor;
+                    *c *= &domain.inner.extended_ifft_divisor;
                 }
             });
             domain.distribute_powers_zeta(&mut c, false);
@@ -1932,9 +1731,9 @@ mod tests {
             icosetfft(
                 &domain,
                 &mut b,
-                domain.extended_omega_inv,
-                domain.extended_k,
-                domain.extended_ifft_divisor,
+                domain.inner.extended_omega_inv,
+                domain.inner.extended_k,
+                domain.inner.extended_ifft_divisor,
             )
             .unwrap();
             assert_eq!(c, b);
@@ -1945,14 +1744,14 @@ mod tests {
             let data = domain.get_fft_data(c.len());
             best_fft(
                 &mut c,
-                domain.extended_omega_inv,
-                domain.extended_k,
+                domain.inner.extended_omega_inv,
+                domain.inner.extended_k,
                 data,
                 true,
             );
             parallelize(&mut c, |c, _| {
                 for c in c {
-                    *c *= &domain.extended_ifft_divisor;
+                    *c *= &domain.inner.extended_ifft_divisor;
                 }
             });
             domain.distribute_powers_zeta(&mut c, false);
@@ -1965,9 +1764,9 @@ mod tests {
             icosetfft(
                 &domain,
                 &mut b,
-                domain.extended_omega_inv,
-                domain.extended_k,
-                domain.extended_ifft_divisor,
+                domain.inner.extended_omega_inv,
+                domain.inner.extended_k,
+                domain.inner.extended_ifft_divisor,
             )
             .unwrap();
             let gpu_time = gpu_time.elapsed();
@@ -1975,7 +1774,7 @@ mod tests {
 
             println!(
                 "  [extended_log_n = {}] cpu_time: {:?}, gpu_time: {:?}, speedup: {}",
-                domain.extended_k,
+                domain.inner.extended_k,
                 cpu_time,
                 gpu_time,
                 cpu_micros / gpu_micros
@@ -2000,7 +1799,8 @@ mod tests {
         let ntt_type = NttType::iFFT.into();
         for log_n in min_log_n..=max_log_n {
             let a0 = a[0..(1 << log_n)].to_vec();
-            let domain = EvaluationDomain::<Scalar>::new(1, log_n);
+            let domain = halo2_axiom::poly::EvaluationDomain::<Scalar>::new(1, log_n);
+            let domain = EvaluationDomain::from_host_domain(&domain);
 
             // many data
             const TASK_NUM: usize = 15;
@@ -2023,8 +1823,8 @@ mod tests {
                 ntt_type,
                 &mut result_base,
                 log_n,
-                domain.omega_inv,
-                domain.ifft_divisor,
+                domain.inner.omega_inv,
+                domain.inner.ifft_divisor,
             )
             .unwrap();
             // many
@@ -2042,8 +1842,8 @@ mod tests {
                     ntt_type,
                     &mut result_base,
                     log_n,
-                    domain.omega_inv,
-                    domain.ifft_divisor,
+                    domain.inner.omega_inv,
+                    domain.inner.ifft_divisor,
                 )
                 .unwrap();
                 let single_gpu_time = single_gpu_time.elapsed();
@@ -2070,17 +1870,18 @@ mod tests {
 
         use crate::arithmetic::best_fft;
         let _ntt_type: u32 = NttType::CosetFFT.into();
-        let domain = EvaluationDomain::<Scalar>::new(5, log_n);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Scalar>::new(5, log_n);
+        let domain = EvaluationDomain::from_host_domain(&domain);
 
         println!("----------test cosetFFT many---------\n");
         println!(
-            "[log_n = {}] domain.k = {} domain.extended_k = {}",
-            log_n, domain.k, domain.extended_k
+            "[log_n = {}] domain.inner.k = {} domain.inner.extended_k = {}",
+            log_n, domain.inner.k, domain.inner.extended_k
         );
 
         // data
         let mut rng = thread_rng();
-        let a0 = (0..(1 << domain.k))
+        let a0 = (0..(1 << domain.inner.k))
             .map(|_i| Scalar::random(&mut rng))
             .collect::<Vec<_>>();
 
@@ -2106,12 +1907,12 @@ mod tests {
         a_extended.resize(domain.extended_len(), Scalar::zero());
         cpu_result.clone_from_slice(&a_extended);
         domain.distribute_powers_zeta(&mut cpu_result, true);
-        // EvaluationDomain::fft(&mut cpu_result, domain.extended_omega, domain.extended_k);
+        // EvaluationDomain::fft(&mut cpu_result, domain.inner.extended_omega, domain.inner.extended_k);
         let data = domain.get_fft_data(cpu_result.len());
         best_fft(
             &mut cpu_result,
-            domain.extended_omega,
-            domain.extended_k,
+            domain.inner.extended_omega,
+            domain.inner.extended_k,
             data,
             false,
         );
@@ -2134,9 +1935,9 @@ mod tests {
                 &domain,
                 &a0,
                 &mut single_result,
-                domain.extended_omega,
-                domain.k,
-                domain.extended_k,
+                domain.inner.extended_omega,
+                domain.inner.k,
+                domain.inner.extended_k,
             )
             .unwrap(); // note: use gpu_0 internal
             let single_gpu_time = single_gpu_time.elapsed();
@@ -2160,7 +1961,8 @@ mod tests {
         use rand_core::OsRng;
 
         for k in 5..20 {
-            let domain = EvaluationDomain::<Scalar>::new(3, k);
+            let domain = halo2_axiom::poly::EvaluationDomain::<Scalar>::new(3, k);
+            let domain = EvaluationDomain::from_host_domain(&domain);
 
             let mut poly = domain.empty_coeff();
             for value in poly.iter_mut() {
@@ -2184,7 +1986,8 @@ mod tests {
         let mut rng = thread_rng();
         let batch_size = 8;
         let k = 20;
-        let domain = EvaluationDomain::<Scalar>::new(5, k);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Scalar>::new(5, k);
+        let domain = EvaluationDomain::from_host_domain(&domain);
 
         let mut polys = vec![];
         let mut poly = domain.empty_coeff();
@@ -2196,7 +1999,7 @@ mod tests {
         }
 
         let mut extended_omega_factor = Scalar::one();
-        let num_parts = domain.extended_len() >> domain.k;
+        let num_parts = domain.extended_len() >> domain.inner.k;
         for part_idx in 0..num_parts {
             let batched_time = Instant::now();
             let part_many = domain
@@ -2216,7 +2019,7 @@ mod tests {
             for i in 0..batch_size {
                 assert_eq!(parts[i].values(), part_many[i].values());
             }
-            extended_omega_factor *= domain.extended_omega;
+            extended_omega_factor *= domain.inner.extended_omega;
 
             println!(
                 "part[{}], batched time[{:?}], sequential time[{:?}], speedup: {}",
@@ -2236,7 +2039,8 @@ mod tests {
 
         let k = 20;
         let mut rng = thread_rng();
-        let domain = EvaluationDomain::<Scalar>::new(3, k);
+        let domain = halo2_axiom::poly::EvaluationDomain::<Scalar>::new(3, k);
+        let domain = EvaluationDomain::from_host_domain(&domain);
 
         let mut poly = domain.empty_coeff();
         for value in poly.iter_mut() {
@@ -2278,7 +2082,8 @@ mod tests {
 
         println!("----------test iFFT + cosetFFT_part---------");
         for log_n in min_log_n..=max_log_n {
-            let domain = EvaluationDomain::<Scalar>::new(1, log_n);
+            let domain = halo2_axiom::poly::EvaluationDomain::<Scalar>::new(1, log_n);
+            let domain = EvaluationDomain::from_host_domain(&domain);
             let a0 = Polynomial::<Scalar, LagrangeCoeff>::new(a[0..(1 << log_n)].to_vec());
 
             let mut rng = rand::thread_rng();

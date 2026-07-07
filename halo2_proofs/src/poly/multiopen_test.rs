@@ -156,7 +156,8 @@ mod test {
     where
         Scheme::Scalar: WithSmallOrderMulGroup<3>,
     {
-        let domain = EvaluationDomain::new(1, params.k());
+        let domain = halo2_axiom::poly::EvaluationDomain::new(1, params.k());
+        let domain = EvaluationDomain::from_host_domain(&domain);
 
         let mut ax = domain.empty_coeff();
         for (i, a) in ax.iter_mut().enumerate() {

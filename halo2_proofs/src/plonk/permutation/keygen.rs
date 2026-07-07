@@ -124,7 +124,7 @@ impl Assembly {
     pub(crate) fn build_vk<'params, C: CurveAffine, P: Params<'params, C>>(
         self,
         params: &P,
-        domain: &EvaluationDomain<C::Scalar>,
+        domain: &EvaluationDomain<'_, C::Scalar>,
         p: &Argument,
     ) -> halo2_axiom::plonk::permutation::VerifyingKey<C> {
         build_vk(params, domain, p, |i, j| self.mapping[i][j])
@@ -135,7 +135,7 @@ impl Assembly {
     pub(crate) fn build_pk<'params, C: CurveAffine, P: Params<'params, C>>(
         self,
         params: &P,
-        domain: &EvaluationDomain<C::Scalar>,
+        domain: &EvaluationDomain<'_, C::Scalar>,
         p: &Argument,
     ) -> Result<halo2_axiom::plonk::permutation::ProvingKey<C>, GpuError> {
         build_pk(params, domain, p, |i, j| self.mapping[i][j])
@@ -154,7 +154,7 @@ impl Assembly {
 /// permutation `ProvingKey`.
 pub(crate) fn build_pk<'params, C: CurveAffine, P: Params<'params, C>>(
     params: &P,
-    domain: &EvaluationDomain<C::Scalar>,
+    domain: &EvaluationDomain<'_, C::Scalar>,
     p: &Argument,
     mapping: impl Fn(usize, usize) -> (usize, usize) + Sync,
 ) -> Result<halo2_axiom::plonk::permutation::ProvingKey<C>, GpuError> {
@@ -171,7 +171,7 @@ pub(crate) fn build_pk<'params, C: CurveAffine, P: Params<'params, C>>(
 /// halo2-axiom permutation `VerifyingKey`.
 pub(crate) fn build_vk<'params, C: CurveAffine, P: Params<'params, C>>(
     params: &P,
-    domain: &EvaluationDomain<C::Scalar>,
+    domain: &EvaluationDomain<'_, C::Scalar>,
     p: &Argument,
     mapping: impl Fn(usize, usize) -> (usize, usize) + Sync,
 ) -> halo2_axiom::plonk::permutation::VerifyingKey<C> {
@@ -192,7 +192,7 @@ pub(crate) fn build_vk<'params, C: CurveAffine, P: Params<'params, C>>(
 /// δ^{permuted_col} · ω^{permuted_row}` per the copy `mapping`.
 fn permutation_lagrange_polys<'params, C: CurveAffine, P: Params<'params, C>>(
     params: &P,
-    domain: &EvaluationDomain<C::Scalar>,
+    domain: &EvaluationDomain<'_, C::Scalar>,
     p: &Argument,
     mapping: impl Fn(usize, usize) -> (usize, usize) + Sync,
 ) -> Vec<Polynomial<C::Scalar, LagrangeCoeff>> {

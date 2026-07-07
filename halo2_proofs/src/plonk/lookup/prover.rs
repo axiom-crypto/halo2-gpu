@@ -83,7 +83,7 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
         &self,
         pk: &GpuProvingKey<'_, C>,
         params: &P,
-        domain: &EvaluationDomain<C::Scalar>,
+        domain: &EvaluationDomain<'_, C::Scalar>,
         theta: ChallengeTheta<C>,
         advice_values_device: &'a [Polynomial<C::Scalar, LagrangeCoeff, Device>],
         fixed_values: &'a [Polynomial<C::Scalar, LagrangeCoeff>],
@@ -656,7 +656,7 @@ type ExpressionPair<F> = (Polynomial<F, LagrangeCoeff>, Polynomial<F, LagrangeCo
 fn permute_expression_pair<'params, C: CurveAffine, P: Params<'params, C>>(
     pk: &GpuProvingKey<'_, C>,
     params: &P,
-    domain: &EvaluationDomain<C::Scalar>,
+    domain: &EvaluationDomain<'_, C::Scalar>,
     input_expression: &Polynomial<C::Scalar, LagrangeCoeff>,
     table_expression: &Polynomial<C::Scalar, LagrangeCoeff>,
 ) -> Result<ExpressionPair<C::Scalar>, GpuError>

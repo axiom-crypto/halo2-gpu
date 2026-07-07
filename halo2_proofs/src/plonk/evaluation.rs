@@ -26,7 +26,7 @@ pub(crate) struct EvaluatorVkView<'a, F: Field> {
     pub(crate) blinding_factors: usize,
     pub(crate) cs_degree: usize,
     pub(crate) permutation_argument: &'a permutation::Argument,
-    pub(crate) domain: &'a EvaluationDomain<F>,
+    pub(crate) domain: &'a EvaluationDomain<'a, F>,
 }
 
 /// Return the index in the polynomial of size `isize` after rotation `rot`.
@@ -1258,10 +1258,10 @@ where
                         gamma,
                         y,
                         domain.k(),
-                        domain.omega_inv,
-                        domain.ifft_divisor,
-                        domain.omega,
-                        isize as usize,
+                        *domain.omega_inv(),
+                        *domain.ifft_divisor(),
+                        *domain.omega(),
+                       isize as usize,
                     )?;
 
                     // Permutations
@@ -1401,7 +1401,7 @@ where
                                     d_product_poly,
                                     d_permuted_input,
                                     d_permuted_table,
-                                    domain.g_coset * current_extended_omega,
+                                    (*domain.g_coset()) * current_extended_omega,
                                 )?;
                                 gpu_quotient_lookups_time.exit();
                             }

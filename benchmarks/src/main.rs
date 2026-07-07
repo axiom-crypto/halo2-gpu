@@ -4,6 +4,7 @@ use openvm::platform::memory::GUEST_MAX_MEM;
 use openvm_sdk::{
     config::{AggregationSystemParams, AppConfig, DEFAULT_APP_L_SKIP},
     fs::{read_object_from_file, write_object_to_file},
+    types::ExecutableFormat,
     Sdk, StdIn,
 };
 use openvm_stark_sdk::config::app_params_with_100_bits_security;
@@ -51,7 +52,7 @@ fn main() -> Result<()> {
     }
 
     let sdk = builder.build()?;
-    let app_exe = sdk.convert_to_exe(elf)?;
+    let app_exe = sdk.convert_to_exe(ExecutableFormat::Elf(elf))?;
 
     let evm_proof = if root_proof_path.exists() {
         eprintln!("reusing root proof from {:?}", root_proof_path);

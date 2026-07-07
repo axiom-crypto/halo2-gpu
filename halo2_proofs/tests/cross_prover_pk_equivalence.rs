@@ -269,7 +269,7 @@ fn cross_prover_pk_bytes_equivalence() {
 
     // 3. Serde-identity guard: wrapping the CPU pk in a GpuProvingKey serializes
     //    to byte-identical output.
-    let gpk_guard = GpuProvingKey::<G1Affine>::from_host(cpu_pk.clone());
+    let gpk_guard = GpuProvingKey::<G1Affine>::from_host(&cpu_pk);
     assert_eq!(
         gpk_guard.to_bytes(fmt),
         bytes,

@@ -25,7 +25,7 @@ use crate::poly::{Device, DevicePolyExt, ExtendedLagrangeCoeff, Host, MaybeDevic
 
 #[allow(clippy::uninit_vec)]
 pub(crate) fn lagrange_to_coeff_many_host<F: WithSmallOrderMulGroup<3>>(
-    domain: &EvaluationDomain<F>,
+    domain: &EvaluationDomain<'_, F>,
     in_many: &[Polynomial<F, LagrangeCoeff>],
 ) -> Result<Vec<Polynomial<F, Coeff>>, GpuError> {
     crate::perf_section!("lagrange_to_coeff_many");
@@ -51,7 +51,7 @@ pub(crate) fn lagrange_to_coeff_many_host<F: WithSmallOrderMulGroup<3>>(
 /// through the host path.
 #[cfg(feature = "vram-fallback")]
 pub(crate) fn extended_from_lagrange_vec_not_all_device<F: WithSmallOrderMulGroup<3>>(
-    domain: &EvaluationDomain<F>,
+    domain: &EvaluationDomain<'_, F>,
     values: Vec<MaybeDevice<F, LagrangeCoeff>>,
 ) -> Result<MaybeDevice<F, ExtendedLagrangeCoeff>, GpuError> {
     tracing::warn!(
@@ -75,7 +75,7 @@ pub(crate) fn extended_from_lagrange_vec_not_all_device<F: WithSmallOrderMulGrou
 /// tight, so materialize the device parts and run the host gather.
 #[cfg(feature = "vram-fallback")]
 pub(crate) fn extended_from_lagrange_vec_vram_tight<F: WithSmallOrderMulGroup<3>>(
-    domain: &EvaluationDomain<F>,
+    domain: &EvaluationDomain<'_, F>,
     values: Vec<MaybeDevice<F, LagrangeCoeff>>,
     free_bytes: usize,
     extended_bytes: usize,
@@ -104,7 +104,7 @@ pub(crate) fn extended_from_lagrange_vec_vram_tight<F: WithSmallOrderMulGroup<3>
 /// site's contract of device-resident outputs.
 #[cfg(feature = "vram-fallback")]
 pub(crate) fn lagrange_to_coeff_many_device_inputs_host_arm<F: WithSmallOrderMulGroup<3>>(
-    domain: &EvaluationDomain<F>,
+    domain: &EvaluationDomain<'_, F>,
     in_many: &[Polynomial<F, LagrangeCoeff, Device>],
     free_bytes: usize,
     total_bytes: usize,
@@ -137,7 +137,7 @@ pub(crate) fn lagrange_to_coeff_many_device_inputs_host_arm<F: WithSmallOrderMul
 /// then H2D the result so the device-output contract holds.
 #[cfg(feature = "vram-fallback")]
 pub(crate) fn lagrange_to_coeff_device_host_arm<F: WithSmallOrderMulGroup<3>>(
-    domain: &EvaluationDomain<F>,
+    domain: &EvaluationDomain<'_, F>,
     a: Polynomial<F, LagrangeCoeff>,
     free_bytes: usize,
     n_bytes: usize,
@@ -162,7 +162,7 @@ pub(crate) fn lagrange_to_coeff_device_host_arm<F: WithSmallOrderMulGroup<3>>(
 /// run host iFFT, then H2D the output.
 #[cfg(feature = "vram-fallback")]
 pub(crate) fn lagrange_to_coeff_device_input_host_arm<F: WithSmallOrderMulGroup<3>>(
-    domain: &EvaluationDomain<F>,
+    domain: &EvaluationDomain<'_, F>,
     a: Polynomial<F, LagrangeCoeff, Device>,
     free_bytes: usize,
     n_bytes: usize,
@@ -188,7 +188,7 @@ pub(crate) fn lagrange_to_coeff_device_input_host_arm<F: WithSmallOrderMulGroup<
 /// batch iFFT then H2D the outputs.
 #[cfg(feature = "vram-fallback")]
 pub(crate) fn lagrange_to_coeff_many_device_host_arm<F: WithSmallOrderMulGroup<3>>(
-    domain: &EvaluationDomain<F>,
+    domain: &EvaluationDomain<'_, F>,
     in_many: &[Polynomial<F, LagrangeCoeff>],
     free_bytes: usize,
     total_bytes: usize,
