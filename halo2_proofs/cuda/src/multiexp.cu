@@ -20,6 +20,34 @@ using Scalar = utils::FFITraitObject;
 using Point = utils::FFITraitObject;
 using Output = utils::FFITraitObject;
 
+// --- Pippenger window-size (`win_bit`) --------------------------------------
+//
+// win_bit = clamp(floor(log2(length)) / 2 + 2, MSM_WIN_BIT_MIN, MSM_WIN_BIT_MAX)
+//
+// The +2 offset on the heuristic base is the measured optimum from the
+// RUN-2026-07-08-001 sweep: +1 shaved ~26 ms off both-prove MSM host-wall, +2
+// ~100 ms (best), and +3 regresses (the extra bucket-reduction Horner cost
+// outweighs the fewer windows). The window size only reparametrises the
+// Pippenger bucket decomposition — the summand set and the final sum are
+// invariant — so the offset changes timing only, never the MSM result: the
+// proof stays byte-identical. win_bit derives bin_num_/win_num_/half in
+// set_params below, so every arena and launch grid auto-sizes with it.
+//
+// Clamp rationale (both bounds are safety rails; with the +2 offset neither
+// binds for any real MSM length):
+//   MIN = 1  : `win_num_ = ceil(SCALAR_BIT / win_bit)` divides by win_bit, so
+//              win_bit must stay >= 1.
+//   MAX = 18 : matches sppark's `wbits` cap (pippenger.cuh). Keeps `bin_num_ =
+//              1 << win_bit` and all bin_num/win_num-derived launch grids
+//              (`win_num * bin_num` blocks) inside the 2^31 grid-x limit and the
+//              `int` shift range (<< 18 is safe; << 31 is UB), and bounds the
+//              largest arena (`size_out_ = 96 * win_num * bin_num`) to a few
+//              hundred MB even for the biggest production chunk — far under the
+//              32 GiB budget. The dominant `size_wins_` arena SHRINKS as win_bit
+//              grows, so peak VRAM does not rise with the offset.
+static constexpr uint64_t MSM_WIN_BIT_MIN = 1;
+static constexpr uint64_t MSM_WIN_BIT_MAX = 18;
+
 // Computes the scratch layout and per-slot offsets for the Pippenger MSM
 // kernel chain.
 class CudaMsmInfo {
@@ -33,7 +61,15 @@ public:
     {
         // basic
         length_ = length;
-        win_bit_ = (uint64_t)log2(length_) / 2;
+        // Window size: heuristic base + the measured +2 offset, clamped to a
+        // safe range (see MSM_WIN_BIT_MIN/MAX above). win_num_/bin_num_/half
+        // derive from win_bit_ below, so every arena and grid resizes with it.
+        uint64_t win_bit = (uint64_t)log2(length_) / 2 + 2;
+        if (win_bit < MSM_WIN_BIT_MIN)
+            win_bit = MSM_WIN_BIT_MIN;
+        if (win_bit > MSM_WIN_BIT_MAX)
+            win_bit = MSM_WIN_BIT_MAX;
+        win_bit_ = win_bit;
         win_bit_half_ = (win_bit_ + 1) / 2;
         win_num_ = (SCALAR_BIT + win_bit_ - 1) / win_bit_;
         bin_num_ = 1 << win_bit_;
