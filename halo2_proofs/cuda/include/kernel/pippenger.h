@@ -281,13 +281,12 @@ namespace pippenger {
         }
     }
 
-    // S1b: build the dense-bucket worklist on device. One thread per
-    // (window, bucket) flat index; buckets whose sparsity clears the
-    // threshold are atomically compacted into `d_worklist`. Predicate and
-    // `d_sparsity` values are identical to the former host D2H + host loop,
-    // so the SET of dense buckets is unchanged (only the compaction order
-    // differs, which is irrelevant — each dense bucket is summed
-    // independently into its own arena slice).
+    // Build the dense-bucket worklist on device. One thread per
+    // (window, bucket) flat index; buckets whose sparsity clears the threshold
+    // are atomically compacted into `d_worklist`. Compaction order is
+    // irrelevant to the result: each dense bucket is summed independently into
+    // its own arena slice, so the order in which buckets land in the worklist
+    // does not affect any bucket sum.
     __global__ void cukernel_compact_dense_worklist(
         const float* d_sparsity, float sparsity_threshold,
         uint32_t win_num, uint32_t bin_num,
@@ -301,13 +300,13 @@ namespace pippenger {
         if (d_sparsity[idx] >= sparsity_threshold) {
             int slot = atomicAdd(d_dense_cnt, 1);
             // Arena invariant: at most ceil(1/SPARSITY_THRESHOLD) ==
-            // MAX_DENSE_BUCKET_NUM buckets per window can be dense (their
-            // sparsities sum to <= 1 per window), so the worklist can never
-            // exceed win_num * MAX_DENSE_BUCKET_NUM == max_worklist, which is
-            // exactly the `d_dense_out` arena capacity. This cannot trip; if the
-            // invariant is ever violated, HARD-FAIL (assert in debug, __trap in
-            // release) rather than silently drop a dense bucket (which yields a
-            // wrong result) or write past the arena (OOB).
+            // MAX_DENSE_BUCKET_NUM buckets per window can be dense (per-window
+            // sparsities sum to <= 1), so the worklist can never exceed
+            // win_num * MAX_DENSE_BUCKET_NUM == max_worklist, which is exactly
+            // the `d_dense_out` arena capacity. If the invariant is ever
+            // violated, hard-fail (assert in debug, __trap in release) rather
+            // than silently drop a dense bucket (a wrong result) or write past
+            // the arena (out of bounds).
             assert(slot < (int)max_worklist);
             if (slot >= (int)max_worklist) {
                 __trap();
@@ -316,13 +315,12 @@ namespace pippenger {
         }
     }
 
-    // S1b: one grid-parallel launch over ALL (dense-bucket, split-block)
-    // pairs — replaces the former per-dense-bucket host-loop launch of
-    // `cukernel_mixed_add_dense_bucket`. Blocks whose `worklist_idx` is past
-    // the live dense count early-return uniformly (the predicate depends only
-    // on `blockIdx.x`, so the whole block returns — no `__syncthreads`
-    // divergence). The per-bucket split math is byte-identical to the old
-    // kernel with `gridDim.x == split_n_blocks` and `blockIdx.x == split_block`.
+    // One grid-parallel launch over all (dense-bucket, split-block) pairs.
+    // Blocks whose `worklist_idx` is past the live dense count early-return
+    // uniformly: the predicate depends only on `blockIdx.x`, so the whole
+    // block returns together and there is no `__syncthreads` divergence.
+    // Within a dense bucket, `split_n_blocks` blocks partition its points and
+    // `split_block` selects this block's slice of them.
     template <uint32_t TILE_PER_BLOCK>
     __global__ void cukernel_mixed_add_dense_bucket_batched(
         bucket_t* d_dense_out, const affine_t* d_point, size_t point_size,
@@ -347,9 +345,9 @@ namespace pippenger {
         uint32_t points_in_last_block = points_in_bucket - split_block * points_per_block;
         uint32_t length = split_block == (split_n_blocks - 1) ? points_in_last_block : points_per_block;
 
-        // Per-dense-bucket arena slice: DENSE_SPLIT_N_BLOCKS (== 128) bucket_t.
-        // `worklist_idx` plays the role of the former sequential `offset_cnt`,
-        // preserving the `offset_cnt * 128` arena stride.
+        // Each dense bucket owns a contiguous arena slice of
+        // DENSE_SPLIT_N_BLOCKS (== 128) bucket_t; `worklist_idx` selects the
+        // slice, giving the `worklist_idx * 128` arena stride.
         bucket_t* d_out_slice = d_dense_out + worklist_idx * 128;
 
         if (split_block * points_per_block > points_in_bucket) {
@@ -392,10 +390,9 @@ namespace pippenger {
         }
     }
 
-    // S1b: batched partial-reduce — one block per dense bucket, replacing the
-    // per-bucket host-loop launch of `cukernel_dense_bucket_acc_results`. Sums
-    // the `split_n_blocks` partials that the batched split kernel wrote into
-    // this bucket's arena slice, then stores into `d_out[flat]`.
+    // Batched partial-reduce: one block per dense bucket. Sums the
+    // `split_n_blocks` partials that the split kernel wrote into this bucket's
+    // arena slice, then stores the bucket total into `d_out[flat]`.
     template <uint32_t TILE_PER_BLOCK>
     __global__ void cukernel_dense_bucket_acc_results_batched(
         bucket_t* d_dense_out, point_t* d_out,
@@ -458,41 +455,41 @@ namespace pippenger {
             d_sparsity, SPARSITY_THRESHOLD,
             point_num, win_num, bin_num);
 
-        // S1b: build the dense-bucket worklist ON DEVICE (compact buckets whose
-        // sparsity >= SPARSITY_THRESHOLD). Replaces the former load-bearing
-        // D->H `cudaMemcpyAsync` + `cudaStreamSynchronize` + host malloc/loop/
-        // free that branched dense dispatch on host-visible `h_sparsity`.
+        // Build the dense-bucket worklist on device: compact every bucket
+        // whose sparsity >= SPARSITY_THRESHOLD into `d_worklist`, counting them
+        // in `d_dense_cnt`. Selecting dense buckets on the device avoids
+        // reading the sparsity array back to the host and dispatching one
+        // kernel per dense bucket from a host loop.
         uint32_t max_worklist = win_num * max_dense_bucket_num;
         cudaMemsetAsync(d_dense_cnt, 0, sizeof(int), _stream);
         cukernel_compact_dense_worklist<<<block_num, thread_per_block, 0, _stream>>>(
             d_sparsity, SPARSITY_THRESHOLD, win_num, bin_num,
             d_worklist, d_dense_cnt, max_worklist);
 
-        // Per-call SPLIT clamp. `point_num` is constant per call, so this is
-        // the host-side equivalent of the former in-loop `SPLIT_N_BLOCKS`
-        // mutation (which stabilised at min(128, point_num/TILE) after the
-        // first dense bucket). 128 blocks per bucket, do not change!!!!
-        // (`d_dense_out` arena slices are sized for 128 == DENSE_SPLIT_N_BLOCKS.)
+        // Split each dense bucket across SPLIT_N_BLOCKS blocks, computed once
+        // here since `point_num` is constant per call:
+        // min(128, point_num / TILE_PER_BLOCK). The cap of 128 must equal
+        // DENSE_SPLIT_N_BLOCKS: each `d_dense_out` arena slice holds exactly
+        // that many partials per bucket (the `worklist_idx * 128` stride).
         uint32_t SPLIT_N_BLOCKS = 128;
         if (SPLIT_N_BLOCKS * TILE_PER_BLOCK > point_num) {
             SPLIT_N_BLOCKS = point_num / TILE_PER_BLOCK;
         }
         // A valid dense chunk with 4 <= point_num < TILE_PER_BLOCK would give
-        // SPLIT_N_BLOCKS == 0 (no split blocks launched => the dense bucket is
-        // written as infinity and its summands are LOST). Clamp to >= 1 so one
-        // block sums the whole bucket. No-op for the production path
-        // (point_num >= 2^14 keeps SPLIT_N_BLOCKS == 128).
+        // SPLIT_N_BLOCKS == 0 (no split blocks launched, so the dense bucket
+        // would be written as infinity and its summands lost). Clamp to >= 1
+        // so a single block sums the whole bucket. This is a no-op on the
+        // production path, where point_num >= 2^14 keeps SPLIT_N_BLOCKS == 128.
         if (SPLIT_N_BLOCKS == 0) {
             SPLIT_N_BLOCKS = 1;
         }
 
         bucket_t* d_dense_out = (bucket_t*)_dense_out;
-        // ONE batched split-accumulate over all (dense-bucket, split-block)
-        // pairs + ONE batched partial-reduce, instead of the former per-dense-
-        // bucket host loop of tiny <<<128,32>>> launches. Idle blocks
+        // One batched split-accumulate over all (dense-bucket, split-block)
+        // pairs, followed by one batched partial-reduce. Idle blocks
         // (worklist_idx >= *d_dense_cnt) early-return uniformly. Both launches
-        // use SPLIT_N_BLOCKS (>= 1 by the clamp above) so the whole grid is
-        // meaningful.
+        // use SPLIT_N_BLOCKS (>= 1 by the clamp above) so every launched block
+        // has meaningful work.
         cukernel_mixed_add_dense_bucket_batched<TILE_PER_BLOCK>
             <<<max_worklist * SPLIT_N_BLOCKS, TILE_PER_BLOCK, 0, _stream>>>(
                 d_dense_out, d_point, point_num,

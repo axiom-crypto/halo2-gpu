@@ -1,16 +1,16 @@
-//! Byte-equivalence TDD guard for the S1b dense-bucket batching change.
+//! Byte-equivalence coverage for the device dense-bucket accumulation path.
 //!
 //! Every case compares the device
 //! `multiexp_gpu_device_scalars_device_bases_chunked` path against the
 //! `best_multiexp_cpu` oracle and asserts **equal final affine points**
 //! (`gpu.to_affine() == cpu.to_affine()`), for both the unchunked
 //! (`chunk_size == n`) and chunked (`chunk_size == n/4 + 1`, short tail)
-//! dispatch. S1b is a pure scheduling/batching change of the dense-bucket
-//! accumulation, so the result MUST stay byte-identical across it.
+//! dispatch. Dense-bucket accumulation only batches independent bucket sums,
+//! so the MSM result must stay byte-identical to a plain summation.
 //!
 //! Run single-threaded (shared GPU ctx + global mem-manager mutex):
 //!   CUDA_VISIBLE_DEVICES=7 cargo test \
-//!     --test multiexp_s1b_dense_edge_equivalence -- --test-threads=1
+//!     --test multiexp_dense_bucket_edge_equivalence -- --test-threads=1
 //!
 //! Coverage rationale for the byte-identity-risk edges:
 //! - interspersed **zero scalars** exercise the `if (win != 0)` scatter skip;
@@ -22,7 +22,7 @@
 //!   (one per nonzero window digit) and leaves nearly every other bucket
 //!   **empty** (`begin == end`);
 //! - a large equal-valued coeff **prefix** forces **dense buckets**
-//!   (see `dense_constant` doc) — the code path S1b rewrites.
+//!   (see `dense_constant` doc), exercising the dense-accumulation kernels.
 
 use ff::{Field, PrimeField};
 use group::{Curve, Group, GroupEncoding};
@@ -101,7 +101,7 @@ fn assert_chunked_and_unchunked(coeffs: &[Fr], bases: &[G1Affine], label: &str) 
 }
 
 #[test]
-fn s1b_random_equiv_log_n_14() {
+fn random_equiv_log_n_14() {
     let n = 1usize << 14;
     let coeffs: Vec<Fr> = (0..n).map(|_| Fr::random(OsRng)).collect();
     let bases = rand_bases(n);
@@ -109,7 +109,7 @@ fn s1b_random_equiv_log_n_14() {
 }
 
 #[test]
-fn s1b_random_equiv_log_n_20() {
+fn random_equiv_log_n_20() {
     let n = 1usize << 20;
     let coeffs: Vec<Fr> = (0..n).map(|_| Fr::random(OsRng)).collect();
     let bases = rand_bases(n);
@@ -122,7 +122,7 @@ fn s1b_random_equiv_log_n_20() {
 /// (`n/4 + 1` elements, all but one equal to `K`) is itself dense, so the
 /// dense path is traversed in both dispatches.
 #[test]
-fn s1b_dense_bucket_equiv_log_n_20() {
+fn dense_bucket_equiv_log_n_20() {
     let n = 1usize << 20;
     let k = dense_constant();
     let m = n / 4; // 25% share of the scalars => sparsity >= 0.25 > 0.10
@@ -135,7 +135,7 @@ fn s1b_dense_bucket_equiv_log_n_20() {
 
 /// Dense-bucket coverage at the GPU threshold size (cheap).
 #[test]
-fn s1b_dense_bucket_equiv_log_n_14() {
+fn dense_bucket_equiv_log_n_14() {
     let n = 1usize << 14;
     let k = dense_constant();
     let m = n / 4;
@@ -151,7 +151,7 @@ fn s1b_dense_bucket_equiv_log_n_14() {
 /// add path together, mixed with dense-forcing constants so the dense kernels
 /// also see the infinity handling.
 #[test]
-fn s1b_zero_scalars_and_identity_bases_log_n_14() {
+fn zero_scalars_and_identity_bases_log_n_14() {
     let n = 1usize << 14;
     let k = dense_constant();
     let id = G1::identity().to_affine();
@@ -183,7 +183,7 @@ fn s1b_zero_scalars_and_identity_bases_log_n_14() {
 /// All-zero scalars: the whole MSM collapses to the identity, exercising
 /// `to_affine` of an identity accumulator and all-empty buckets.
 #[test]
-fn s1b_all_zero_scalars_identity_result_log_n_14() {
+fn all_zero_scalars_identity_result_log_n_14() {
     let n = 1usize << 14;
     let coeffs = vec![Fr::ZERO; n];
     let bases = rand_bases(n);
@@ -204,7 +204,7 @@ fn s1b_all_zero_scalars_identity_result_log_n_14() {
 /// other bucket is **empty**. Exercises the 1-member reduction (1 real point +
 /// 31 infinity lanes) and the empty-bucket (`begin == end`) seed.
 #[test]
-fn s1b_single_and_empty_buckets_log_n_14() {
+fn single_and_empty_buckets_log_n_14() {
     let n = 1usize << 14;
     let mut coeffs = vec![Fr::ZERO; n];
     coeffs[0] = dense_constant();
@@ -229,19 +229,19 @@ fn ten_group_scalar(g: usize) -> Fr {
     Option::<Fr>::from(Fr::from_repr(bytes)).expect("in-field scalar")
 }
 
-/// FIX-1 regression (arena/worklist off-by-one on `MAX_DENSE_BUCKET_NUM`).
+/// Arena/worklist sizing at the maximum dense-buckets-per-window.
 ///
 /// With `win_bit == 8` each window is one scalar byte; `ten_group_scalar`
 /// makes 10 digit-distinct groups, each repeated `PER_GROUP` times with
 /// sparsity `PER_GROUP/n ≈ 0.10 ≥ SPARSITY_THRESHOLD`. That yields 10 dense
-/// buckets in each of the 31 low windows == **310 dense buckets**. The old
-/// `MAX_DENSE_BUCKET_NUM = (uint64_t)(1.0/0.10f) = 9` sizes both the
-/// `d_dense_out` arena and the worklist for only `win_num*9 = 288` slices, so
-/// ~22 dense buckets are dropped/OOB and the result diverges from the oracle.
-/// The corrected inclusive bound `10` sizes them for `win_num*10 = 320 ≥ 310`.
-/// `n` is deliberately non-power-of-two.
+/// buckets in each of the 31 low windows == **310 dense buckets**, the worst
+/// case. `MAX_DENSE_BUCKET_NUM` must be the inclusive ceiling `10`, which
+/// sizes both the `d_dense_out` arena and the worklist for `win_num*10 = 320
+/// ≥ 310` slices; a truncating floor of `9` would size them for only
+/// `win_num*9 = 288` slices, so ~22 dense buckets would be dropped/OOB and the
+/// result would diverge from the oracle. `n` is deliberately non-power-of-two.
 #[test]
-fn s1b_ten_dense_buckets_per_window_overflow() {
+fn ten_dense_buckets_per_window_overflow() {
     const GROUPS: usize = 10;
     const PER_GROUP: usize = 6554; // 6554/65540 = 0.10001 >= SPARSITY_THRESHOLD
     let n = GROUPS * PER_GROUP; // 65540, non-power-of-two
@@ -254,15 +254,16 @@ fn s1b_ten_dense_buckets_per_window_overflow() {
     assert_chunked_and_unchunked(&coeffs, &bases, "10 dense buckets/window overflow");
 }
 
-/// FIX-2 regression (SPLIT_N_BLOCKS clamps to 0 for sub-`TILE` dense chunks).
+/// SPLIT_N_BLOCKS floor for sub-`TILE` dense chunks.
 ///
 /// A valid dense chunk with `4 <= point_num < TILE_PER_BLOCK (=32)`: all
 /// scalars equal, so every window has a single dense bucket (sparsity 1.0).
-/// The old clamp `SPLIT_N_BLOCKS = point_num / 32 = 0` launched 0 split blocks
-/// and wrote the dense bucket as infinity (summands lost); the fix clamps to
-/// at least one block. Verified against the oracle.
+/// Here `point_num / 32` truncates to `0`; without a floor of one block, no
+/// split blocks would launch and the dense bucket would be written as infinity
+/// with its summands lost. The `>= 1` clamp makes a single block sum the whole
+/// bucket. Verified against the oracle.
 #[test]
-fn s1b_small_dense_chunk_sub_tile() {
+fn small_dense_chunk_sub_tile() {
     let n = 20usize; // 4 <= 20 < 32
     let coeffs = vec![dense_constant(); n];
     let bases = rand_bases(n);

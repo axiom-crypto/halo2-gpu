@@ -24,27 +24,30 @@ using Output = utils::FFITraitObject;
 //
 // win_bit = clamp(floor(log2(length)) / 2 + 2, MSM_WIN_BIT_MIN, MSM_WIN_BIT_MAX)
 //
-// The +2 offset on the heuristic base is the measured optimum from the
-// RUN-2026-07-08-001 sweep: +1 shaved ~26 ms off both-prove MSM host-wall, +2
-// ~100 ms (best), and +3 regresses (the extra bucket-reduction Horner cost
-// outweighs the fewer windows). The window size only reparametrises the
-// Pippenger bucket decomposition — the summand set and the final sum are
-// invariant — so the offset changes timing only, never the MSM result: the
-// proof stays byte-identical. win_bit derives bin_num_/win_num_/half in
-// set_params below, so every arena and launch grid auto-sizes with it.
+// A wider window than the sqrt-heuristic base (floor(log2(length)) / 2) uses
+// fewer windows, so the MSM makes fewer per-window point-accumulation passes —
+// the dominant cost — at the price of more buckets per window (bucket count
+// doubles per extra bit, and bucket-reduction cost grows with it). The +2
+// offset balances these: wide enough to cut window passes, yet narrow enough
+// that the added bucket-reduction cost stays below the crossover where it would
+// outweigh the saved passes. The window size only reparametrises the Pippenger
+// bucket decomposition — the summand set and the final sum are invariant — so
+// the offset changes timing only, never the MSM result: the proof stays
+// byte-identical. win_bit derives bin_num_/win_num_/half in set_params below,
+// so every arena and launch grid auto-sizes with it.
 //
 // Clamp rationale (both bounds are safety rails; with the +2 offset neither
 // binds for any real MSM length):
 //   MIN = 1  : `win_num_ = ceil(SCALAR_BIT / win_bit)` divides by win_bit, so
 //              win_bit must stay >= 1.
-//   MAX = 18 : matches sppark's `wbits` cap (pippenger.cuh). Keeps `bin_num_ =
-//              1 << win_bit` and all bin_num/win_num-derived launch grids
-//              (`win_num * bin_num` blocks) inside the 2^31 grid-x limit and the
-//              `int` shift range (<< 18 is safe; << 31 is UB), and bounds the
-//              largest arena (`size_out_ = 96 * win_num * bin_num`) to a few
-//              hundred MB even for the biggest production chunk — far under the
-//              32 GiB budget. The dominant `size_wins_` arena SHRINKS as win_bit
-//              grows, so peak VRAM does not rise with the offset.
+//   MAX = 18 : keeps `bin_num_ = 1 << win_bit` and all bin_num/win_num-derived
+//              launch grids (`win_num * bin_num` blocks) inside the 2^31 grid-x
+//              limit and the `int` shift range (<< 18 is safe; << 31 is UB),
+//              and bounds the largest arena (`size_out_ = 96 * win_num *
+//              bin_num`) to a few hundred MB even for the biggest production
+//              chunk — far under the VRAM budget. The dominant `size_wins_`
+//              arena shrinks as win_bit grows, so peak VRAM does not rise with
+//              the offset.
 static constexpr uint64_t MSM_WIN_BIT_MIN = 1;
 static constexpr uint64_t MSM_WIN_BIT_MAX = 18;
 
@@ -61,9 +64,9 @@ public:
     {
         // basic
         length_ = length;
-        // Window size: heuristic base + the measured +2 offset, clamped to a
-        // safe range (see MSM_WIN_BIT_MIN/MAX above). win_num_/bin_num_/half
-        // derive from win_bit_ below, so every arena and grid resizes with it.
+        // Window size: sqrt-heuristic base + the +2 offset, clamped to a safe
+        // range (see MSM_WIN_BIT_MIN/MAX above). win_num_/bin_num_/half derive
+        // from win_bit_ below, so every arena and grid resizes with it.
         uint64_t win_bit = (uint64_t)log2(length_) / 2 + 2;
         if (win_bit < MSM_WIN_BIT_MIN)
             win_bit = MSM_WIN_BIT_MIN;
@@ -75,23 +78,23 @@ public:
         bin_num_ = 1 << win_bit_;
 
         // sparsity
-        // Inclusive upper bound on dense buckets PER WINDOW. Per-window
+        // Inclusive upper bound on dense buckets per window: per-window
         // sparsities sum to <= 1 and a bucket is dense iff its float sparsity
         // >= threshold, so at most ceil(1/threshold) buckets qualify (for 0.10:
-        // exactly 10, since 10 buckets of 26/260 = 0.10f each fit). The old
-        // `(uint64_t)(1.0 / SPARSITY_THRESHOLD)` truncated 0.10f's reciprocal
-        // (9.9999998) to 9 and undersized BOTH the worklist and the
-        // `d_dense_out` arena by one slice/window; ceil in double fixes it.
+        // exactly 10, since 10 buckets of 26/260 = 0.10f each fit). Take the
+        // ceiling in double: 1.0f / 0.10f evaluates to 9.9999998, so a
+        // truncating `(uint64_t)(1.0 / threshold)` would give 9 and undersize
+        // both the worklist and the `d_dense_out` arena by one slice per window.
         MAX_DENSE_BUCKET_NUM = (uint64_t)ceil(1.0 / (double)SPARSITY_THRESHOLD);
         DENSE_SPLIT_N_BLOCKS = 128; // 128 for sppark:  sizeof(bucket_t)
         size_dense_out_ = win_num_ * (MAX_DENSE_BUCKET_NUM * DENSE_SPLIT_N_BLOCKS) * 128;
         size_sparsity_ = win_num_ * bin_num_ * sizeof(float); // wins*bins
         // e.g. 16win*(128*10) = 20480 * sizeof(bucket_t) = 20480 * 128bytes
 
-        // S1b: device dense-bucket worklist. `size_dense_worklist_` matches the
+        // Device dense-bucket worklist. `size_dense_worklist_` matches the
         // `d_dense_out` arena capacity (win_num * MAX_DENSE_BUCKET_NUM slices),
-        // which is the maximum number of dense buckets per MSM; `d_dense_cnt`
-        // is the single atomic compaction counter.
+        // i.e. the maximum number of dense buckets per MSM; `d_dense_cnt` is
+        // the single atomic compaction counter.
         size_dense_worklist_ = win_num_ * MAX_DENSE_BUCKET_NUM * sizeof(int);
         size_dense_cnt_ = sizeof(int);
 
