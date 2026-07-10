@@ -62,7 +62,7 @@ pub trait Params<'params, C: CurveAffine>: Sized + Clone {
     /// `r`.
     ///
     /// For KZG the blind is not used for ZK; it is accepted to keep the API
-    /// aligned with halo2-axiom 0.5.1 and with IPA callers.
+    /// aligned with halo2-axiom 0.5.2 and with IPA callers.
     fn commit_lagrange(
         &self,
         poly: &Polynomial<C::ScalarExt, LagrangeCoeff>,
@@ -122,7 +122,7 @@ pub trait ParamsProver<'params, C: CurveAffine>: Params<'params, C> {
     }
 
     /// GPU-accelerated commitment on a specific GPU. Defaults to the CPU path so
-    /// external `ParamsProver` impls (e.g. ones that come from halo2-axiom 0.5.1)
+    /// external `ParamsProver` impls (e.g. ones that come from halo2-axiom 0.5.2)
     /// compile unchanged; the KZG impl in this crate overrides it.
     fn commit_with_gpu(
         &self,
