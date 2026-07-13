@@ -201,11 +201,18 @@ impl<C: CurveAffine> Constructed<C> {
         let h_poly = match self.h_pieces {
             HPieces::Device(pieces) => {
                 let n = domain.empty_coeff().len();
-                let zero_init = vec![C::Scalar::ZERO; n];
-                let mut d_acc: DeviceBuffer<C::Scalar> = zero_init
-                    .as_slice()
-                    .to_device_on(&HALO2_GPU_CTX)
-                    .expect("H2D of zero accumulator failed in Constructed::evaluate");
+                // Device-side zero-fill of the fold accumulator: allocate on
+                // device and memset all `n` elements to zero instead of
+                // building a host length-n zero `Polynomial` and H2D-uploading
+                // it (which spends ~256 MiB of host alloc + page-fault zeroing +
+                // pageable copy at k=23, off the critical path).
+                // Byte-identical on the GPU (BN254) prove path: `fill_zero_on`
+                // writes all-bits-zero, which equals `C::Scalar::ZERO` for the
+                // bn256::Fr Montgomery representation the device kernels use;
+                // same-stream ordering makes the memset precede the fold reads.
+                let mut d_acc: DeviceBuffer<C::Scalar> =
+                    DeviceBuffer::with_capacity_on(n, &HALO2_GPU_CTX);
+                d_acc.fill_zero_on(&HALO2_GPU_CTX)?;
                 // Hoist the per-iteration scalar H2Ds out of the fold loop:
                 // `poly_scale_device` computes `acc += (xn - 1) * acc`
                 // (≡ `acc *= xn`); `poly_multiply_add_device` runs
