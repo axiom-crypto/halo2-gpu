@@ -70,7 +70,7 @@ public:
         uint64_t win_bit = (uint64_t)log2(length_) / 2 + 2;
         if (win_bit < MSM_WIN_BIT_MIN)
             win_bit = MSM_WIN_BIT_MIN;
-        if (win_bit > MSM_WIN_BIT_MAX)
+        else if (win_bit > MSM_WIN_BIT_MAX)
             win_bit = MSM_WIN_BIT_MAX;
         win_bit_ = win_bit;
         win_bit_half_ = (win_bit_ + 1) / 2;
@@ -79,13 +79,13 @@ public:
 
         // sparsity
         // Inclusive upper bound on dense buckets per window: per-window
-        // sparsities sum to <= 1 and a bucket is dense iff its float sparsity
-        // >= threshold, so at most ceil(1/threshold) buckets qualify (for 0.10:
-        // exactly 10, since 10 buckets of 26/260 = 0.10f each fit). Take the
-        // ceiling in double: 1.0f / 0.10f evaluates to 9.9999998, so a
-        // truncating `(uint64_t)(1.0 / threshold)` would give 9 and undersize
-        // both the worklist and the `d_dense_out` arena by one slice per window.
-        MAX_DENSE_BUCKET_NUM = (uint64_t)ceil(1.0 / (double)SPARSITY_THRESHOLD);
+        // sparsities sum to <= 1 and a bucket is dense iff its sparsity >=
+        // SPARSITY_THRESHOLD, so at most ceil(1/SPARSITY_THRESHOLD) buckets
+        // qualify. For the fixed threshold 0.10 that is exactly 10; hardcoded
+        // (rather than `ceil(1.0 / SPARSITY_THRESHOLD)`) to avoid float rounding:
+        // `1.0f / 0.10f` is 9.9999998, which truncates to a too-small 9. Keep
+        // this in sync with SPARSITY_THRESHOLD if the threshold ever changes.
+        MAX_DENSE_BUCKET_NUM = 10;
         DENSE_SPLIT_N_BLOCKS = 128; // 128 for sppark:  sizeof(bucket_t)
         size_dense_out_ = win_num_ * (MAX_DENSE_BUCKET_NUM * DENSE_SPLIT_N_BLOCKS) * 128;
         size_sparsity_ = win_num_ * bin_num_ * sizeof(float); // wins*bins
