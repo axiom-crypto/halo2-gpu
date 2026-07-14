@@ -3,8 +3,8 @@ use crate::cuda::culib::{
     _halo2_eval_polynomial_batch, _halo2_eval_polynomial_batch_workspace_size,
     _halo2_eval_polynomial_workspace_size, _halo2_kate_division_device,
     _halo2_kate_division_device_padded, _halo2_kate_division_workspace_size,
-    _halo2_poly_multiply_add, _halo2_poly_sub_scalar_at_zero, _halo2_poly_sub_short_inplace,
-    _halo2_poly_sub_short_out_of_place,
+    _halo2_poly_fill_scalar, _halo2_poly_multiply_add, _halo2_poly_sub_scalar_at_zero,
+    _halo2_poly_sub_short_inplace, _halo2_poly_sub_short_out_of_place,
 };
 use crate::cuda::utils::{
     ensure_current_device_matches_ctx, query_device_free_bytes_for_chunking, FFITraitObject,
@@ -359,6 +359,34 @@ pub(crate) fn poly_multiply_add_device_with_d_scalar<F: Field>(
             d_in.as_raw_ptr(),
             d_scalar.as_raw_ptr(),
             d_acc.len(),
+            HALO2_GPU_CTX.stream.as_raw(),
+        )
+    };
+    if status.code != 0 {
+        return Err(status.into());
+    }
+    Ok(())
+}
+
+/// Broadcast-fills `d_out[i] = *d_scalar` for all i. The fill value is a
+/// caller-owned single-element device buffer (uploaded once), so callers avoid
+/// staging a full length-sized host buffer + pageable H2D just to initialize a
+/// device buffer to a constant. Enqueued on `HALO2_GPU_CTX.stream`; returns
+/// before completion — same-stream subsequent kernel reads see the fill.
+pub(crate) fn poly_fill_scalar_device<F: Field>(
+    d_out: &mut DeviceBuffer<F>,
+    d_scalar: &DeviceBuffer<F>,
+) -> Result<(), HaloGpuError> {
+    assert_eq!(d_scalar.len(), 1);
+    if d_out.is_empty() {
+        return Ok(());
+    }
+    ensure_current_device_matches_ctx()?;
+    let status = unsafe {
+        _halo2_poly_fill_scalar(
+            d_out.as_mut_raw_ptr(),
+            d_scalar.as_raw_ptr(),
+            d_out.len() as u64,
             HALO2_GPU_CTX.stream.as_raw(),
         )
     };

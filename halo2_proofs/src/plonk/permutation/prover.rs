@@ -15,7 +15,7 @@ use crate::{
     arithmetic::CurveAffine,
     cuda::funcs::{
         batch_eval_polynomial_d2h, grand_product_device_with_prefix_device,
-        permutation_product_device,
+        permutation_product_device, poly_fill_scalar_device,
     },
     cuda::utils::{FFITraitObject, HALO2_GPU_CTX},
     cuda::HaloGpuError,
@@ -115,24 +115,24 @@ impl Argument {
         let n = params.n() as usize;
         let scalar_bytes = std::mem::size_of::<C::Scalar>();
 
-        // Device-resident ONE-fill template; each chunk re-inits its fresh
-        // `d_modified_values` via a single D2D copy from this.
-        let d_ones_template = vec![C::Scalar::ONE; n]
-            .as_slice()
+        // Single device-resident ONE (one 32-byte H2D). The cross-set carry
+        // seed and each chunk's fresh accumulator are broadcast-filled from it
+        // on device, avoiding a length-n host `vec![ONE; n]` (~256 MiB at k=23)
+        // + its pageable H2D and the per-chunk 256 MiB device→device copy.
+        let d_one: DeviceBuffer<C::Scalar> = std::slice::from_ref(&C::Scalar::ONE)
             .to_device_on(&HALO2_GPU_CTX)
             .map_err(HaloGpuError::from)?;
-        let modified_values_bytes = n * scalar_bytes;
         let acc_len = n - blinding_factors;
 
         // Cross-set carry z_0. Each set's z[0] equals the previous set's
-        // z[acc_len-1]; kept device-resident (init to ONE via a D2D from the
-        // ONE-fill template) so the per-set carry is a pure device→device copy
-        // — no D2H/H2D round-trip and no stream sync between sets.
+        // z[acc_len-1]; kept device-resident (init to ONE via a 1-element D2D
+        // from `d_one`) so the per-set carry is a pure device→device copy —
+        // no D2H/H2D round-trip and no stream sync between sets.
         let d_last_z = DeviceBuffer::<C::Scalar>::with_capacity_on(1, &HALO2_GPU_CTX);
         unsafe {
             cuda_memcpy_on::<true, true>(
                 d_last_z.as_mut_raw_ptr(),
-                d_ones_template.as_raw_ptr(),
+                d_one.as_raw_ptr(),
                 scalar_bytes,
                 &HALO2_GPU_CTX,
             )
@@ -153,18 +153,11 @@ impl Argument {
             // and i is the ith row of the column.
 
             // Fresh per-chunk accumulator: grand_product consumes the buffer by
-            // value, so each chunk needs its own allocation. ONE-init via D2D.
+            // value, so each chunk needs its own allocation. ONE-init via a
+            // device broadcast-fill from `d_one` (no host buffer / D2D).
             let mut d_modified_values =
                 DeviceBuffer::<C::Scalar>::with_capacity_on(n, &HALO2_GPU_CTX);
-            unsafe {
-                cuda_memcpy_on::<true, true>(
-                    d_modified_values.as_mut_raw_ptr(),
-                    d_ones_template.as_raw_ptr(),
-                    modified_values_bytes,
-                    &HALO2_GPU_CTX,
-                )
-                .map_err(HaloGpuError::from)?;
-            }
+            poly_fill_scalar_device(&mut d_modified_values, &d_one)?;
 
             {
                 #[cfg(feature = "profile")]
@@ -292,7 +285,6 @@ impl Argument {
                 permutation_product_poly,
             });
         }
-        drop(d_ones_template);
 
         Ok((Committed { sets }, commitments))
     }

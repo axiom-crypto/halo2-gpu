@@ -339,6 +339,28 @@ extern "C" RustError _halo2_poly_elementwise_multiply(
     return cudaSuccess;
 }
 
+// `d_out[i] = *d_scalar` for i in [0, length). Broadcast-fills a device buffer
+// from a device-resident scalar so the caller avoids staging a full
+// length-sized host buffer + H2D just to initialize to a constant.
+extern "C" RustError _halo2_poly_fill_scalar(
+    void* d_out,
+    const void* d_scalar,
+    uint64_t length,
+    cudaStream_t stream)
+{
+    try {
+        const uint32_t block_num = 512;
+        const uint32_t tile_size = 256;
+        zkpcuda::polynomial::poly_fill_scalar<<<block_num, tile_size, 0, stream>>>(
+            (scalar_t*)d_out,
+            (const scalar_t*)d_scalar,
+            length);
+    } catch (const cuda_error& error) {
+        return RustError(error.code(), error.what());
+    };
+    return cudaSuccess;
+}
+
 // `d_acc[i] -= d_short[i]` for i in [0, short_len). Both buffers
 // device-resident. No scratch. `d_acc` is updated in place; only its
 // length-`short_len` prefix is touched.

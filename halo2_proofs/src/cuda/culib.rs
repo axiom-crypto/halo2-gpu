@@ -282,6 +282,15 @@ extern "C" {
         stream: *mut libc::c_void,
     ) -> CudaStatus;
 
+    /// `d_out[i] = *d_scalar` for i in [0, length); device-resident scalar
+    /// broadcast-fill (caller uploads the fill value once, no host buffer).
+    pub fn _halo2_poly_fill_scalar(
+        d_out: *mut libc::c_void,
+        d_scalar: *const libc::c_void,
+        length: u64,
+        stream: *mut libc::c_void,
+    ) -> CudaStatus;
+
     /// Decode a device-resident `[GpuAssigned<F>]` raw-bytes array into
     /// separate per-element numerator and denominator device buffers.
     /// `d_raw` is the bytes of the host `&[GpuAssigned<F>]` (uploaded via
