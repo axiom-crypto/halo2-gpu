@@ -1,5 +1,6 @@
 #pragma once
 
+#include "common.h" // zkpcuda::common::index_revbin (fused coset-twist + bit-reversal)
 #include "common/scratch_span.h"
 #include "field/alt_bn128.hpp"
 #include <cuda.h>
@@ -192,6 +193,39 @@ namespace omega {
             if (idx >= length)
                 break;
             d_data[idx] *= power;
+            power *= power_stride;
+        }
+    }
+
+    // Fused coset-twist + bit-reversal for the CosetFFT_Part pre-DIT stage.
+    // Computes `out[revbin(idx, log_n)] = in[idx] * omega^idx` in a single
+    // pass, folding the standalone `mult_power_of_omega` (natural-order,
+    // in-place) + `revbin` (in-place index<->revbin swap) pair into one.
+    // Reads `in` coalesced on the natural index and keeps the same running-
+    // product amortization (`power *= power_stride`) keyed by that index;
+    // only the WRITE is redirected to the bit-reversed slot. `out` must be a
+    // distinct buffer from `in` — the scatter-write would otherwise clobber
+    // not-yet-read inputs. DIT then consumes `out` with its existing
+    // bit-reversed input indexing, unchanged.
+    __global__ void mult_power_of_omega_revbin(
+        scalar_t* out,
+        const scalar_t* in,
+        scalar_t* d_omega_lut,
+        uint32_t length,
+        uint32_t log_n)
+    {
+        const uint32_t tile_size = blockDim.x;
+        const uint64_t stride = gridDim.x * tile_size;
+        const uint64_t offset = blockIdx.x * blockDim.x + threadIdx.x;
+        if (offset >= length)
+            return;
+
+        scalar_t power = func_compute_power_of_omega(d_omega_lut, offset);
+        scalar_t power_stride = func_compute_power_of_omega(d_omega_lut, stride);
+
+        for (uint64_t idx = offset; idx < length; idx += stride) {
+            const uint32_t rev = zkpcuda::common::index_revbin(log_n, (uint32_t)idx);
+            out[rev] = in[idx] * power;
             power *= power_stride;
         }
     }
