@@ -27,7 +27,8 @@ use halo2_axiom_gpu::transcript::{
     Blake2bRead, Blake2bWrite, Challenge255, TranscriptReadBuffer, TranscriptWriterBuffer,
 };
 use halo2curves::bn256::{Bn256, Fr, G1Affine};
-use rand_core::OsRng;
+use rand_chacha::ChaCha20Rng;
+use rand_core::{OsRng, SeedableRng};
 
 /// `1 << K` rows. K >= 14 clears `GPU_MSM_THRESHOLD` so the real GPU device
 /// paths run (not the CPU fallback).
@@ -224,5 +225,87 @@ fn phase5_prove_verify_lookup_permutation() {
         ),
         "phase-5 lookup+permutation proof failed to verify (eval batching must \
          preserve the write_scalar order the verifier reads)"
+    );
+}
+
+/// Deterministic byte-identity guard for the L1 concurrent pk device-mirror
+/// warm-up.
+///
+/// `create_proof` spawns a scoped worker that eagerly populates the
+/// witness-independent pk `OnceCell` mirrors during phase-1 synthesis, racing
+/// the main thread's lazy first-touch in phases 2/3/4a. Both paths run the same
+/// getters over the same keygen-fixed (witness-independent) data, and the
+/// `OnceCell` is set-once, so the proof must NOT depend on which thread won the
+/// race for any mirror.
+///
+/// With a fixed RNG seed the whole proof is deterministic (Fiat-Shamir +
+/// seeded blinding; GPU MSM/NTT are exact group/field arithmetic, so their
+/// result is order-independent). This circuit is small, so `synthesize` is
+/// fast and the worker/main-thread race resolves differently under timing
+/// jitter across runs — the two runs collectively exercise both eager
+/// (worker-won) and lazy (main-thread-won) mirror population. Byte-identical
+/// proofs across the runs is therefore exactly the eager-vs-lazy proof-neutrality
+/// claim; a data race, a wrong-device bind in the worker, or a torn mirror read
+/// would break byte-identity (or verification) here.
+///
+/// (Why not inject a pre-warmed vs fresh `GpuProvingKey` directly: `create_proof`
+/// takes a canonical `&ProvingKey` and builds+warms the `GpuProvingKey` view
+/// internally and unconditionally, and the mirror getters are `pub(crate)` — so
+/// the eager/lazy split is not injectable from a test; the seeded two-run check
+/// is the deterministic proof-byte equivalent.)
+#[test]
+fn create_proof_pk_warmup_deterministic_byte_identity() {
+    let params = ParamsKZG::<Bn256>::setup(K, OsRng);
+
+    let circuit_kg = RichCircuit {
+        public: Value::unknown(),
+        b: Value::unknown(),
+    };
+    let vk: VerifyingKey<G1Affine> = keygen_vk(&params, &circuit_kg).expect("gpu keygen_vk");
+    let pk = keygen_pk(&params, vk, &circuit_kg).expect("gpu keygen_pk");
+
+    let public = Fr::from(3);
+    let circuit = RichCircuit {
+        public: Value::known(public),
+        b: Value::known(Fr::from(2)),
+    };
+    let pubinputs = [public];
+    let instances: &[&[&[Fr]]] = &[&[&pubinputs[..]]];
+
+    // Two independent proofs, each with a fresh, identically-seeded deterministic
+    // RNG (the warm-up worker never touches the RNG, so consumption is identical).
+    let prove_once = || {
+        let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+        create_proof::<KZGCommitmentScheme<Bn256>, ProverSHPLONK<_>, _, _, _, _>(
+            &params,
+            &pk,
+            std::slice::from_ref(&circuit),
+            instances,
+            ChaCha20Rng::seed_from_u64(0),
+            &mut transcript,
+        )
+        .expect("gpu create_proof");
+        transcript.finalize()
+    };
+    let proof_a = prove_once();
+    let proof_b = prove_once();
+
+    assert_eq!(
+        proof_a, proof_b,
+        "pk device-mirror warm-up must be proof-neutral: identically-seeded \
+         create_proof runs must yield byte-identical proofs regardless of \
+         whether the phase-1 worker or the main thread populated each mirror"
+    );
+
+    // The deterministic warm-up proof must still verify.
+    let verifier_params = params.verifier_params();
+    assert!(
+        gpu_verify::<VerifierSHPLONK<_>, AccumulatorStrategy<_>>(
+            verifier_params,
+            pk.get_vk(),
+            instances,
+            &proof_a,
+        ),
+        "deterministic pk-warm-up proof failed to verify"
     );
 }
