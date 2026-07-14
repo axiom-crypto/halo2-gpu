@@ -200,7 +200,10 @@ impl<C: CurveAffine> Constructed<C> {
         // pieces fold through the CPU `Mul<F>` / `Add` impls.
         let h_poly = match self.h_pieces {
             HPieces::Device(pieces) => {
-                let n = domain.empty_coeff().len();
+                // `get_n()` is the coeff length; avoid `empty_coeff().len()`,
+                // which allocs+zeroes a full n-elem host Vec (~256 MiB at k=23)
+                // only to read its length.
+                let n = domain.get_n() as usize;
                 // Zero the fold accumulator on-device (memset) instead of
                 // uploading a host zero-vec (~256 MiB alloc + pageable H2D at
                 // k=23). Byte-identical on BN254: all-bits-zero == `Fr::ZERO`,
