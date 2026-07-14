@@ -524,34 +524,22 @@ where
     let (instance, advice, challenges, theta) = {
         crate::perf_section!("phase1");
 
-        // Warm the witness-independent device caches on a scoped worker,
-        // concurrently with the CPU-bound `synthesize` pass below. Their source
-        // data is pageable host memory, so each `to_device_on` pays a
-        // pageable→pinned staging copy on the *calling* thread; doing it here
-        // moves that cost off the main critical path and overlaps the DMA with
-        // synthesize (the GPU is otherwise idle during synthesis). Byte-neutral:
-        // the `OnceCell`s receive exactly the data the lazy paths would have
-        // uploaded — the getters are idempotent and set-once wins any race. The
-        // scope auto-joins before phase2's first mirror touch (the pk mirrors and
-        // the SRS `g` monomial bases are all consumed after the join).
+        // Warm the witness-independent device caches on a scoped worker while
+        // the CPU runs `synthesize` (GPU otherwise idle), moving their pageable
+        // H2D off the critical path. Byte-neutral: the set-once `OnceCell`s get
+        // exactly what the lazy paths would upload. Joins before phase2's first
+        // mirror touch.
         std::thread::scope(|s| {
             s.spawn(move || {
-                // Fresh worker thread: pin it to the CUDA context device before
-                // any H2D. The getters' `to_device_on` does not bind (only the
-                // `cuda::funcs` wrappers do), and a `Lazy` ctx sets the device
-                // only on its initializing thread — an unbound worker would
-                // default to logical device 0 and target the wrong GPU. On bind
-                // failure, skip warming entirely: the caches stay empty and the
-                // (already-bound) main thread inits them on first touch exactly
-                // as in the unwarmed (lazy) path.
+                // Bind this fresh worker to the CUDA ctx device before any H2D:
+                // the getters' `to_device_on` doesn't bind, so an unbound worker
+                // would target the wrong GPU. On bind failure, skip warming — the
+                // main thread then inits the caches lazily as before.
                 if crate::cuda::utils::ensure_current_device_matches_ctx().is_err() {
                     return;
                 }
-                // SRS base mirrors: `g_lagrange` is already warm from keygen (a
-                // cheap cache hit here); `g` (monomial) is NOT — it is otherwise
-                // first-touched cold by the coeff-form `commit_device` in
-                // vanishing/shplonk (phase 4b/5), so warming it now overlaps that
-                // ~n·|G1| H2D with synthesis.
+                // SRS base mirrors (see `warm_device_caches`): warms the cold
+                // monomial `g` that phase 4b/5 would otherwise upload.
                 params.warm_device_caches();
                 let _ = pk.fixed_polys_device();
                 let _ = pk.fixed_values_device();
@@ -680,7 +668,7 @@ where
             // theta keeps lookup columns linearly independent.
             let theta: ChallengeTheta<_> = transcript.squeeze_challenge_scalar();
             (instance, advice, challenges, theta)
-            // The pk-mirror warm-up worker auto-joins here (scope end).
+            // Warm-up worker auto-joins here (scope end).
         })
     };
 

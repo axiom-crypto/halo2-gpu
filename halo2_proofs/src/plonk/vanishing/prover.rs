@@ -201,14 +201,10 @@ impl<C: CurveAffine> Constructed<C> {
         let h_poly = match self.h_pieces {
             HPieces::Device(pieces) => {
                 let n = domain.empty_coeff().len();
-                // Device-side zero-fill of the fold accumulator: allocate on
-                // device and memset all `n` elements to zero, vs a host
-                // zero-upload (~256 MiB host alloc + page-fault zeroing + pageable
-                // copy at k=23, off the critical path).
-                // Byte-identical on the GPU (BN254) prove path: `fill_zero_on`
-                // writes all-bits-zero, which equals `C::Scalar::ZERO` for the
-                // bn256::Fr Montgomery representation the device kernels use;
-                // same-stream ordering makes the memset precede the fold reads.
+                // Zero the fold accumulator on-device (memset) instead of
+                // uploading a host zero-vec (~256 MiB alloc + pageable H2D at
+                // k=23). Byte-identical on BN254: all-bits-zero == `Fr::ZERO`,
+                // and same-stream ordering fills before the fold reads.
                 let mut d_acc: DeviceBuffer<C::Scalar> =
                     DeviceBuffer::with_capacity_on(n, &HALO2_GPU_CTX);
                 d_acc.fill_zero_on(&HALO2_GPU_CTX)?;

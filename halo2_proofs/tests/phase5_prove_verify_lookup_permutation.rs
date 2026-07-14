@@ -228,30 +228,14 @@ fn phase5_prove_verify_lookup_permutation() {
     );
 }
 
-/// Deterministic byte-identity guard for the phase-1 scoped-worker pk/SRS
-/// device-mirror warm-up.
+/// Byte-identity guard for the phase-1 scoped-worker pk/SRS mirror warm-up.
 ///
-/// `create_proof` spawns a scoped worker that eagerly populates the
-/// witness-independent pk `OnceCell` mirrors (and warms the SRS `g` bases)
-/// during phase-1 synthesis; the scope joins before phases 2/3/4a first read
-/// them, so the eager warm-up and the lazy first-touch fill the same set-once
-/// cells with the same keygen-fixed (witness-independent) data. The proof must
-/// therefore NOT depend on whether a mirror/base was warmed eagerly or lazily.
-///
-/// With a fixed RNG seed the whole proof is deterministic (Fiat-Shamir +
-/// seeded blinding; GPU MSM/NTT are exact group/field arithmetic, so their
-/// result is order-independent). Across the two seeded runs the shared params'
-/// SRS cache goes cold→warm (run 1 populates it, run 2 reuses it) while each run
-/// rebuilds fresh pk mirrors, so byte-identical proofs across the runs is exactly
-/// the cold-vs-warm / eager-vs-lazy proof-neutrality claim; a data race, a
-/// wrong-device bind in the worker, or a torn mirror read would break
-/// byte-identity (or verification) here.
-///
-/// (Why not inject a pre-warmed vs fresh `GpuProvingKey` directly: `create_proof`
-/// takes a canonical `&ProvingKey` and builds+warms the `GpuProvingKey` view
-/// internally and unconditionally, and the mirror getters are `pub(crate)` — so
-/// the eager/lazy split is not injectable from a test; the seeded two-run check
-/// is the deterministic proof-byte equivalent.)
+/// The worker eagerly fills the witness-independent pk/SRS `OnceCell`s that the
+/// lazy paths would otherwise fill on first touch, so the proof must not depend
+/// on eager-vs-lazy. Two identically-seeded runs are fully deterministic
+/// (Fiat-Shamir + seeded blinding; GPU MSM/NTT are exact) and the shared params
+/// go cold→warm between them, so byte-identical proofs prove warm-up neutrality;
+/// a race, wrong-device bind, or torn read would break it here.
 #[test]
 fn create_proof_pk_warmup_deterministic_byte_identity() {
     let params = ParamsKZG::<Bn256>::setup(K, OsRng);
@@ -271,8 +255,8 @@ fn create_proof_pk_warmup_deterministic_byte_identity() {
     let pubinputs = [public];
     let instances: &[&[&[Fr]]] = &[&[&pubinputs[..]]];
 
-    // Two independent proofs, each with a fresh, identically-seeded deterministic
-    // RNG (the warm-up worker never touches the RNG, so consumption is identical).
+    // Two proofs with fresh, identically-seeded RNGs (the worker never touches
+    // the RNG, so consumption matches).
     let prove_once = || {
         let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
         create_proof::<KZGCommitmentScheme<Bn256>, ProverSHPLONK<_>, _, _, _, _>(

@@ -85,11 +85,9 @@ pub trait Params<'params, C: CurveAffine>: Sized + Clone {
         self.commit_lagrange(&host, r)
     }
 
-    /// Pre-warms any witness-independent device-resident caches (e.g. the SRS
-    /// base mirrors used by the GPU MSM) so their first-touch H2D can overlap
-    /// earlier prover work instead of blocking on the critical path. Idempotent
-    /// and safe to call concurrently with the commit paths that lazily populate
-    /// the same caches. Default: no-op — non-GPU backends have nothing to warm.
+    /// Pre-warms witness-independent device caches (e.g. SRS base mirrors) so
+    /// their first-touch H2D can overlap earlier work. Idempotent and race-safe
+    /// against the lazy commit paths. Default: no-op.
     fn warm_device_caches(&self) {}
 
     /// Writes params to a buffer.
