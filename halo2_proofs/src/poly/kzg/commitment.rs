@@ -464,6 +464,21 @@ where
             .expect("multiexp_gpu_device_scalars_device_bases failed in commit_lagrange_device")
     }
 
+    /// Pre-warms the SRS device base mirrors. Only the GPU-MSM path uses them;
+    /// below the threshold the commits run on CPU and never touch the mirrors,
+    /// so warming would just waste VRAM. `g_lagrange` is normally already warm
+    /// (keygen's `commit_lagrange` is a device MSM), so its `ensure` is a cheap
+    /// cache hit; `g` (monomial bases) is NOT warmed by keygen — it is
+    /// first-touched cold by the coeff-form `commit_device` in vanishing/shplonk
+    /// (phase 4b/5), so warming it here lets that ~n·|G1| H2D overlap synthesis.
+    fn warm_device_caches(&self) {
+        if (self.n() as usize) < GPU_MSM_THRESHOLD {
+            return;
+        }
+        let _ = self.ensure_g_lagrange_device();
+        let _ = self.ensure_g_device();
+    }
+
     /// Writes params to a buffer.
     fn write<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
         self.write_custom(writer, SerdeFormat::RawBytesUnchecked)

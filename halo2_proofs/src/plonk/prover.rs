@@ -524,15 +524,16 @@ where
     let (instance, advice, challenges, theta) = {
         crate::perf_section!("phase1");
 
-        // Warm the witness-independent pk device mirrors on a scoped worker,
+        // Warm the witness-independent device caches on a scoped worker,
         // concurrently with the CPU-bound `synthesize` pass below. Their source
-        // polys are pageable host `Vec<Fr>`, so each `to_device_on` pays a
+        // data is pageable host memory, so each `to_device_on` pays a
         // pageable→pinned staging copy on the *calling* thread; doing it here
         // moves that cost off the main critical path and overlaps the DMA with
         // synthesize (the GPU is otherwise idle during synthesis). Byte-neutral:
-        // the `OnceCell`s receive exactly the data phases 2/3/4a would have
-        // uploaded lazily — the getters are idempotent and set-once wins any
-        // race. The scope auto-joins before phase2's first mirror touch.
+        // the `OnceCell`s receive exactly the data the lazy paths would have
+        // uploaded — the getters are idempotent and set-once wins any race. The
+        // scope auto-joins before phase2's first mirror touch (the pk mirrors and
+        // the SRS `g` monomial bases are all consumed after the join).
         std::thread::scope(|s| {
             s.spawn(move || {
                 // Fresh worker thread: pin it to the CUDA context device before
@@ -540,12 +541,18 @@ where
                 // `cuda::funcs` wrappers do), and a `Lazy` ctx sets the device
                 // only on its initializing thread — an unbound worker would
                 // default to logical device 0 and target the wrong GPU. On bind
-                // failure, skip warming entirely: the mirrors stay empty and
-                // phases 2/3/4a lazily init them on the (already-bound) main
-                // thread exactly as before L1.
+                // failure, skip warming entirely: the caches stay empty and the
+                // lazy paths init them on the (already-bound) main thread exactly
+                // as before.
                 if crate::cuda::utils::ensure_current_device_matches_ctx().is_err() {
                     return;
                 }
+                // SRS base mirrors: `g_lagrange` is already warm from keygen (a
+                // cheap cache hit here); `g` (monomial) is NOT — it is otherwise
+                // first-touched cold by the coeff-form `commit_device` in
+                // vanishing/shplonk (phase 4b/5), so warming it now overlaps that
+                // ~n·|G1| H2D with synthesis.
+                params.warm_device_caches();
                 let _ = pk.fixed_polys_device();
                 let _ = pk.fixed_values_device();
                 let _ = pk.permutation_polys_device();
