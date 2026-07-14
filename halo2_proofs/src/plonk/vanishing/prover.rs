@@ -5,7 +5,7 @@ use std::time::Instant;
 use ff::{Field, WithSmallOrderMulGroup};
 use group::Curve;
 
-use openvm_cuda_common::copy::MemCopyH2D;
+use openvm_cuda_common::copy::{cuda_memcpy_on, MemCopyH2D};
 use openvm_cuda_common::d_buffer::DeviceBuffer;
 use rand_core::RngCore;
 
@@ -14,8 +14,9 @@ use crate::cuda::funcs::{
     poly_multiply_add_device_with_d_scalar, poly_scale_device_with_d_s_minus_one,
 };
 use crate::cuda::utils::HALO2_GPU_CTX;
+use crate::cuda::HaloGpuError;
 use crate::{
-    arithmetic::{eval_polynomial, CurveAffine},
+    arithmetic::CurveAffine,
     plonk::{ChallengeX, GpuError},
     poly::{
         commitment::{Blind, ParamsProver},
@@ -26,7 +27,7 @@ use crate::{
 };
 
 pub(in crate::plonk) struct Committed<C: CurveAffine> {
-    random_poly: Polynomial<C::Scalar, Coeff>,
+    random_poly: Polynomial<C::Scalar, Coeff, Device>,
 }
 
 /// Quotient pieces produced by `Constructed::construct`. Each variant is a
@@ -77,9 +78,29 @@ impl<C: CurveAffine> Argument<C> {
         transcript: &mut T,
     ) -> Result<Committed<C>, GpuError> {
         crate::perf_section!("vanishing.commit");
-        // Sample a random polynomial of degree n - 1
-        let mut random_poly = domain.empty_coeff();
-        random_poly[0] = C::Scalar::ONE;
+        // Sample a random polynomial of degree n - 1.
+        // zk is disabled (see the commented-out block below), so the committed
+        // poly is the constant `[ONE, 0, .., 0]`. Build it on device — memset
+        // the n coeffs to zero, then set coeff[0] = ONE via a 1-element D2D from
+        // a single ONE upload — instead of a length-n host `empty_coeff()`
+        // (~256 MiB zeroed host alloc at k=23, on the critical path).
+        let n = domain.get_n() as usize;
+        let d_random_poly: DeviceBuffer<C::Scalar> =
+            DeviceBuffer::with_capacity_on(n, &HALO2_GPU_CTX);
+        d_random_poly.fill_zero_on(&HALO2_GPU_CTX)?;
+        let d_one: DeviceBuffer<C::Scalar> = std::slice::from_ref(&C::Scalar::ONE)
+            .to_device_on(&HALO2_GPU_CTX)
+            .expect("H2D of ONE failed in vanishing::commit");
+        unsafe {
+            cuda_memcpy_on::<true, true>(
+                d_random_poly.as_mut_raw_ptr(),
+                d_one.as_raw_ptr(),
+                std::mem::size_of::<C::Scalar>(),
+                &HALO2_GPU_CTX,
+            )
+            .map_err(HaloGpuError::from)?;
+        }
+        let random_poly = Polynomial::<C::Scalar, Coeff, Device>::from_device(d_random_poly);
         /*
         for coeff in random_poly.iter_mut() {
             *coeff = C::Scalar::random(&mut rng);
@@ -189,7 +210,9 @@ impl<C: CurveAffine> Committed<C> {
 impl<C: CurveAffine> Constructed<C> {
     pub(in crate::plonk) fn evaluate<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
         self,
-        x: ChallengeX<C>,
+        // Unused: random_poly is the constant `[ONE, 0, ..]` so its eval is ONE
+        // regardless of the point (zk disabled). Kept for signature symmetry.
+        _x: ChallengeX<C>,
         xn: C::Scalar,
         domain: &EvaluationDomain<'_, C::Scalar>,
         transcript: &mut T,
@@ -251,7 +274,9 @@ impl<C: CurveAffine> Constructed<C> {
             .rev()
             .fold(Blind(C::Scalar::ZERO), |acc, eval| acc * Blind(xn) + *eval);
 
-        let random_eval = eval_polynomial(&self.committed.random_poly, *x);
+        // random_poly is the constant `[ONE, 0, .., 0]` (zk disabled), so its
+        // evaluation at any point is exactly ONE — no device read-back needed.
+        let random_eval = C::Scalar::ONE;
         transcript.write_scalar(random_eval)?;
 
         Ok(Evaluated {
@@ -278,7 +303,7 @@ impl<C: CurveAffine> Evaluated<C> {
             }))
             .chain(Some(ProverQuery {
                 point: *x,
-                poly: (&self.committed.random_poly).into(),
+                poly: crate::poly::PolyRef::Device(&self.committed.random_poly),
             }))
     }
 }
