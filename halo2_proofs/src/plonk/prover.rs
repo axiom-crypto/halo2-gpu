@@ -542,8 +542,8 @@ where
                 // only on its initializing thread — an unbound worker would
                 // default to logical device 0 and target the wrong GPU. On bind
                 // failure, skip warming entirely: the caches stay empty and the
-                // lazy paths init them on the (already-bound) main thread exactly
-                // as before.
+                // (already-bound) main thread inits them on first touch exactly
+                // as in the unwarmed (lazy) path.
                 if crate::cuda::utils::ensure_current_device_matches_ctx().is_err() {
                     return;
                 }

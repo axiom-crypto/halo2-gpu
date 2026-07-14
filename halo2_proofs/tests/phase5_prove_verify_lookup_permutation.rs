@@ -228,25 +228,24 @@ fn phase5_prove_verify_lookup_permutation() {
     );
 }
 
-/// Deterministic byte-identity guard for the L1 concurrent pk device-mirror
-/// warm-up.
+/// Deterministic byte-identity guard for the phase-1 scoped-worker pk/SRS
+/// device-mirror warm-up.
 ///
 /// `create_proof` spawns a scoped worker that eagerly populates the
-/// witness-independent pk `OnceCell` mirrors during phase-1 synthesis, racing
-/// the main thread's lazy first-touch in phases 2/3/4a. Both paths run the same
-/// getters over the same keygen-fixed (witness-independent) data, and the
-/// `OnceCell` is set-once, so the proof must NOT depend on which thread won the
-/// race for any mirror.
+/// witness-independent pk `OnceCell` mirrors (and warms the SRS `g` bases)
+/// during phase-1 synthesis; the scope joins before phases 2/3/4a first read
+/// them, so the eager warm-up and the lazy first-touch fill the same set-once
+/// cells with the same keygen-fixed (witness-independent) data. The proof must
+/// therefore NOT depend on whether a mirror/base was warmed eagerly or lazily.
 ///
 /// With a fixed RNG seed the whole proof is deterministic (Fiat-Shamir +
 /// seeded blinding; GPU MSM/NTT are exact group/field arithmetic, so their
-/// result is order-independent). This circuit is small, so `synthesize` is
-/// fast and the worker/main-thread race resolves differently under timing
-/// jitter across runs — the two runs collectively exercise both eager
-/// (worker-won) and lazy (main-thread-won) mirror population. Byte-identical
-/// proofs across the runs is therefore exactly the eager-vs-lazy proof-neutrality
-/// claim; a data race, a wrong-device bind in the worker, or a torn mirror read
-/// would break byte-identity (or verification) here.
+/// result is order-independent). Across the two seeded runs the shared params'
+/// SRS cache goes cold→warm (run 1 populates it, run 2 reuses it) while each run
+/// rebuilds fresh pk mirrors, so byte-identical proofs across the runs is exactly
+/// the cold-vs-warm / eager-vs-lazy proof-neutrality claim; a data race, a
+/// wrong-device bind in the worker, or a torn mirror read would break
+/// byte-identity (or verification) here.
 ///
 /// (Why not inject a pre-warmed vs fresh `GpuProvingKey` directly: `create_proof`
 /// takes a canonical `&ProvingKey` and builds+warms the `GpuProvingKey` view

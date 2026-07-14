@@ -202,10 +202,9 @@ impl<C: CurveAffine> Constructed<C> {
             HPieces::Device(pieces) => {
                 let n = domain.empty_coeff().len();
                 // Device-side zero-fill of the fold accumulator: allocate on
-                // device and memset all `n` elements to zero instead of
-                // building a host length-n zero `Polynomial` and H2D-uploading
-                // it (which spends ~256 MiB of host alloc + page-fault zeroing +
-                // pageable copy at k=23, off the critical path).
+                // device and memset all `n` elements to zero, vs a host
+                // zero-upload (~256 MiB host alloc + page-fault zeroing + pageable
+                // copy at k=23, off the critical path).
                 // Byte-identical on the GPU (BN254) prove path: `fill_zero_on`
                 // writes all-bits-zero, which equals `C::Scalar::ZERO` for the
                 // bn256::Fr Montgomery representation the device kernels use;
