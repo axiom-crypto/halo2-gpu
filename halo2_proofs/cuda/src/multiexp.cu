@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <chrono>
+#include <cmath>
 #include <map>
 #include <string>
 #include <vector>
@@ -19,6 +20,37 @@ using Scalar = utils::FFITraitObject;
 using Point = utils::FFITraitObject;
 using Output = utils::FFITraitObject;
 
+// --- Pippenger window-size (`win_bit`) --------------------------------------
+//
+// win_bit = clamp(floor(log2(length)) / 2 + 2, MSM_WIN_BIT_MIN, MSM_WIN_BIT_MAX)
+//
+// A wider window than the sqrt-heuristic base (floor(log2(length)) / 2) uses
+// fewer windows, so the MSM makes fewer per-window point-accumulation passes —
+// the dominant cost — at the price of more buckets per window (bucket count
+// doubles per extra bit, and bucket-reduction cost grows with it). The +2
+// offset balances these: wide enough to cut window passes, yet narrow enough
+// that the added bucket-reduction cost stays below the crossover where it would
+// outweigh the saved passes. The window size only reparametrises the Pippenger
+// bucket decomposition — the summand set and the final sum are invariant — so
+// the offset changes timing only, never the MSM result: the proof stays
+// byte-identical. win_bit derives bin_num_/win_num_/half in set_params below,
+// so every arena and launch grid auto-sizes with it.
+//
+// Clamp rationale (both bounds are safety rails; with the +2 offset neither
+// binds for any real MSM length):
+//   MIN = 1  : `win_num_ = ceil(SCALAR_BIT / win_bit)` divides by win_bit, so
+//              win_bit must stay >= 1.
+//   MAX = 18 : keeps `bin_num_ = 1 << win_bit` and all bin_num/win_num-derived
+//              launch grids (`win_num * bin_num` blocks) inside the 2^31 grid-x
+//              limit and the `int` shift range (<< 18 is safe; << 31 is UB),
+//              and bounds the largest arena (`size_out_ = 96 * win_num *
+//              bin_num`) to a few hundred MB even for the biggest production
+//              chunk — far under the VRAM budget. The dominant `size_wins_`
+//              arena shrinks as win_bit grows, so peak VRAM does not rise with
+//              the offset.
+static constexpr uint64_t MSM_WIN_BIT_MIN = 1;
+static constexpr uint64_t MSM_WIN_BIT_MAX = 18;
+
 // Computes the scratch layout and per-slot offsets for the Pippenger MSM
 // kernel chain.
 class CudaMsmInfo {
@@ -32,17 +64,39 @@ public:
     {
         // basic
         length_ = length;
-        win_bit_ = (uint64_t)log2(length_) / 2;
+        // Window size: sqrt-heuristic base + the +2 offset, clamped to a safe
+        // range (see MSM_WIN_BIT_MIN/MAX above). win_num_/bin_num_/half derive
+        // from win_bit_ below, so every arena and grid resizes with it.
+        uint64_t win_bit = (uint64_t)log2(length_) / 2 + 2;
+        if (win_bit < MSM_WIN_BIT_MIN)
+            win_bit = MSM_WIN_BIT_MIN;
+        else if (win_bit > MSM_WIN_BIT_MAX)
+            win_bit = MSM_WIN_BIT_MAX;
+        win_bit_ = win_bit;
         win_bit_half_ = (win_bit_ + 1) / 2;
         win_num_ = (SCALAR_BIT + win_bit_ - 1) / win_bit_;
         bin_num_ = 1 << win_bit_;
 
         // sparsity
-        MAX_DENSE_BUCKET_NUM = (uint64_t)(1.0 / SPARSITY_THRESHOLD); // floor is enough
+        // Inclusive upper bound on dense buckets per window: per-window
+        // sparsities sum to <= 1 and a bucket is dense iff its sparsity >=
+        // SPARSITY_THRESHOLD, so at most ceil(1/SPARSITY_THRESHOLD) buckets
+        // qualify. For the fixed threshold 0.10 that is exactly 10; hardcoded
+        // (rather than `ceil(1.0 / SPARSITY_THRESHOLD)`) to avoid float rounding:
+        // `1.0f / 0.10f` is 9.9999998, which truncates to a too-small 9. Keep
+        // this in sync with SPARSITY_THRESHOLD if the threshold ever changes.
+        MAX_DENSE_BUCKET_NUM = 10;
         DENSE_SPLIT_N_BLOCKS = 128; // 128 for sppark:  sizeof(bucket_t)
         size_dense_out_ = win_num_ * (MAX_DENSE_BUCKET_NUM * DENSE_SPLIT_N_BLOCKS) * 128;
         size_sparsity_ = win_num_ * bin_num_ * sizeof(float); // wins*bins
         // e.g. 16win*(128*10) = 20480 * sizeof(bucket_t) = 20480 * 128bytes
+
+        // Device dense-bucket worklist. `size_dense_worklist_` matches the
+        // `d_dense_out` arena capacity (win_num * MAX_DENSE_BUCKET_NUM slices),
+        // i.e. the maximum number of dense buckets per MSM; `d_dense_cnt` is
+        // the single atomic compaction counter.
+        size_dense_worklist_ = win_num_ * MAX_DENSE_BUCKET_NUM * sizeof(int);
+        size_dense_cnt_ = sizeof(int);
 
         // memory
         size_scalars_ = (length_ + 1) * Scalar::ELT_BYTES;
@@ -70,6 +124,8 @@ public:
         required_memory_size += size_wins_end_;
         required_memory_size += size_pos_;
         required_memory_size += size_count_;
+        required_memory_size += size_dense_worklist_;
+        required_memory_size += size_dense_cnt_;
         return required_memory_size;
     }
 
@@ -103,6 +159,8 @@ public:
     uint64_t size_wins_end_ = 0;
     uint64_t size_pos_ = 0;
     uint64_t size_count_ = 0;
+    uint64_t size_dense_worklist_ = 0;
+    uint64_t size_dense_cnt_ = 0;
 };
 
 extern "C" uint64_t _halo2_msm_max_length(uint64_t free_bytes)
@@ -143,7 +201,9 @@ RustError cuda_msm_init(
     int** d_wins_start,
     int** d_wins_end,
     int** d_pos,
-    int** d_count)
+    int** d_count,
+    int** d_dense_worklist,
+    int** d_dense_cnt)
 {
     (void)stream_main;
     uint64_t required_memory_size = msm_info.get_required_memory_size();
@@ -186,9 +246,13 @@ RustError cuda_msm_init(
     *d_pos = (int*)(base + off);
     off += msm_info.size_pos_;
     *d_count = (int*)(base + off);
+    off += msm_info.size_count_;
+    *d_dense_worklist = (int*)(base + off);
+    off += msm_info.size_dense_worklist_;
+    *d_dense_cnt = (int*)(base + off);
     // Catch slot-offset drift vs the Rust-side workspace-size calculation
     // before the kernel reads past its scratch (debug builds only).
-    assert(off + msm_info.size_count_ <= required_memory_size);
+    assert(off + msm_info.size_dense_cnt_ <= required_memory_size);
 
     return cudaSuccess;
 }
@@ -218,6 +282,8 @@ extern "C" RustError _halo2_multiexp(
     int* d_wins_end = nullptr;
     int* d_pos = nullptr;
     int* d_count = nullptr;
+    int* d_dense_worklist = nullptr;
+    int* d_dense_cnt = nullptr;
 
     CudaMsmInfo msm_info(length);
     RustError state_init = cuda_msm_init(
@@ -226,7 +292,8 @@ extern "C" RustError _halo2_multiexp(
         &d_scalar, &d_point, &d_out, &d_out2,
         &d_dense_out, &d_sparsity,
         &d_wins, &d_wins_start, &d_wins_end,
-        &d_pos, &d_count);
+        &d_pos, &d_count,
+        &d_dense_worklist, &d_dense_cnt);
     if (state_init.code != cudaSuccess)
         return state_init;
 
@@ -249,7 +316,8 @@ extern "C" RustError _halo2_multiexp(
     zkpcuda::pippenger::mixed_add_wins<32>(
         stream, (point_t*)d_out, (affine_t*)d_point, length,
         msm_info.SPARSITY_THRESHOLD, d_sparsity, d_dense_out, d_wins, d_wins_start, d_wins_end,
-        msm_info.win_num_, msm_info.bin_num_);
+        msm_info.win_num_, msm_info.bin_num_,
+        d_dense_worklist, d_dense_cnt, msm_info.MAX_DENSE_BUCKET_NUM);
     auto d_res = zkpcuda::pippenger::postprocess_buckets<32>(
         stream, (point_t*)d_out, (point_t*)d_out2,
         msm_info.win_bit_, msm_info.win_bit_half_, msm_info.win_num_);
@@ -307,6 +375,8 @@ extern "C" RustError _halo2_multiexp_device_bases(
     int* d_wins_end = nullptr;
     int* d_pos = nullptr;
     int* d_count = nullptr;
+    int* d_dense_worklist = nullptr;
+    int* d_dense_cnt = nullptr;
 
     CudaMsmInfo msm_info(length);
     RustError state_init = cuda_msm_init(
@@ -315,7 +385,8 @@ extern "C" RustError _halo2_multiexp_device_bases(
         &d_scalar, &d_point_slot, &d_out, &d_out2,
         &d_dense_out, &d_sparsity,
         &d_wins, &d_wins_start, &d_wins_end,
-        &d_pos, &d_count);
+        &d_pos, &d_count,
+        &d_dense_worklist, &d_dense_cnt);
     if (state_init.code != cudaSuccess)
         return state_init;
 
@@ -336,7 +407,8 @@ extern "C" RustError _halo2_multiexp_device_bases(
     zkpcuda::pippenger::mixed_add_wins<32>(
         stream, (point_t*)d_out, (affine_t*)d_point, length,
         msm_info.SPARSITY_THRESHOLD, d_sparsity, d_dense_out, d_wins, d_wins_start, d_wins_end,
-        msm_info.win_num_, msm_info.bin_num_);
+        msm_info.win_num_, msm_info.bin_num_,
+        d_dense_worklist, d_dense_cnt, msm_info.MAX_DENSE_BUCKET_NUM);
     auto d_res = zkpcuda::pippenger::postprocess_buckets<32>(
         stream, (point_t*)d_out, (point_t*)d_out2,
         msm_info.win_bit_, msm_info.win_bit_half_, msm_info.win_num_);
@@ -395,6 +467,8 @@ extern "C" RustError _halo2_multiexp_device_scalars_device_bases(
     int* d_wins_end = nullptr;
     int* d_pos = nullptr;
     int* d_count = nullptr;
+    int* d_dense_worklist = nullptr;
+    int* d_dense_cnt = nullptr;
 
     CudaMsmInfo msm_info(length);
     RustError state_init = cuda_msm_init(
@@ -403,7 +477,8 @@ extern "C" RustError _halo2_multiexp_device_scalars_device_bases(
         &d_scalar, &d_point_slot, &d_out, &d_out2,
         &d_dense_out, &d_sparsity,
         &d_wins, &d_wins_start, &d_wins_end,
-        &d_pos, &d_count);
+        &d_pos, &d_count,
+        &d_dense_worklist, &d_dense_cnt);
     if (state_init.code != cudaSuccess)
         return state_init;
 
@@ -429,7 +504,8 @@ extern "C" RustError _halo2_multiexp_device_scalars_device_bases(
     zkpcuda::pippenger::mixed_add_wins<32>(
         stream, (point_t*)d_out, (affine_t*)d_point, length,
         msm_info.SPARSITY_THRESHOLD, d_sparsity, d_dense_out, d_wins, d_wins_start, d_wins_end,
-        msm_info.win_num_, msm_info.bin_num_);
+        msm_info.win_num_, msm_info.bin_num_,
+        d_dense_worklist, d_dense_cnt, msm_info.MAX_DENSE_BUCKET_NUM);
     auto d_res = zkpcuda::pippenger::postprocess_buckets<32>(
         stream, (point_t*)d_out, (point_t*)d_out2,
         msm_info.win_bit_, msm_info.win_bit_half_, msm_info.win_num_);

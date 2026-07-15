@@ -15,9 +15,11 @@ use openvm_cuda_common::d_buffer::DeviceBuffer;
 use std::ffi::c_void;
 use std::mem;
 
-/// Smallest MSM length the C++ Pippenger setup tolerates. Below this
-/// `CudaMsmInfo::set_params` divides by zero when computing
-/// `win_num_` (truncated `log2(length)/2` yields a `win_bit_` of 0).
+/// GPU-dispatch floor for the C++ Pippenger setup: MSM lengths below this
+/// error out rather than launching a tiny Pippenger kernel. The `win_bit_`
+/// clamp in `CudaMsmInfo::set_params` keeps `win_num_ = ceil(SCALAR_BIT /
+/// win_bit)` from dividing by zero, so this bound is a policy choice to avoid
+/// dispatching an undersized kernel, not a hard C++ requirement.
 const MSM_MIN_KERNEL_LEN: usize = 4;
 
 /// MSM size below which `multiexp_gpu` and its siblings fall back to
@@ -56,10 +58,9 @@ pub fn multiexp_gpu<C: CurveAffine>(
         );
     }
     if chunk_size < MSM_MIN_KERNEL_LEN {
-        // `_halo2_msm_max_length` came back below the kernel's safe
-        // floor — `CudaMsmInfo::set_params` would divide by zero in
-        // `win_num_` if we sent a chunk this small. Surface a clean
-        // error instead of crashing the C++ side.
+        // `_halo2_msm_max_length` came back below the GPU-dispatch floor —
+        // surface a clean error instead of launching a tiny Pippenger kernel
+        // for a chunk this small.
         return Err(HaloGpuError::InsufficientGpuMemory {
             context: "multiexp_gpu",
             magnitude: bases.len() as u64,
@@ -148,12 +149,10 @@ pub(crate) fn multiexp_gpu_device_bases_chunked<C: CurveAffine>(
     );
     let chunk_size = max_chunk_len.min(length);
     if chunk_size < MSM_MIN_KERNEL_LEN {
-        // Either `max_chunk_len` came back below the kernel's safe
-        // floor (GPU memory pressure → `_halo2_msm_max_length` returned
-        // a tiny value) or the caller asked for an MSM smaller than
-        // the kernel can handle. The Pippenger setup crashes on
-        // `length < 4` via a divide-by-zero in `win_num_`; surface a
-        // clean error instead.
+        // Either `max_chunk_len` came back below the GPU-dispatch floor (GPU
+        // memory pressure → `_halo2_msm_max_length` returned a tiny value) or
+        // the caller asked for an MSM smaller than that floor. Avoid
+        // dispatching a tiny Pippenger kernel; surface a clean error instead.
         return Err(HaloGpuError::InsufficientGpuMemory {
             context: "multiexp_gpu_device_bases",
             magnitude: length as u64,

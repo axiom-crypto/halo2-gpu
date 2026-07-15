@@ -7,6 +7,7 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 
+#include <cassert>
 #include <vector>
 
 typedef jacobian_t<fp_t> point_t;
@@ -16,6 +17,13 @@ typedef fr_t scalar_t;
 
 namespace zkpcuda {
 namespace pippenger {
+
+    // Fixed per-dense-bucket arena width: each dense bucket reserves this many
+    // `bucket_t` partial-sum slots in `d_dense_out`, so it is both the arena
+    // stride (`worklist_idx * DENSE_SPLIT_N_BLOCKS`) and the maximum number of
+    // split-blocks a bucket can be divided into. Must equal
+    // `CudaMsmInfo::DENSE_SPLIT_N_BLOCKS`, which sizes that arena.
+    static constexpr uint32_t DENSE_SPLIT_N_BLOCKS = 128;
 
     // ===============================================================================
     // ============================== PRE PROCESS ====================================
@@ -280,27 +288,76 @@ namespace pippenger {
         }
     }
 
-    template <uint32_t TILE_PER_BLOCK>
-    __global__ void cukernel_mixed_add_dense_bucket(
-        bucket_t* d_out, const affine_t* d_point, size_t point_size,
-        const int* d_wins, int* d_wins_start, int* d_wins_end,
-        uint32_t window_size, uint32_t win_idx, uint32_t bucket_size, uint32_t bin_idx)
+    // Build the dense-bucket worklist on device. One thread per
+    // (window, bucket) flat index; buckets whose sparsity clears the threshold
+    // are atomically compacted into `d_worklist`. Compaction order is
+    // irrelevant to the result: each dense bucket is summed independently into
+    // its own arena slice, so the order in which buckets land in the worklist
+    // does not affect any bucket sum.
+    __global__ void cukernel_compact_dense_worklist(
+        const float* d_sparsity, float sparsity_threshold,
+        uint32_t win_num, uint32_t bin_num,
+        int* d_worklist, int* d_dense_cnt, uint32_t max_worklist)
     {
+        uint32_t idx = blockDim.x * blockIdx.x + threadIdx.x;
+        uint32_t total = win_num * bin_num;
+        if (idx >= total)
+            return;
 
-        uint32_t begin = d_wins_start[win_idx * bucket_size + bin_idx];
-        uint32_t end = d_wins_end[win_idx * bucket_size + bin_idx];
+        if (d_sparsity[idx] >= sparsity_threshold) {
+            int slot = atomicAdd(d_dense_cnt, 1);
+            // Arena invariant: at most ceil(1/SPARSITY_THRESHOLD) ==
+            // MAX_DENSE_BUCKET_NUM buckets per window can be dense (per-window
+            // sparsities sum to <= 1), so the worklist can never exceed
+            // win_num * MAX_DENSE_BUCKET_NUM == max_worklist, which is exactly
+            // the `d_dense_out` arena capacity. If the invariant is ever
+            // violated, hard-fail (assert in debug, __trap in release) rather
+            // than silently drop a dense bucket (a wrong result) or write past
+            // the arena (out of bounds).
+            assert(slot < (int)max_worklist);
+            if (slot >= (int)max_worklist) {
+                __trap();
+            }
+            d_worklist[slot] = (int)idx;
+        }
+    }
+
+    // One grid-parallel launch over all (dense-bucket, split-block) pairs.
+    // Within a dense bucket, `split_n_blocks` blocks partition its points and
+    // `split_block` selects this block's slice of them.
+    template <uint32_t TILE_PER_BLOCK>
+    __global__ void cukernel_mixed_add_dense_bucket_batched(
+        bucket_t* d_dense_out, const affine_t* d_point, size_t point_size,
+        const int* d_wins, int* d_wins_start, int* d_wins_end,
+        uint32_t bucket_size,
+        const int* d_worklist, const int* d_dense_cnt, uint32_t split_n_blocks)
+    {
+        uint32_t worklist_idx = blockIdx.x / split_n_blocks;
+        uint32_t split_block = blockIdx.x % split_n_blocks;
+        if (worklist_idx >= (uint32_t)(*d_dense_cnt))
+            return;
+
+        int flat = d_worklist[worklist_idx]; // flat (window, bucket-in-window) index
+        uint32_t win_idx = (uint32_t)flat / bucket_size;
+
+        uint32_t begin = d_wins_start[flat];
+        uint32_t end = d_wins_end[flat];
         uint32_t points_in_bucket = end - begin;
-        uint32_t points_per_block = points_in_bucket / gridDim.x; // floor, not ceil
-        begin = begin + blockIdx.x * points_per_block;
-        d_wins = d_wins + win_idx * point_size + begin;
-        uint32_t points_in_last_block = points_in_bucket - blockIdx.x * points_per_block;
-        uint32_t length = blockIdx.x == (gridDim.x - 1) ? points_in_last_block : points_per_block;
+        uint32_t points_per_block = points_in_bucket / split_n_blocks; // floor; last block takes the remainder
+        begin = begin + split_block * points_per_block;
+        const int* wins = d_wins + win_idx * point_size + begin;
+        uint32_t points_in_last_block = points_in_bucket - split_block * points_per_block;
+        uint32_t length = split_block == (split_n_blocks - 1) ? points_in_last_block : points_per_block;
 
-        if (blockIdx.x * points_per_block > points_in_bucket) {
+        // Each dense bucket owns a contiguous DENSE_SPLIT_N_BLOCKS-wide arena
+        // slice of bucket_t; `worklist_idx` selects the slice.
+        bucket_t* d_out_slice = d_dense_out + worklist_idx * DENSE_SPLIT_N_BLOCKS;
+
+        if (split_block * points_per_block > points_in_bucket) {
             bucket_t sum;
             sum.inf();
             if (threadIdx.x == 0) {
-                d_out[blockIdx.x] = sum;
+                d_out_slice[split_block] = sum;
             }
             return;
         }
@@ -311,7 +368,7 @@ namespace pippenger {
         sum.inf();
         for (uint32_t i = point_idx; i < length; i += TILE_PER_BLOCK) {
             if (i < length) {
-                sum.add(d_point[d_wins[i]]);
+                sum.add(d_point[wins[i]]);
             }
         }
         __syncthreads();
@@ -332,15 +389,25 @@ namespace pippenger {
         }
 
         if (point_idx == 0) {
-            d_out[blockIdx.x] = tile_bucket[0];
+            d_out_slice[split_block] = tile_bucket[0];
         }
     }
 
+    // Batched partial-reduce: one block per dense bucket. Sums the
+    // `split_n_blocks` partials that the split kernel wrote into this bucket's
+    // arena slice, then stores the bucket total into `d_out[flat]`.
     template <uint32_t TILE_PER_BLOCK>
-    __global__ void cukernel_dense_bucket_acc_results(
-        bucket_t* d_in, point_t* d_out,
-        uint32_t in_num, uint32_t window_offset, uint32_t bucket_num, uint32_t bucket_offset)
+    __global__ void cukernel_dense_bucket_acc_results_batched(
+        bucket_t* d_dense_out, point_t* d_out,
+        uint32_t in_num,
+        const int* d_worklist, const int* d_dense_cnt)
     {
+        uint32_t worklist_idx = blockIdx.x;
+        if (worklist_idx >= (uint32_t)(*d_dense_cnt))
+            return;
+        int flat = d_worklist[worklist_idx]; // flat (window, bucket-in-window) index
+        bucket_t* d_in = d_dense_out + worklist_idx * DENSE_SPLIT_N_BLOCKS;
+
         // mixed add
         uint32_t point_idx = threadIdx.x;
         bucket_t sum;
@@ -367,10 +434,9 @@ namespace pippenger {
             __syncthreads();
         }
 
-        uint64_t out_idx = window_offset * bucket_num + bucket_offset;
         if (point_idx == 0) {
             bucket_t sum = tile_bucket[0];
-            d_out[out_idx] = (point_t)sum;
+            d_out[flat] = (point_t)sum;
         }
     }
 
@@ -378,7 +444,8 @@ namespace pippenger {
     void mixed_add_wins(cudaStream_t& _stream,
         point_t* d_out, const affine_t* d_point, size_t point_num,
         float SPARSITY_THRESHOLD, float* _sparsity, uint64_t* _dense_out,
-        int* d_wins, int* d_wins_start, int* d_wins_end, uint32_t win_num, uint32_t bin_num)
+        int* d_wins, int* d_wins_start, int* d_wins_end, uint32_t win_num, uint32_t bin_num,
+        int* d_worklist, int* d_dense_cnt, uint32_t max_dense_bucket_num)
     {
 
         // check sparsity
@@ -391,44 +458,51 @@ namespace pippenger {
             d_sparsity, SPARSITY_THRESHOLD,
             point_num, win_num, bin_num);
 
-        // Load-bearing D->H sync: the host loop below branches on
-        // `h_sparsity[i]` to dispatch dense-bucket kernels.
-        float* h_sparsity = (float*)malloc(win_num * bin_num * sizeof(float));
-        cudaMemcpyAsync(h_sparsity, d_sparsity, win_num * bin_num * sizeof(float), cudaMemcpyDeviceToHost, _stream);
-        cudaStreamSynchronize(_stream);
-        uint32_t dense_cnt = 0;
-        for (uint32_t i = 0; i < win_num * bin_num; i++) {
-            if (h_sparsity[i] >= SPARSITY_THRESHOLD) {
-                dense_cnt++;
-            }
+        // Build the dense-bucket worklist on device: compact every bucket
+        // whose sparsity >= SPARSITY_THRESHOLD into `d_worklist`, counting them
+        // in `d_dense_cnt`. Selecting dense buckets on the device avoids
+        // reading the sparsity array back to the host and dispatching one
+        // kernel per dense bucket from a host loop.
+        uint32_t max_worklist = win_num * max_dense_bucket_num;
+        cudaMemsetAsync(d_dense_cnt, 0, sizeof(int), _stream);
+        cukernel_compact_dense_worklist<<<block_num, thread_per_block, 0, _stream>>>(
+            d_sparsity, SPARSITY_THRESHOLD, win_num, bin_num,
+            d_worklist, d_dense_cnt, max_worklist);
+
+        // Split each dense bucket across `split_n_blocks` blocks, computed once
+        // here since `point_num` is constant per call:
+        // min(DENSE_SPLIT_N_BLOCKS, point_num / TILE_PER_BLOCK). The cap must be
+        // DENSE_SPLIT_N_BLOCKS so it matches the per-bucket arena slice width.
+        uint32_t split_n_blocks = DENSE_SPLIT_N_BLOCKS;
+        if (split_n_blocks * TILE_PER_BLOCK > point_num) {
+            split_n_blocks = point_num / TILE_PER_BLOCK;
+        }
+        // A valid dense chunk with 4 <= point_num < TILE_PER_BLOCK would give
+        // split_n_blocks == 0 (no split blocks launched, so the dense bucket
+        // would be written as infinity and its summands lost). Clamp to >= 1
+        // so a single block sums the whole bucket. This is a no-op on the
+        // production path, where point_num >= 2^14 keeps it at
+        // DENSE_SPLIT_N_BLOCKS.
+        if (split_n_blocks == 0) {
+            split_n_blocks = 1;
         }
 
-        uint32_t SPLIT_N_BLOCKS = 128;
-        // 128 block per bucket, do not change!!!!
-        // for d_dense_out is malloced at the beginning
         bucket_t* d_dense_out = (bucket_t*)_dense_out;
-        if (dense_cnt > 0) {
-            uint32_t offset_cnt = 0;
-            for (uint32_t w = 0; w < win_num; w++) {
-                for (uint32_t b = 0; b < bin_num; b++) {
-                    if (h_sparsity[w * bin_num + b] >= SPARSITY_THRESHOLD) {
-                        // printf("sparsity of [%d][%d] is [%f] \r\n", w, b, h_sparsity[w*bin_num + b]);
-                        bucket_t* d_dense_offset = d_dense_out + (offset_cnt * 128);
-                        if (SPLIT_N_BLOCKS * TILE_PER_BLOCK > point_num) {
-                            SPLIT_N_BLOCKS = point_num / TILE_PER_BLOCK;
-                        }
-                        cukernel_mixed_add_dense_bucket<TILE_PER_BLOCK><<<SPLIT_N_BLOCKS, TILE_PER_BLOCK, 0, _stream>>>(
-                            d_dense_offset, d_point, point_num,
-                            d_wins, d_wins_start, d_wins_end,
-                            win_num, w, bin_num, b);
-                        cukernel_dense_bucket_acc_results<TILE_PER_BLOCK><<<1, TILE_PER_BLOCK, 0, _stream>>>(
-                            d_dense_offset, d_out,
-                            SPLIT_N_BLOCKS, w, bin_num, b);
-                        offset_cnt++;
-                    }
-                }
-            }
-        }
+        // One batched split-accumulate over all (dense-bucket, split-block)
+        // pairs, followed by one batched partial-reduce. Idle blocks
+        // (worklist_idx >= *d_dense_cnt) early-return uniformly. Both launches
+        // use `split_n_blocks` (>= 1 by the clamp above) so every launched block
+        // has meaningful work.
+        cukernel_mixed_add_dense_bucket_batched<TILE_PER_BLOCK>
+            <<<max_worklist * split_n_blocks, TILE_PER_BLOCK, 0, _stream>>>(
+                d_dense_out, d_point, point_num,
+                d_wins, d_wins_start, d_wins_end, bin_num,
+                d_worklist, d_dense_cnt, split_n_blocks);
+        cukernel_dense_bucket_acc_results_batched<TILE_PER_BLOCK>
+            <<<max_worklist, TILE_PER_BLOCK, 0, _stream>>>(
+                d_dense_out, d_out,
+                split_n_blocks,
+                d_worklist, d_dense_cnt);
 
         cukernel_mixed_add_points_in_bucket<TILE_PER_BLOCK><<<win_num * bin_num, TILE_PER_BLOCK, 0, _stream>>>(
             d_out, d_point, point_num,
@@ -440,10 +514,6 @@ namespace pippenger {
             printf("zkpcuda::sppark_pippenger::mixed_add_wins Error : %s\n",
                 cudaGetErrorString(cudaPeekAtLastError()));
         }
-
-        if (h_sparsity != nullptr)
-            free(h_sparsity);
-        h_sparsity = nullptr;
     }
 
     // ===============================================================================
