@@ -85,6 +85,11 @@ pub trait Params<'params, C: CurveAffine>: Sized + Clone {
         self.commit_lagrange(&host, r)
     }
 
+    /// Pre-warms witness-independent device caches (e.g. SRS base mirrors) so
+    /// their first-touch H2D can overlap earlier work. Idempotent and race-safe
+    /// against the lazy commit paths. Default: no-op.
+    fn warm_device_caches(&self) {}
+
     /// Writes params to a buffer.
     fn write<W: io::Write>(&self, writer: &mut W) -> io::Result<()>;
 

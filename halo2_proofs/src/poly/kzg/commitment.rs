@@ -464,6 +464,18 @@ where
             .expect("multiexp_gpu_device_scalars_device_bases failed in commit_lagrange_device")
     }
 
+    /// Pre-warms the SRS base mirrors (GPU-MSM only; below the threshold commits
+    /// run on CPU, so skip to avoid wasting VRAM). `g_lagrange` is already warm
+    /// from keygen (cheap hit); `g` (monomial) is cold — first-touched by
+    /// `commit_device` in phase 4b/5 — so warming it overlaps that H2D here.
+    fn warm_device_caches(&self) {
+        if (self.n() as usize) < GPU_MSM_THRESHOLD {
+            return;
+        }
+        let _ = self.ensure_g_lagrange_device();
+        let _ = self.ensure_g_device();
+    }
+
     /// Writes params to a buffer.
     fn write<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
         self.write_custom(writer, SerdeFormat::RawBytesUnchecked)

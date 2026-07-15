@@ -27,7 +27,8 @@ use halo2_axiom_gpu::transcript::{
     Blake2bRead, Blake2bWrite, Challenge255, TranscriptReadBuffer, TranscriptWriterBuffer,
 };
 use halo2curves::bn256::{Bn256, Fr, G1Affine};
-use rand_core::OsRng;
+use rand_chacha::ChaCha20Rng;
+use rand_core::{OsRng, SeedableRng};
 
 /// `1 << K` rows. K >= 14 clears `GPU_MSM_THRESHOLD` so the real GPU device
 /// paths run (not the CPU fallback).
@@ -224,5 +225,70 @@ fn phase5_prove_verify_lookup_permutation() {
         ),
         "phase-5 lookup+permutation proof failed to verify (eval batching must \
          preserve the write_scalar order the verifier reads)"
+    );
+}
+
+/// Byte-identity guard for the phase-1 scoped-worker pk/SRS mirror warm-up.
+///
+/// The worker eagerly fills the witness-independent pk/SRS `OnceCell`s that the
+/// lazy paths would otherwise fill on first touch, so the proof must not depend
+/// on eager-vs-lazy. Two identically-seeded runs are fully deterministic
+/// (Fiat-Shamir + seeded blinding; GPU MSM/NTT are exact) and the shared params
+/// go cold→warm between them, so byte-identical proofs prove warm-up neutrality;
+/// a race, wrong-device bind, or torn read would break it here.
+#[test]
+fn create_proof_pk_warmup_deterministic_byte_identity() {
+    let params = ParamsKZG::<Bn256>::setup(K, OsRng);
+
+    let circuit_kg = RichCircuit {
+        public: Value::unknown(),
+        b: Value::unknown(),
+    };
+    let vk: VerifyingKey<G1Affine> = keygen_vk(&params, &circuit_kg).expect("gpu keygen_vk");
+    let pk = keygen_pk(&params, vk, &circuit_kg).expect("gpu keygen_pk");
+
+    let public = Fr::from(3);
+    let circuit = RichCircuit {
+        public: Value::known(public),
+        b: Value::known(Fr::from(2)),
+    };
+    let pubinputs = [public];
+    let instances: &[&[&[Fr]]] = &[&[&pubinputs[..]]];
+
+    // Two proofs with fresh, identically-seeded RNGs (the worker never touches
+    // the RNG, so consumption matches).
+    let prove_once = || {
+        let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+        create_proof::<KZGCommitmentScheme<Bn256>, ProverSHPLONK<_>, _, _, _, _>(
+            &params,
+            &pk,
+            std::slice::from_ref(&circuit),
+            instances,
+            ChaCha20Rng::seed_from_u64(0),
+            &mut transcript,
+        )
+        .expect("gpu create_proof");
+        transcript.finalize()
+    };
+    let proof_a = prove_once();
+    let proof_b = prove_once();
+
+    assert_eq!(
+        proof_a, proof_b,
+        "pk device-mirror warm-up must be proof-neutral: identically-seeded \
+         create_proof runs must yield byte-identical proofs regardless of \
+         whether the phase-1 worker or the main thread populated each mirror"
+    );
+
+    // The deterministic warm-up proof must still verify.
+    let verifier_params = params.verifier_params();
+    assert!(
+        gpu_verify::<VerifierSHPLONK<_>, AccumulatorStrategy<_>>(
+            verifier_params,
+            pk.get_vk(),
+            instances,
+            &proof_a,
+        ),
+        "deterministic pk-warm-up proof failed to verify"
     );
 }

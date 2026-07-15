@@ -524,121 +524,152 @@ where
     let (instance, advice, challenges, theta) = {
         crate::perf_section!("phase1");
 
-        let mut column_indices = [(); 3].map(|_| vec![]);
-        for (index, phase) in meta.advice_column_phase.iter().enumerate() {
-            column_indices[phase.to_u8() as usize].push(index);
-        }
-        let mut challenge_indices = [(); 3].map(|_| vec![]);
-        for (index, phase) in meta.challenge_phase.iter().enumerate() {
-            challenge_indices[phase.to_u8() as usize].push(index);
-        }
-
-        let (instance, advice, challenges) = {
-            let mut advice = Vec::with_capacity(instances.len());
-            let mut instance = Vec::with_capacity(instances.len());
-
-            let unusable_rows_start = params.n() as usize - (meta.blinding_factors() + 1);
-            let phases = pk.cs.phases().collect::<Vec<_>>();
-            let num_phases = phases.len();
-            // WARNING: this will currently not work if `circuits` has more than 1 circuit
-            // because the original API squeezes the challenges for a phase after running all circuits
-            // once in that phase.
-            if num_phases > 1 {
-                assert_eq!(
-                    circuits.len(),
-                    1,
-                    "New challenge API doesn't work with multiple circuits yet"
-                );
-            }
-
-            let mut challenges =
-                HashMap::<usize, Scheme::Scalar>::with_capacity(meta.num_challenges);
-
-            // Soundness guard for the `assign_advice` reinterpret of `GpuAssigned`
-            // as canonical `Assigned`; verifies the layouts coincide.
-            crate::plonk::assert_canonical_assigned_matches_gpu_layout::<Scheme::Scalar>();
-
-            for (circuit, instances) in circuits.iter().zip(instances) {
-                #[cfg(feature = "profile")]
-                let start = std::time::Instant::now();
-                // `usable_rows` excludes blinding-factor rows and the permutation-argument row.
-                let mut witness: WitnessCollection<Scheme, P, _, E, _, _> = WitnessCollection {
-                    params,
-                    params_n: params.n() as usize,
-                    domain,
-                    current_phase: phases[0],
-                    num_instance_columns: num_instance,
-                    num_advice_columns: meta.num_advice_columns,
-                    advice: vec![GpuAssigned::Zero; params.n() as usize * meta.num_advice_columns],
-                    instances,
-                    challenges: &mut challenges,
-                    usable_rows: ..unusable_rows_start,
-                    advice_single: AdviceSingleOption::<Scheme::Curve> {
-                        advice_values: (0..meta.num_advice_columns).map(|_| None).collect(),
-                        advice_polys: (0..meta.num_advice_columns).map(|_| None).collect(),
-                    },
-                    instance_single: InstanceSingle::<Scheme::Curve>::default(),
-                    rng: &mut rng,
-                    transcript: &mut transcript,
-                    column_indices: column_indices.clone(),
-                    challenge_indices: challenge_indices.clone(),
-                    unusable_rows_start,
-                    _marker: PhantomData,
-                };
-                #[cfg(feature = "profile")]
-                log::debug!(
-                    "time to create empty WitnessCollection struct; initialize columns with zero: {:?}",
-                    start.elapsed()
-                );
-
-                #[cfg(feature = "profile")]
-                let witness_assign_time = start_timer!(|| "synthesize + next phase calls");
-                // Loop covers legacy circuits that don't use `next_phase`; new
-                // circuits run synthesize once.
-                while witness.current_phase.to_u8() < num_phases as u8 {
-                    ConcreteCircuit::FloorPlanner::synthesize(
-                        &mut witness,
-                        circuit,
-                        config.clone(),
-                        constants.clone(),
-                    )
-                    .expect("synthesize failed");
-                    if witness.current_phase.to_u8() < num_phases as u8 {
-                        witness.next_phase();
-                    }
+        // Warm the witness-independent device caches on a scoped worker while
+        // the CPU runs `synthesize` (GPU otherwise idle), moving their pageable
+        // H2D off the critical path. Byte-neutral: the set-once `OnceCell`s get
+        // exactly what the lazy paths would upload. Joins before phase2's first
+        // mirror touch.
+        std::thread::scope(|s| {
+            s.spawn(move || {
+                // Bind this fresh worker to the CUDA ctx device before any H2D:
+                // the getters' `to_device_on` doesn't bind, so an unbound worker
+                // would target the wrong GPU. On bind failure, skip warming — the
+                // main thread then inits the caches lazily as before.
+                if crate::cuda::utils::ensure_current_device_matches_ctx().is_err() {
+                    return;
                 }
-                #[cfg(feature = "profile")]
-                end_timer!(witness_assign_time);
+                // SRS base mirrors (see `warm_device_caches`): warms the cold
+                // monomial `g` that phase 4b/5 would otherwise upload.
+                params.warm_device_caches();
+                let _ = pk.fixed_polys_device();
+                let _ = pk.fixed_values_device();
+                let _ = pk.permutation_polys_device();
+                let _ = pk.permutation_lagrange_device();
+                let _ = pk.l0_device();
+                let _ = pk.l_last_device();
+                let _ = pk.l_active_row_device();
+            });
 
-                let advice_values = witness
-                    .advice_single
-                    .advice_values
-                    .into_iter()
-                    .map(|c| c.unwrap())
-                    .collect();
-                let advice_polys = witness
-                    .advice_single
-                    .advice_polys
-                    .into_iter()
-                    .map(|c| c.unwrap())
-                    .collect();
-                advice.push(AdviceSingle::<Scheme::Curve> {
-                    advice_values,
-                    advice_polys,
-                });
-                instance.push(witness.instance_single);
+            let mut column_indices = [(); 3].map(|_| vec![]);
+            for (index, phase) in meta.advice_column_phase.iter().enumerate() {
+                column_indices[phase.to_u8() as usize].push(index);
+            }
+            let mut challenge_indices = [(); 3].map(|_| vec![]);
+            for (index, phase) in meta.challenge_phase.iter().enumerate() {
+                challenge_indices[phase.to_u8() as usize].push(index);
             }
 
-            assert_eq!(challenges.len(), meta.num_challenges);
-            let challenges = (0..meta.num_challenges)
-                .map(|index| challenges.remove(&index).unwrap())
-                .collect::<Vec<_>>();
-            (instance, advice, challenges)
-        };
+            let (instance, advice, challenges) = {
+                let mut advice = Vec::with_capacity(instances.len());
+                let mut instance = Vec::with_capacity(instances.len());
 
-        // theta keeps lookup columns linearly independent.
-        let theta: ChallengeTheta<_> = transcript.squeeze_challenge_scalar();
-        (instance, advice, challenges, theta)
+                let unusable_rows_start = params.n() as usize - (meta.blinding_factors() + 1);
+                let phases = pk.cs.phases().collect::<Vec<_>>();
+                let num_phases = phases.len();
+                // WARNING: this will currently not work if `circuits` has more than 1 circuit
+                // because the original API squeezes the challenges for a phase after running all circuits
+                // once in that phase.
+                if num_phases > 1 {
+                    assert_eq!(
+                        circuits.len(),
+                        1,
+                        "New challenge API doesn't work with multiple circuits yet"
+                    );
+                }
+
+                let mut challenges =
+                    HashMap::<usize, Scheme::Scalar>::with_capacity(meta.num_challenges);
+
+                // Soundness guard for the `assign_advice` reinterpret of `GpuAssigned`
+                // as canonical `Assigned`; verifies the layouts coincide.
+                crate::plonk::assert_canonical_assigned_matches_gpu_layout::<Scheme::Scalar>();
+
+                for (circuit, instances) in circuits.iter().zip(instances) {
+                    #[cfg(feature = "profile")]
+                    let start = std::time::Instant::now();
+                    // `usable_rows` excludes blinding-factor rows and the permutation-argument row.
+                    let mut witness: WitnessCollection<Scheme, P, _, E, _, _> = WitnessCollection {
+                        params,
+                        params_n: params.n() as usize,
+                        domain,
+                        current_phase: phases[0],
+                        num_instance_columns: num_instance,
+                        num_advice_columns: meta.num_advice_columns,
+                        advice: vec![
+                            GpuAssigned::Zero;
+                            params.n() as usize * meta.num_advice_columns
+                        ],
+                        instances,
+                        challenges: &mut challenges,
+                        usable_rows: ..unusable_rows_start,
+                        advice_single: AdviceSingleOption::<Scheme::Curve> {
+                            advice_values: (0..meta.num_advice_columns).map(|_| None).collect(),
+                            advice_polys: (0..meta.num_advice_columns).map(|_| None).collect(),
+                        },
+                        instance_single: InstanceSingle::<Scheme::Curve>::default(),
+                        rng: &mut rng,
+                        transcript: &mut transcript,
+                        column_indices: column_indices.clone(),
+                        challenge_indices: challenge_indices.clone(),
+                        unusable_rows_start,
+                        _marker: PhantomData,
+                    };
+                    #[cfg(feature = "profile")]
+                    log::debug!(
+                        "time to create empty WitnessCollection struct; initialize columns with zero: {:?}",
+                        start.elapsed()
+                    );
+
+                    #[cfg(feature = "profile")]
+                    let witness_assign_time = start_timer!(|| "synthesize + next phase calls");
+                    // Loop covers legacy circuits that don't use `next_phase`; new
+                    // circuits run synthesize once.
+                    while witness.current_phase.to_u8() < num_phases as u8 {
+                        ConcreteCircuit::FloorPlanner::synthesize(
+                            &mut witness,
+                            circuit,
+                            config.clone(),
+                            constants.clone(),
+                        )
+                        .expect("synthesize failed");
+                        if witness.current_phase.to_u8() < num_phases as u8 {
+                            witness.next_phase();
+                        }
+                    }
+                    #[cfg(feature = "profile")]
+                    end_timer!(witness_assign_time);
+
+                    let advice_values = witness
+                        .advice_single
+                        .advice_values
+                        .into_iter()
+                        .map(|c| c.unwrap())
+                        .collect();
+                    let advice_polys = witness
+                        .advice_single
+                        .advice_polys
+                        .into_iter()
+                        .map(|c| c.unwrap())
+                        .collect();
+                    advice.push(AdviceSingle::<Scheme::Curve> {
+                        advice_values,
+                        advice_polys,
+                    });
+                    instance.push(witness.instance_single);
+                }
+
+                assert_eq!(challenges.len(), meta.num_challenges);
+                let challenges = (0..meta.num_challenges)
+                    .map(|index| challenges.remove(&index).unwrap())
+                    .collect::<Vec<_>>();
+                (instance, advice, challenges)
+            };
+
+            // theta keeps lookup columns linearly independent.
+            let theta: ChallengeTheta<_> = transcript.squeeze_challenge_scalar();
+            (instance, advice, challenges, theta)
+            // Warm-up worker auto-joins here (scope end).
+        })
     };
 
     let (lookups, beta, gamma) = {
