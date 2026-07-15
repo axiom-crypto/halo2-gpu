@@ -1,8 +1,7 @@
-use crate::cuda::utils::{query_device_free_bytes_for_chunking, HALO2_GPU_CTX};
+use crate::cuda::utils::{query_device_free_bytes_for_chunking, to_device_on_pinned};
 use crate::cuda::HaloGpuError;
 use crate::poly::DevicePolyExt;
 use ff::Field;
-use openvm_cuda_common::copy::MemCopyH2D;
 use openvm_cuda_common::d_buffer::DeviceBuffer;
 use std::ffi::c_void;
 use std::mem;
@@ -151,9 +150,7 @@ impl<F: Field> ColumnPool<F> {
         } else {
             for col in fixed_values {
                 debug_assert_eq!(col.len(), self.n);
-                let d = col
-                    .to_device_on(&HALO2_GPU_CTX)
-                    .map_err(HaloGpuError::from)?;
+                let d = to_device_on_pinned(col).map_err(HaloGpuError::from)?;
                 self.fixed_ptrs_device.push(d.as_raw_ptr());
                 self.fixed_d.push(d);
             }
@@ -227,26 +224,20 @@ impl<F: Field> ColumnPool<F> {
             // device buffer owned by this pool.
             for col in fixed_values {
                 debug_assert_eq!(col.len(), self.n);
-                let d = col
-                    .to_device_on(&HALO2_GPU_CTX)
-                    .map_err(HaloGpuError::from)?;
+                let d = to_device_on_pinned(col).map_err(HaloGpuError::from)?;
                 self.fixed_ptrs_device.push(d.as_raw_ptr());
                 self.fixed_d.push(d);
             }
         }
         for col in advice_values {
             debug_assert_eq!(col.len(), self.n);
-            let d = col
-                .to_device_on(&HALO2_GPU_CTX)
-                .map_err(HaloGpuError::from)?;
+            let d = to_device_on_pinned(col).map_err(HaloGpuError::from)?;
             self.advice_ptrs_device.push(d.as_raw_ptr());
             self.advice_d.push(d);
         }
         for col in instance_values {
             debug_assert_eq!(col.len(), self.n);
-            let d = col
-                .to_device_on(&HALO2_GPU_CTX)
-                .map_err(HaloGpuError::from)?;
+            let d = to_device_on_pinned(col).map_err(HaloGpuError::from)?;
             self.instance_ptrs_device.push(d.as_raw_ptr());
             self.instance_d.push(d);
         }

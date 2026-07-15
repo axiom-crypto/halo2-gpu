@@ -3,7 +3,7 @@ use crate::cpu::arithmetic::{best_multiexp_cpu, parallelize};
 use crate::cuda::funcs::{
     multiexp_gpu_device_bases, multiexp_gpu_device_scalars_device_bases, GPU_MSM_THRESHOLD,
 };
-use crate::cuda::utils::HALO2_GPU_CTX;
+use crate::cuda::utils::to_device_on_pinned;
 use crate::poly::commitment::{Blind, CommitmentScheme, Params, ParamsProver, ParamsVerifier};
 use crate::poly::{Coeff, DevicePolyExt, LagrangeCoeff, Polynomial};
 use crate::SerdeCurveAffine;
@@ -12,7 +12,6 @@ use crate::SerdeFormat;
 use ff::{Field, PrimeField};
 use group::{prime::PrimeCurveAffine, Curve, Group};
 use once_cell::sync::OnceCell;
-use openvm_cuda_common::copy::MemCopyH2D;
 use openvm_cuda_common::d_buffer::DeviceBuffer;
 use pairing::Engine;
 use rand_core::{OsRng, RngCore};
@@ -244,9 +243,7 @@ impl<E: Engine + Debug> ParamsKZG<E> {
     fn ensure_g_lagrange_device(&self) -> &DeviceBuffer<E::G1Affine> {
         crate::perf_section!("kzg.g_lagrange_device_first_touch");
         let d_bases = self.g_lagrange_device.get_or_init(|| {
-            self.g_lagrange
-                .as_slice()
-                .to_device_on(&HALO2_GPU_CTX)
+            to_device_on_pinned(self.g_lagrange.as_slice())
                 .expect("failed to upload g_lagrange to device for GPU MSM cache")
         });
         assert_eq!(
@@ -267,9 +264,7 @@ impl<E: Engine + Debug> ParamsKZG<E> {
     fn ensure_g_device(&self) -> &DeviceBuffer<E::G1Affine> {
         crate::perf_section!("kzg.g_device_first_touch");
         let d_bases = self.g_device.get_or_init(|| {
-            self.g
-                .as_slice()
-                .to_device_on(&HALO2_GPU_CTX)
+            to_device_on_pinned(self.g.as_slice())
                 .expect("failed to upload g to device for GPU MSM cache")
         });
         assert_eq!(
@@ -553,9 +548,7 @@ where
         }
         let d_coeffs = poly.device_buf();
         let d_bases = self.g_device.get_or_init(|| {
-            self.g
-                .as_slice()
-                .to_device_on(&HALO2_GPU_CTX)
+            to_device_on_pinned(self.g.as_slice())
                 .expect("failed to upload g to device for GPU MSM cache")
         });
         assert_eq!(

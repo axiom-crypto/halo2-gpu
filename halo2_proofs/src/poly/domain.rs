@@ -11,7 +11,7 @@ use crate::cuda::funcs::{
     ifft_many_device, ifft_many_h2d, split_radix_fft_gpu, split_radix_fft_inout_gpu,
 };
 use crate::cuda::modules::ifft_cosetfftpart_gpu;
-use crate::cuda::utils::{FFITraitObject, HALO2_GPU_CTX};
+use crate::cuda::utils::{to_device_on_pinned, FFITraitObject, HALO2_GPU_CTX};
 use crate::cuda::HaloGpuError;
 use crate::{
     cpu::arithmetic::parallelize,
@@ -19,7 +19,6 @@ use crate::{
     plonk::{Assigned, GpuError},
 };
 use halo2_axiom::poly;
-use openvm_cuda_common::copy::MemCopyH2D;
 use openvm_cuda_common::d_buffer::DeviceBuffer;
 
 use super::{
@@ -706,11 +705,7 @@ impl<'pk, F: WithSmallOrderMulGroup<3>> EvaluationDomain<'pk, F> {
         crate::perf_section!("domain.divide_by_vanishing_poly_device");
         assert_eq!(a.len(), self.extended_len());
 
-        let t_dev = self
-            .inner
-            .t_evaluations
-            .as_slice()
-            .to_device_on(&HALO2_GPU_CTX)
+        let t_dev = to_device_on_pinned(self.inner.t_evaluations.as_slice())
             .map_err(HaloGpuError::from)
             .map_err(GpuError::from)?;
         let d_buf = a.into_device_buf();

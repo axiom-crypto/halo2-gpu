@@ -8,13 +8,13 @@ use group::ff::FromUniformBytes;
 
 use crate::arithmetic::CurveAffine;
 use crate::cuda::funcs::batch_eval_polynomial_device_out;
-use crate::cuda::utils::HALO2_GPU_CTX;
+use crate::cuda::utils::{to_device_on_pinned, HALO2_GPU_CTX};
 use crate::cuda::HaloGpuError;
-use crate::poly::{Coeff, DevicePolyExt, EvaluationDomain, HostPolyExt, LagrangeCoeff, Polynomial};
+use crate::poly::{Coeff, DevicePolyExt, EvaluationDomain, LagrangeCoeff, Polynomial};
 use crate::transcript::{ChallengeScalar, EncodedChallenge, Transcript, TranscriptWrite};
 use crate::{SerdeCurveAffine, SerdePrimeField};
 use once_cell::sync::OnceCell;
-use openvm_cuda_common::copy::{cuda_memcpy_on, MemCopyH2D};
+use openvm_cuda_common::copy::cuda_memcpy_on;
 use openvm_cuda_common::d_buffer::DeviceBuffer;
 
 mod assigned;
@@ -426,7 +426,7 @@ where
     let mut mirror: Vec<Polynomial<C::Scalar, B, crate::poly::Device>> =
         Vec::with_capacity(host.len());
     for poly in host {
-        match poly.values().to_device_on(&HALO2_GPU_CTX) {
+        match to_device_on_pinned(poly.values()) {
             Ok(d) => mirror.push(Polynomial::from_device(d)),
             Err(e) => {
                 log::warn!("PK device mirror {}: H2D failed ({:?}); skip", perf_tag, e);
@@ -458,8 +458,8 @@ where
     B: 'static,
 {
     let total_bytes: usize = host.len() * std::mem::size_of::<C::Scalar>();
-    let mirror = match host.to_device_on(&HALO2_GPU_CTX) {
-        Ok(d) => d,
+    let mirror = match to_device_on_pinned(host.values()) {
+        Ok(d) => Polynomial::from_device(d),
         Err(e) => {
             log::warn!("PK device mirror {}: H2D failed ({:?}); skip", perf_tag, e);
             return None;

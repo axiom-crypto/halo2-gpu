@@ -1,8 +1,8 @@
 use crate::cuda::culib::_halo2_batch_invert;
-use crate::cuda::utils::{ensure_current_device_matches_ctx, HALO2_GPU_CTX};
+use crate::cuda::utils::{ensure_current_device_matches_ctx, to_device_on_pinned, HALO2_GPU_CTX};
 use crate::cuda::HaloGpuError;
 use ff::Field;
-use openvm_cuda_common::copy::{cuda_memcpy_on, MemCopyH2D};
+use openvm_cuda_common::copy::cuda_memcpy_on;
 use openvm_cuda_common::d_buffer::DeviceBuffer;
 use std::ffi::c_void;
 use std::mem;
@@ -27,7 +27,7 @@ pub fn batch_invert_single_gpu<F: Field>(data: &mut [F]) -> Result<(), HaloGpuEr
         panic!("field_type must be Fr or Fq")
     };
 
-    let d_data = (data as &[F]).to_device_on(&HALO2_GPU_CTX)?;
+    let d_data = to_device_on_pinned(data as &[F])?;
     let status = unsafe {
         _halo2_batch_invert(
             d_data.as_mut_raw_ptr(),
