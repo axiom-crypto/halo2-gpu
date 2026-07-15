@@ -1,9 +1,11 @@
 //! Halo2-gpu runtime context, FFI shim, and the single sanctioned
 //! `cudaMemGetInfo` site (`query_device_free_bytes_for_chunking`).
 
+use std::ffi::c_void;
+
 use git_version::git_version;
 use once_cell::sync::Lazy;
-use openvm_cuda_common::copy::MemCopyH2D;
+use openvm_cuda_common::copy::{cuda_memcpy_on, MemCopyH2D};
 use openvm_cuda_common::d_buffer::DeviceBuffer;
 use openvm_cuda_common::error::MemCopyError;
 use openvm_cuda_common::stream::GpuDeviceCtx;
@@ -23,6 +25,37 @@ pub(crate) fn to_device_on_safe<T>(slice: &[T]) -> Result<DeviceBuffer<T>, MemCo
     } else {
         slice.to_device_on(&HALO2_GPU_CTX)
     }
+}
+
+/// H2D upload that stages through the pinned host-buffer pool
+/// ([`crate::cuda::pinned`]): recurring same-size uploads transfer at full PCIe
+/// bandwidth. Byte-identical to `to_device_on` — the device buffer is sized to
+/// `src.len()` and exactly its bytes are copied (the pool's power-of-two
+/// padding stays host-side). `give_back` is safe immediately after enqueue
+/// because the pool's cleaner device-syncs before reusing a buffer.
+pub(crate) fn to_device_on_pinned<T: Copy>(src: &[T]) -> Result<DeviceBuffer<T>, MemCopyError> {
+    if src.is_empty() {
+        return Ok(DeviceBuffer::<T>::new());
+    }
+    let n_bytes = std::mem::size_of_val(src);
+    let mut staging = crate::cuda::pinned::take(n_bytes);
+    // SAFETY: `staging.len() >= n_bytes`; `T: Copy` so the byte copy is sound.
+    unsafe {
+        std::ptr::copy_nonoverlapping(src.as_ptr() as *const u8, staging.as_mut_ptr(), n_bytes);
+    }
+    let dst = DeviceBuffer::<T>::with_capacity_on(src.len(), &HALO2_GPU_CTX);
+    // SAFETY: async H2D of exactly `n_bytes` from the staging buffer into the
+    // freshly-allocated device buffer, both valid for `n_bytes`.
+    unsafe {
+        cuda_memcpy_on::<false, true>(
+            dst.as_mut_raw_ptr(),
+            staging.as_ptr() as *const c_void,
+            n_bytes,
+            &HALO2_GPU_CTX,
+        )?;
+    }
+    crate::cuda::pinned::give_back(staging, n_bytes);
+    Ok(dst)
 }
 
 /// Crate-level single-device context: one non-blocking CUDA stream backing
