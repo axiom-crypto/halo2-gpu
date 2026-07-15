@@ -3,7 +3,7 @@ use std::fmt::Debug;
 use super::commitment::MSM;
 use crate::{
     arithmetic::eval_polynomial,
-    cuda::funcs::eval_polynomial_device,
+    cuda::funcs::{batch_eval_polynomial_d2h, eval_polynomial_device},
     poly::{Coeff, Device, DevicePolyExt, Host, Polynomial},
 };
 use halo2curves::CurveAffine;
@@ -15,6 +15,14 @@ pub trait Query<F>: Sized + Clone + Send + Sync {
     fn get_point(&self) -> F;
     fn get_eval(&self) -> Self::Eval;
     fn get_commitment(&self) -> Self::Commitment;
+
+    /// Evaluate every query in `queries`, returning evals in the same order.
+    /// Default: per-query `get_eval`. Device-backed queries override this to run
+    /// one batched GPU eval (one kernel batch + one D2H + one sync) instead of N
+    /// per-query device evals that each fence the shared stream.
+    fn batch_get_evals(queries: &[Self]) -> Vec<Self::Eval> {
+        queries.iter().map(|q| q.get_eval()).collect()
+    }
 }
 
 /// A residency-tagged borrow of a `Polynomial<F, Coeff, _>`.
@@ -103,6 +111,40 @@ impl<'com, C: CurveAffine> Query<C::Scalar> for ProverQuery<'com, C> {
     }
     fn get_commitment(&self) -> Self::Commitment {
         PolynomialPointer { poly: self.poly }
+    }
+
+    /// Batch all device-resident polys into a single `batch_eval_polynomial_d2h`
+    /// (one kernel batch, one D2H, one stream sync) instead of a per-query
+    /// `eval_polynomial_device` that blocks the shared stream each call; any
+    /// host-resident polys fall back to the per-query CPU eval. Bit-identical to
+    /// per-query `get_eval` (same underlying Horner kernels/CPU path); only the
+    /// fence/scratch sharing differs.
+    fn batch_get_evals(queries: &[Self]) -> Vec<Self::Eval> {
+        let mut evals = vec![C::Scalar::default(); queries.len()];
+        let mut d_polys = Vec::new();
+        let mut d_points = Vec::new();
+        let mut d_slots = Vec::new();
+        for (i, q) in queries.iter().enumerate() {
+            match q.poly {
+                PolyRef::Device(p) => {
+                    d_polys.push(p.device_buf());
+                    d_points.push(q.point);
+                    d_slots.push(i);
+                }
+                PolyRef::Host(p) => {
+                    evals[i] = eval_polynomial(p.values(), q.point);
+                }
+            }
+        }
+        if !d_polys.is_empty() {
+            let mut d_evals = vec![C::Scalar::default(); d_polys.len()];
+            batch_eval_polynomial_d2h(&d_polys, &d_points, &mut d_evals)
+                .expect("batch_eval_polynomial_d2h failed in ProverQuery::batch_get_evals");
+            for (k, &slot) in d_slots.iter().enumerate() {
+                evals[slot] = d_evals[k];
+            }
+        }
+        evals
     }
 }
 
