@@ -1,6 +1,6 @@
 #pragma once
 
-#include "common.h" // zkpcuda::common::index_revbin (fused coset-twist + bit-reversal)
+#include "common.h" // zkpcuda::common::index_revbin
 #include "common/scratch_span.h"
 #include "field/alt_bn128.hpp"
 #include <cuda.h>
@@ -197,16 +197,9 @@ namespace omega {
         }
     }
 
-    // Fused coset-twist + bit-reversal for the CosetFFT_Part pre-DIT stage.
-    // Computes `out[revbin(idx, log_n)] = in[idx] * omega^idx` in a single
-    // pass, folding the standalone `mult_power_of_omega` (natural-order,
-    // in-place) + `revbin` (in-place index<->revbin swap) pair into one.
-    // Reads `in` coalesced on the natural index and keeps the same running-
-    // product amortization (`power *= power_stride`) keyed by that index;
-    // only the WRITE is redirected to the bit-reversed slot. `out` must be a
-    // distinct buffer from `in` — the scatter-write would otherwise clobber
-    // not-yet-read inputs. DIT then consumes `out` with its existing
-    // bit-reversed input indexing, unchanged.
+    // CosetFFT_Part pre-DIT stage: `out[revbin(idx, log_n)] = in[idx] * omega^idx`.
+    // `out` must be a distinct buffer from `in`; the bit-reversed scatter-write
+    // would otherwise clobber not-yet-read inputs.
     __global__ void mult_power_of_omega_revbin(
         scalar_t* out,
         const scalar_t* in,

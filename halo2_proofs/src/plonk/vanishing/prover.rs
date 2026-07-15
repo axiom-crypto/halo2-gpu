@@ -78,12 +78,8 @@ impl<C: CurveAffine> Argument<C> {
         transcript: &mut T,
     ) -> Result<Committed<C>, GpuError> {
         crate::perf_section!("vanishing.commit");
-        // Sample a random polynomial of degree n - 1.
-        // zk is disabled (see the commented-out block below), so the committed
-        // poly is the constant `[ONE, 0, .., 0]`. Build it on device — memset
-        // the n coeffs to zero, then set coeff[0] = ONE via a 1-element D2D from
-        // a single ONE upload — instead of a length-n host `empty_coeff()`
-        // (~256 MiB zeroed host alloc at k=23, on the critical path).
+        // zk is disabled (see below), so this commits to the constant poly
+        // `[ONE, 0, .., 0]`: zero the n coeffs on device, then set coeff[0] = ONE.
         let n = domain.get_n() as usize;
         let d_random_poly: DeviceBuffer<C::Scalar> =
             DeviceBuffer::with_capacity_on(n, &HALO2_GPU_CTX);
@@ -210,8 +206,7 @@ impl<C: CurveAffine> Committed<C> {
 impl<C: CurveAffine> Constructed<C> {
     pub(in crate::plonk) fn evaluate<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
         self,
-        // Unused: random_poly is the constant `[ONE, 0, ..]` so its eval is ONE
-        // regardless of the point (zk disabled). Kept for signature symmetry.
+        // Unused: random_poly is constant, so its evaluation ignores the point.
         _x: ChallengeX<C>,
         xn: C::Scalar,
         domain: &EvaluationDomain<'_, C::Scalar>,
@@ -223,9 +218,6 @@ impl<C: CurveAffine> Constructed<C> {
         // pieces fold through the CPU `Mul<F>` / `Add` impls.
         let h_poly = match self.h_pieces {
             HPieces::Device(pieces) => {
-                // `get_n()` is the coeff length; avoid `empty_coeff().len()`,
-                // which allocs+zeroes a full n-elem host Vec (~256 MiB at k=23)
-                // only to read its length.
                 let n = domain.get_n() as usize;
                 // Zero the fold accumulator on-device (memset) instead of
                 // uploading a host zero-vec (~256 MiB alloc + pageable H2D at
@@ -274,8 +266,7 @@ impl<C: CurveAffine> Constructed<C> {
             .rev()
             .fold(Blind(C::Scalar::ZERO), |acc, eval| acc * Blind(xn) + *eval);
 
-        // random_poly is the constant `[ONE, 0, .., 0]` (zk disabled), so its
-        // evaluation at any point is exactly ONE — no device read-back needed.
+        // random_poly is the constant `[ONE, 0, .., 0]`, so its eval is ONE.
         let random_eval = C::Scalar::ONE;
         transcript.write_scalar(random_eval)?;
 

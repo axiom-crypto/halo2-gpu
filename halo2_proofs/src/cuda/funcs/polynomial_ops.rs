@@ -368,11 +368,9 @@ pub(crate) fn poly_multiply_add_device_with_d_scalar<F: Field>(
     Ok(())
 }
 
-/// Broadcast-fills `d_out[i] = *d_scalar` for all i. The fill value is a
-/// caller-owned single-element device buffer (uploaded once), so callers avoid
-/// staging a full length-sized host buffer + pageable H2D just to initialize a
-/// device buffer to a constant. Enqueued on `HALO2_GPU_CTX.stream`; returns
-/// before completion — same-stream subsequent kernel reads see the fill.
+/// Broadcast-fills `d_out[i] = *d_scalar` (a single-element device scalar) for
+/// all of `d_out`. Enqueued on `HALO2_GPU_CTX.stream`; returns before
+/// completion — same-stream reads see the fill.
 pub(crate) fn poly_fill_scalar_device<F: Field>(
     d_out: &mut DeviceBuffer<F>,
     d_scalar: &DeviceBuffer<F>,

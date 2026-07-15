@@ -115,9 +115,7 @@ namespace polynomial {
         }
     }
 
-    // Broadcast-fill: `d_out[i] = *d_scalar` for i in [0, length). The fill
-    // value is a device-resident scalar, so the caller uploads it once (one
-    // small H2D) instead of staging a full length-sized host buffer.
+    // Broadcast-fill: `d_out[i] = *d_scalar` for i in [0, length).
     __global__ static void poly_fill_scalar(
         scalar_t* d_out,
         const scalar_t* d_scalar,

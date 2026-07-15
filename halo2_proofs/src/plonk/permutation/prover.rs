@@ -115,19 +115,15 @@ impl Argument {
         let n = params.n() as usize;
         let scalar_bytes = std::mem::size_of::<C::Scalar>();
 
-        // Single device-resident ONE (one 32-byte H2D). The cross-set carry
-        // seed and each chunk's fresh accumulator are broadcast-filled from it
-        // on device, avoiding a length-n host `vec![ONE; n]` (~256 MiB at k=23)
-        // + its pageable H2D and the per-chunk 256 MiB device→device copy.
+        // Device-resident ONE; the carry seed and each chunk's accumulator are
+        // broadcast-filled from it on device.
         let d_one: DeviceBuffer<C::Scalar> = std::slice::from_ref(&C::Scalar::ONE)
             .to_device_on(&HALO2_GPU_CTX)
             .map_err(HaloGpuError::from)?;
         let acc_len = n - blinding_factors;
 
-        // Cross-set carry z_0. Each set's z[0] equals the previous set's
-        // z[acc_len-1]; kept device-resident (init to ONE via a 1-element D2D
-        // from `d_one`) so the per-set carry is a pure device→device copy —
-        // no D2H/H2D round-trip and no stream sync between sets.
+        // Cross-set carry z_0: each set's z[0] equals the previous set's
+        // z[acc_len-1]. Kept device-resident, initialized to ONE from `d_one`.
         let d_last_z = DeviceBuffer::<C::Scalar>::with_capacity_on(1, &HALO2_GPU_CTX);
         unsafe {
             cuda_memcpy_on::<true, true>(
@@ -152,9 +148,8 @@ impl Argument {
             // where p_j(X) is the jth column in this permutation,
             // and i is the ith row of the column.
 
-            // Fresh per-chunk accumulator: grand_product consumes the buffer by
-            // value, so each chunk needs its own allocation. ONE-init via a
-            // device broadcast-fill from `d_one` (no host buffer / D2D).
+            // Fresh per-chunk accumulator (grand_product consumes it by value),
+            // ONE-initialized on device from `d_one`.
             let mut d_modified_values =
                 DeviceBuffer::<C::Scalar>::with_capacity_on(n, &HALO2_GPU_CTX);
             poly_fill_scalar_device(&mut d_modified_values, &d_one)?;

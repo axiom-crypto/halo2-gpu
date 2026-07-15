@@ -282,8 +282,7 @@ extern "C" {
         stream: *mut libc::c_void,
     ) -> CudaStatus;
 
-    /// `d_out[i] = *d_scalar` for i in [0, length); device-resident scalar
-    /// broadcast-fill (caller uploads the fill value once, no host buffer).
+    /// `d_out[i] = *d_scalar` for i in [0, length); device-scalar broadcast-fill.
     pub fn _halo2_poly_fill_scalar(
         d_out: *mut libc::c_void,
         d_scalar: *const libc::c_void,

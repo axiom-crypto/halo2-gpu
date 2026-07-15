@@ -339,9 +339,7 @@ extern "C" RustError _halo2_poly_elementwise_multiply(
     return cudaSuccess;
 }
 
-// `d_out[i] = *d_scalar` for i in [0, length). Broadcast-fills a device buffer
-// from a device-resident scalar so the caller avoids staging a full
-// length-sized host buffer + H2D just to initialize to a constant.
+// `d_out[i] = *d_scalar` for i in [0, length); broadcast-fill from a device scalar.
 extern "C" RustError _halo2_poly_fill_scalar(
     void* d_out,
     const void* d_scalar,

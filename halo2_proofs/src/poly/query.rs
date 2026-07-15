@@ -16,10 +16,8 @@ pub trait Query<F>: Sized + Clone + Send + Sync {
     fn get_eval(&self) -> Self::Eval;
     fn get_commitment(&self) -> Self::Commitment;
 
-    /// Evaluate every query in `queries`, returning evals in the same order.
-    /// Default: per-query `get_eval`. Device-backed queries override this to run
-    /// one batched GPU eval (one kernel batch + one D2H + one sync) instead of N
-    /// per-query device evals that each fence the shared stream.
+    /// Evaluate every query, returning evals in query order. Default: per-query
+    /// `get_eval`; device backends may override to batch the evals.
     fn batch_get_evals(queries: &[Self]) -> Vec<Self::Eval> {
         queries.iter().map(|q| q.get_eval()).collect()
     }
@@ -113,12 +111,8 @@ impl<'com, C: CurveAffine> Query<C::Scalar> for ProverQuery<'com, C> {
         PolynomialPointer { poly: self.poly }
     }
 
-    /// Batch all device-resident polys into a single `batch_eval_polynomial_d2h`
-    /// (one kernel batch, one D2H, one stream sync) instead of a per-query
-    /// `eval_polynomial_device` that blocks the shared stream each call; any
-    /// host-resident polys fall back to the per-query CPU eval. Bit-identical to
-    /// per-query `get_eval` (same underlying Horner kernels/CPU path); only the
-    /// fence/scratch sharing differs.
+    /// Device-resident polys are evaluated in one batched pass; host polys use
+    /// the per-query CPU eval. Results are in query order.
     fn batch_get_evals(queries: &[Self]) -> Vec<Self::Eval> {
         let mut evals = vec![C::Scalar::default(); queries.len()];
         let mut d_polys = Vec::new();

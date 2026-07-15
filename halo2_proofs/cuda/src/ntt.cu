@@ -249,10 +249,9 @@ RustError run_fft(
             auto threads = std::min(length, 1024);
             auto blocks = (length + threads - 1) / threads;
 
-            // Out-of-place device input (out != in): fuse the coset twist and
-            // bit-reversal into one scatter pass, folding away the input copy
-            // and the standalone revbin. Otherwise fall back to the in-place
-            // copy + twist + revbin (host input, or an aliased in==out buffer).
+            // Out-of-place device input (out != in): one scatter pass does the
+            // coset twist + bit-reversal. Aliased/host input takes the in-place
+            // copy + twist + revbin path.
             if (input_on_device && needs_input_copy) {
                 zkpcuda::omega::mult_power_of_omega_revbin<<<blocks, threads, 0, stream>>>(
                     (scalar_t*)d_data, (const scalar_t*)input, (scalar_t*)d_omega_lut, length, (uint32_t)log_n);
@@ -330,10 +329,9 @@ RustError run_fft_many(
             auto threads = std::min(length, 1024);
             auto blocks = (length + threads - 1) / threads;
 
-            // Out-of-place device input (out != in): fuse the coset twist and
-            // bit-reversal into one scatter pass, folding away the input copy
-            // and the standalone revbin. Otherwise fall back to the in-place
-            // copy + twist + revbin (host input, or an aliased in==out buffer).
+            // Out-of-place device input (out != in): one scatter pass does the
+            // coset twist + bit-reversal. Aliased/host input takes the in-place
+            // copy + twist + revbin path.
             bool fuse_revbin = input_on_device && (input != d_data);
             if (!fuse_revbin)
                 CUDA_OK(cudaMemcpyAsync(d_data, input, Scalar::ELT_BYTES << log_n, input_kind, stream));

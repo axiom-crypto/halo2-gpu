@@ -56,11 +56,8 @@ where
 {
     let queries = queries.into_iter().collect::<Vec<_>>();
 
-    // Evaluate every query once, up front, in a single batch. For device-backed
-    // queries this collapses N per-lookup `eval_polynomial_device` calls (each
-    // fencing the shared stream) into one batched GPU eval; it also dedupes the
-    // repeated re-evaluation the old per-lookup `get_eval` did when a commitment
-    // opened at multiple rotations. The closure then just indexes the result.
+    // Evaluate all queries once up front (batched for device polys); the lookup
+    // closure below then just indexes the result.
     let batched_evals = Q::batch_get_evals(&queries);
 
     // Find evaluation of a commitment at a rotation
