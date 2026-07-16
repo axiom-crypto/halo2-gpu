@@ -248,6 +248,11 @@ RustError run_fft(
             auto length = 1 << log_n;
             auto threads = std::min(length, 1024);
             auto blocks = (length + threads - 1) / threads;
+            // Cap the grid so each thread strides over several elements,
+            // amortizing the O(log n) per-element omega-power setup in the
+            // twist kernels below. Bit-identical (grid-stride power recurrence
+            // is invariant to block count); 1024 still saturates the device.
+            blocks = std::min<decltype(blocks)>(blocks, 1024);
 
             // Out-of-place device input (out != in): one scatter pass does the
             // coset twist + bit-reversal. Aliased/host input takes the in-place
@@ -328,6 +333,9 @@ RustError run_fft_many(
             auto length = 1 << log_n;
             auto threads = std::min(length, 1024);
             auto blocks = (length + threads - 1) / threads;
+            // See the note above: cap the grid to amortize the twist omega-power
+            // setup (bit-identical via the grid-stride recurrence).
+            blocks = std::min<decltype(blocks)>(blocks, 1024);
 
             // Out-of-place device input (out != in): one scatter pass does the
             // coset twist + bit-reversal. Aliased/host input takes the in-place

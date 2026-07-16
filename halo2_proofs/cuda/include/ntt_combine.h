@@ -93,7 +93,9 @@ uint32_t combine_size_2 = 0;
         combine_size_2 = 2;
         break;
     case 23:
-        batch_size = 6;
+        // 8 runs the 23 levels in 3 DIT passes instead of 4; wider tiles
+        // regress on occupancy. GPU-specific (see header note).
+        batch_size = 8;
         combine_size_1 = 0;
         combine_size_2 = 1;
         break;
