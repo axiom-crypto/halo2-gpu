@@ -112,22 +112,18 @@ impl<'com, C: CurveAffine> Query<C::Scalar> for ProverQuery<'com, C> {
     }
 
     /// Device-resident polys are evaluated in one batched pass; host polys use
-    /// the per-query CPU eval. Results are in query order.
+    /// the per-query CPU eval, run in parallel. Results are in query order.
     fn batch_get_evals(queries: &[Self]) -> Vec<Self::Eval> {
+        use rayon::prelude::*;
         let mut evals = vec![C::Scalar::default(); queries.len()];
         let mut d_polys = Vec::new();
         let mut d_points = Vec::new();
         let mut d_slots = Vec::new();
         for (i, q) in queries.iter().enumerate() {
-            match q.poly {
-                PolyRef::Device(p) => {
-                    d_polys.push(p.device_buf());
-                    d_points.push(q.point);
-                    d_slots.push(i);
-                }
-                PolyRef::Host(p) => {
-                    evals[i] = eval_polynomial(p.values(), q.point);
-                }
+            if let PolyRef::Device(p) = q.poly {
+                d_polys.push(p.device_buf());
+                d_points.push(q.point);
+                d_slots.push(i);
             }
         }
         if !d_polys.is_empty() {
@@ -137,6 +133,22 @@ impl<'com, C: CurveAffine> Query<C::Scalar> for ProverQuery<'com, C> {
             for (k, &slot) in d_slots.iter().enumerate() {
                 evals[slot] = d_evals[k];
             }
+        }
+        // Host-resident polys (VRAM fallback): the O(n) Horner evals are
+        // independent, so run them on the rayon pool instead of serially.
+        let host_evals: Vec<(usize, C::Scalar)> = queries
+            .iter()
+            .enumerate()
+            .filter_map(|(i, q)| match q.poly {
+                PolyRef::Host(p) => Some((i, p.values(), q.point)),
+                PolyRef::Device(_) => None,
+            })
+            .collect::<Vec<_>>()
+            .into_par_iter()
+            .map(|(i, values, point)| (i, eval_polynomial(values, point)))
+            .collect();
+        for (i, e) in host_evals {
+            evals[i] = e;
         }
         evals
     }
