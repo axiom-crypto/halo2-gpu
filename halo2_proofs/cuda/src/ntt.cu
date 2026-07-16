@@ -250,8 +250,8 @@ RustError run_fft(
             auto blocks = (length + threads - 1) / threads;
             // Cap the grid so each thread strides over several elements,
             // amortizing the O(log n) per-element omega-power setup in the
-            // twist kernels below. Bit-identical (grid-stride power recurrence
-            // is invariant to block count); 1024 still saturates the device.
+            // twist kernels below. The result is independent of block count
+            // (grid-stride power recurrence); 1024 still saturates the device.
             blocks = std::min<decltype(blocks)>(blocks, 1024);
 
             // Out-of-place device input (out != in): one scatter pass does the
@@ -334,7 +334,7 @@ RustError run_fft_many(
             auto threads = std::min(length, 1024);
             auto blocks = (length + threads - 1) / threads;
             // See the note above: cap the grid to amortize the twist omega-power
-            // setup (bit-identical via the grid-stride recurrence).
+            // setup (result independent of block count via the grid-stride recurrence).
             blocks = std::min<decltype(blocks)>(blocks, 1024);
 
             // Out-of-place device input (out != in): one scatter pass does the

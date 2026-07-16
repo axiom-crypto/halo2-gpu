@@ -339,19 +339,17 @@ extern "C" RustError _halo2_poly_elementwise_multiply(
     return cudaSuccess;
 }
 
-// `d_out[i] = *d_scalar` for i in [0, length); broadcast-fill from a device scalar.
-extern "C" RustError _halo2_poly_fill_scalar(
+// `d_out[i] = 1` for i in [0, length); broadcast-fill ONE on device (no scalar H2D).
+extern "C" RustError _halo2_poly_fill_one(
     void* d_out,
-    const void* d_scalar,
     uint64_t length,
     cudaStream_t stream)
 {
     try {
         const uint32_t block_num = 512;
         const uint32_t tile_size = 256;
-        zkpcuda::polynomial::poly_fill_scalar<<<block_num, tile_size, 0, stream>>>(
+        zkpcuda::polynomial::poly_fill_one<<<block_num, tile_size, 0, stream>>>(
             (scalar_t*)d_out,
-            (const scalar_t*)d_scalar,
             length);
     } catch (const cuda_error& error) {
         return RustError(error.code(), error.what());

@@ -5,16 +5,16 @@ use std::time::Instant;
 use ff::{Field, WithSmallOrderMulGroup};
 use group::Curve;
 
-use openvm_cuda_common::copy::{cuda_memcpy_on, MemCopyH2D};
+use openvm_cuda_common::copy::MemCopyH2D;
 use openvm_cuda_common::d_buffer::DeviceBuffer;
 use rand_core::RngCore;
 
 use super::Argument;
 use crate::cuda::funcs::{
-    poly_multiply_add_device_with_d_scalar, poly_scale_device_with_d_s_minus_one,
+    poly_fill_one_device, poly_multiply_add_device_with_d_scalar,
+    poly_scale_device_with_d_s_minus_one,
 };
 use crate::cuda::utils::HALO2_GPU_CTX;
-use crate::cuda::HaloGpuError;
 use crate::{
     arithmetic::CurveAffine,
     plonk::{ChallengeX, GpuError},
@@ -79,23 +79,12 @@ impl<C: CurveAffine> Argument<C> {
     ) -> Result<Committed<C>, GpuError> {
         crate::perf_section!("vanishing.commit");
         // zk is disabled (see below), so this commits to the constant poly
-        // `[ONE, 0, .., 0]`: zero the n coeffs on device, then set coeff[0] = ONE.
+        // `[ONE, 0, .., 0]`: fill ONE on device, then zero coeffs 1..n.
         let n = domain.get_n() as usize;
-        let d_random_poly: DeviceBuffer<C::Scalar> =
+        let mut d_random_poly: DeviceBuffer<C::Scalar> =
             DeviceBuffer::with_capacity_on(n, &HALO2_GPU_CTX);
-        d_random_poly.fill_zero_on(&HALO2_GPU_CTX)?;
-        let d_one: DeviceBuffer<C::Scalar> = std::slice::from_ref(&C::Scalar::ONE)
-            .to_device_on(&HALO2_GPU_CTX)
-            .expect("H2D of ONE failed in vanishing::commit");
-        unsafe {
-            cuda_memcpy_on::<true, true>(
-                d_random_poly.as_mut_raw_ptr(),
-                d_one.as_raw_ptr(),
-                std::mem::size_of::<C::Scalar>(),
-                &HALO2_GPU_CTX,
-            )
-            .map_err(HaloGpuError::from)?;
-        }
+        poly_fill_one_device(&mut d_random_poly)?;
+        d_random_poly.fill_zero_suffix_on(1, &HALO2_GPU_CTX)?;
         let random_poly = Polynomial::<C::Scalar, Coeff, Device>::from_device(d_random_poly);
         /*
         for coeff in random_poly.iter_mut() {
@@ -266,7 +255,9 @@ impl<C: CurveAffine> Constructed<C> {
             .rev()
             .fold(Blind(C::Scalar::ZERO), |acc, eval| acc * Blind(xn) + *eval);
 
-        // random_poly is the constant `[ONE, 0, .., 0]`, so its eval is ONE.
+        // random_poly is the constant `[ONE, 0, .., 0]` (zk disabled), so its
+        // eval is ONE at any point. TODO(zk): when zk is enabled, random_poly is
+        // sampled and this must become eval_polynomial(&random_poly, x).
         let random_eval = C::Scalar::ONE;
         transcript.write_scalar(random_eval)?;
 

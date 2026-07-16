@@ -15,7 +15,7 @@ use crate::{
     arithmetic::CurveAffine,
     cuda::funcs::{
         batch_eval_polynomial_d2h, grand_product_device_with_prefix_device,
-        permutation_product_device, poly_fill_scalar_device,
+        permutation_product_device, poly_fill_one_device,
     },
     cuda::utils::{FFITraitObject, HALO2_GPU_CTX},
     cuda::HaloGpuError,
@@ -115,25 +115,13 @@ impl Argument {
         let n = params.n() as usize;
         let scalar_bytes = std::mem::size_of::<C::Scalar>();
 
-        // Device-resident ONE; the carry seed and each chunk's accumulator are
-        // broadcast-filled from it on device.
-        let d_one: DeviceBuffer<C::Scalar> = std::slice::from_ref(&C::Scalar::ONE)
-            .to_device_on(&HALO2_GPU_CTX)
-            .map_err(HaloGpuError::from)?;
         let acc_len = n - blinding_factors;
 
         // Cross-set carry z_0: each set's z[0] equals the previous set's
-        // z[acc_len-1]. Kept device-resident, initialized to ONE from `d_one`.
-        let d_last_z = DeviceBuffer::<C::Scalar>::with_capacity_on(1, &HALO2_GPU_CTX);
-        unsafe {
-            cuda_memcpy_on::<true, true>(
-                d_last_z.as_mut_raw_ptr(),
-                d_one.as_raw_ptr(),
-                scalar_bytes,
-                &HALO2_GPU_CTX,
-            )
+        // z[acc_len-1]. Device-resident, initialized to ONE.
+        let d_last_z = std::slice::from_ref(&C::Scalar::ONE)
+            .to_device_on(&HALO2_GPU_CTX)
             .map_err(HaloGpuError::from)?;
-        }
 
         for (columns, permutations_chunk) in self
             .columns
@@ -149,10 +137,10 @@ impl Argument {
             // and i is the ith row of the column.
 
             // Fresh per-chunk accumulator (grand_product consumes it by value),
-            // ONE-initialized on device from `d_one`.
+            // ONE-initialized on device.
             let mut d_modified_values =
                 DeviceBuffer::<C::Scalar>::with_capacity_on(n, &HALO2_GPU_CTX);
-            poly_fill_scalar_device(&mut d_modified_values, &d_one)?;
+            poly_fill_one_device(&mut d_modified_values)?;
 
             {
                 #[cfg(feature = "profile")]

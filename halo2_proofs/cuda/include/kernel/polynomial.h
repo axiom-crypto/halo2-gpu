@@ -116,14 +116,13 @@ namespace polynomial {
     }
 
     // Broadcast-fill: `d_out[i] = *d_scalar` for i in [0, length).
-    __global__ static void poly_fill_scalar(
+    __global__ static void poly_fill_one(
         scalar_t* d_out,
-        const scalar_t* d_scalar,
         const uint64_t length)
     {
         const uint64_t stride = (uint64_t)gridDim.x * (uint64_t)blockDim.x;
         const uint64_t start = (uint64_t)blockIdx.x * (uint64_t)blockDim.x + (uint64_t)threadIdx.x;
-        const scalar_t v = *d_scalar;
+        const scalar_t v = scalar_t::one();
         for (uint64_t idx = start; idx < length; idx += stride) {
             d_out[idx] = v;
         }
