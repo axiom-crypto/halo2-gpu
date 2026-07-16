@@ -93,9 +93,8 @@ uint32_t combine_size_2 = 0;
         combine_size_2 = 2;
         break;
     case 23:
-        // Reprofiled for sm_120 (RTX 5090): batch_size 8 does the 23 levels in
-        // 3 global passes vs 4, cutting ntt_dit ~16%. Larger widths regress on
-        // occupancy here; confirm on other GPUs (see header note).
+        // 8 runs the 23 levels in 3 DIT passes instead of 4; wider tiles
+        // regress on occupancy. GPU-specific (see header note).
         batch_size = 8;
         combine_size_1 = 0;
         combine_size_2 = 1;

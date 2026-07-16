@@ -248,11 +248,10 @@ RustError run_fft(
             auto length = 1 << log_n;
             auto threads = std::min(length, 1024);
             auto blocks = (length + threads - 1) / threads;
-            // Cap the grid so each thread strides over several elements: this
-            // amortizes the O(log n) per-element omega-power setup in the twist
-            // kernels below (the grid-stride power recurrence keeps the result
-            // bit-identical). 1024 blocks still saturates the device; profiled
-            // on sm_120 (see ntt_combine.h note on GPU-specific tuning).
+            // Cap the grid so each thread strides over several elements,
+            // amortizing the O(log n) per-element omega-power setup in the
+            // twist kernels below. Bit-identical (grid-stride power recurrence
+            // is invariant to block count); 1024 still saturates the device.
             blocks = std::min<decltype(blocks)>(blocks, 1024);
 
             // Out-of-place device input (out != in): one scatter pass does the
