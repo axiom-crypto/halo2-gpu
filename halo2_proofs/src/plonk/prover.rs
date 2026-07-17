@@ -138,80 +138,71 @@ where
          through create_proof_raw"
     );
 
-    let advice = std::thread::scope(|s| -> Result<Vec<DeviceBuffer<Scheme::Scalar>>, GpuError> {
-        // Warm the witness-independent device mirrors (comm stream) while the
-        // CPU runs `synthesize`. Nothing in this scope consumes the mirrors;
-        // each mirror's `CommWrapper` fences the comm-stream uploads on its
-        // first deref, so consumers in `create_proof_raw_with_pk` are safe.
-        let gpu_pk = &gpu_pk;
-        s.spawn(move || warm_pk_device_caches(params, gpu_pk));
+    let mut column_indices = [(); 3].map(|_| vec![]);
+    for (index, phase) in meta.advice_column_phase.iter().enumerate() {
+        column_indices[phase.to_u8() as usize].push(index);
+    }
+    let mut challenge_indices = [(); 3].map(|_| vec![]);
+    for (index, phase) in meta.challenge_phase.iter().enumerate() {
+        challenge_indices[phase.to_u8() as usize].push(index);
+    }
 
-        let mut column_indices = [(); 3].map(|_| vec![]);
-        for (index, phase) in meta.advice_column_phase.iter().enumerate() {
-            column_indices[phase.to_u8() as usize].push(index);
-        }
-        let mut challenge_indices = [(); 3].map(|_| vec![]);
-        for (index, phase) in meta.challenge_phase.iter().enumerate() {
-            challenge_indices[phase.to_u8() as usize].push(index);
-        }
+    let mut challenges = HashMap::<usize, Scheme::Scalar>::with_capacity(meta.num_challenges);
+    let params_n = params.n() as usize;
+    let unusable_rows_start = params_n - (meta.blinding_factors() + 1);
 
-        let mut challenges = HashMap::<usize, Scheme::Scalar>::with_capacity(meta.num_challenges);
-        let params_n = params.n() as usize;
-        let unusable_rows_start = params_n - (meta.blinding_factors() + 1);
+    // Layout guard for the `GpuAssigned` → `Assigned` reinterpret in `assign_advice`.
+    crate::plonk::assert_canonical_assigned_matches_gpu_layout::<Scheme::Scalar>();
 
-        // Layout guard for the `GpuAssigned` → `Assigned` reinterpret in `assign_advice`.
-        crate::plonk::assert_canonical_assigned_matches_gpu_layout::<Scheme::Scalar>();
+    let witness_alloc = info_span!("alloc_witness_collection").entered();
+    let mut witness: WitnessCollection<Scheme, P, _, E, _, _> = WitnessCollection {
+        params,
+        params_n,
+        domain,
+        current_phase: phases[0],
+        num_instance_columns: num_instance,
+        num_advice_columns: meta.num_advice_columns,
+        advice: vec![GpuAssigned::Zero; params_n * meta.num_advice_columns],
+        instances: instances[0],
+        challenges: &mut challenges,
+        usable_rows: ..unusable_rows_start,
+        advice_single: AdviceSingleOption::<Scheme::Curve> {
+            advice_values: (0..meta.num_advice_columns).map(|_| None).collect(),
+            advice_polys: (0..meta.num_advice_columns).map(|_| None).collect(),
+        },
+        instance_single: InstanceSingle::<Scheme::Curve>::default(),
+        rng: &mut rng,
+        transcript: &mut transcript,
+        column_indices,
+        challenge_indices,
+        unusable_rows_start,
+        _marker: PhantomData,
+    };
+    witness_alloc.exit();
 
-        let witness_alloc = info_span!("alloc_witness_collection").entered();
-        let mut witness: WitnessCollection<Scheme, P, _, E, _, _> = WitnessCollection {
-            params,
-            params_n,
-            domain,
-            current_phase: phases[0],
-            num_instance_columns: num_instance,
-            num_advice_columns: meta.num_advice_columns,
-            advice: vec![GpuAssigned::Zero; params_n * meta.num_advice_columns],
-            instances: instances[0],
-            challenges: &mut challenges,
-            usable_rows: ..unusable_rows_start,
-            advice_single: AdviceSingleOption::<Scheme::Curve> {
-                advice_values: (0..meta.num_advice_columns).map(|_| None).collect(),
-                advice_polys: (0..meta.num_advice_columns).map(|_| None).collect(),
-            },
-            instance_single: InstanceSingle::<Scheme::Curve>::default(),
-            rng: &mut rng,
-            transcript: &mut transcript,
-            column_indices,
-            challenge_indices,
-            unusable_rows_start,
-            _marker: PhantomData,
-        };
-        witness_alloc.exit();
+    let witness_assign_span = info_span!("halo2_section", phase = "synthesize").entered();
+    ConcreteCircuit::FloorPlanner::synthesize(&mut witness, &circuits[0], config, constants)
+        .expect("synthesize failed");
+    witness_assign_span.exit();
 
-        let witness_assign_span = info_span!("halo2_section", phase = "synthesize").entered();
-        ConcreteCircuit::FloorPlanner::synthesize(&mut witness, &circuits[0], config, constants)
-            .expect("synthesize failed");
-        witness_assign_span.exit();
+    // Blinding rows stay `Zero` here; `convert_raw_advice` draws blinders from
+    // `rng` on device in the legacy column-major order — proof bytes unchanged.
+    let batch_invert_span =
+        info_span!("halo2_section", phase = "batch invert witness assignment").entered();
+    let advice = batch_invert_assigned_device(
+        (0..meta.num_advice_columns)
+            .map(|column_index| {
+                &witness.advice[column_index * params_n..(column_index + 1) * params_n]
+            })
+            .collect::<Vec<&[GpuAssigned<Scheme::Scalar>]>>(),
+    )
+    .map_err(GpuError::HaloGpu)?;
+    batch_invert_span.exit();
 
-        // Blinding rows stay `Zero` here; `convert_raw_advice` draws blinders from
-        // `rng` on device in the legacy column-major order — proof bytes unchanged.
-        let batch_invert_span =
-            info_span!("halo2_section", phase = "batch invert witness assignment").entered();
-        let advice = batch_invert_assigned_device(
-            (0..meta.num_advice_columns)
-                .map(|column_index| {
-                    &witness.advice[column_index * params_n..(column_index + 1) * params_n]
-                })
-                .collect::<Vec<&[GpuAssigned<Scheme::Scalar>]>>(),
-        )
-        .map_err(GpuError::HaloGpu)?;
-        batch_invert_span.exit();
-
-        Ok(advice
-            .into_iter()
-            .map(DevicePolyExt::into_device_buf)
-            .collect())
-    })?;
+    let advice = advice
+        .into_iter()
+        .map(DevicePolyExt::into_device_buf)
+        .collect();
 
     create_proof_raw_with_pk::<Scheme, P, E, R, T>(
         params,

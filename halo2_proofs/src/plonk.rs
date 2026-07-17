@@ -132,7 +132,8 @@ pub struct GpuProvingKey<'a, C: CurveAffine> {
     /// regenerated on first use (matches `ParamsKZG`'s `OnceCell` contract).
     /// Uploads run on `HALO2_COMM_STREAM`; the `CommWrapper` fences consumers
     /// (first deref syncs the comm stream).
-    fixed_polys_device: OnceCell<CommWrapper<Vec<Polynomial<C::Scalar, Coeff, crate::poly::Device>>>>,
+    fixed_polys_device:
+        OnceCell<CommWrapper<Vec<Polynomial<C::Scalar, Coeff, crate::poly::Device>>>>,
     fixed_values_device:
         OnceCell<CommWrapper<Vec<Polynomial<C::Scalar, LagrangeCoeff, crate::poly::Device>>>>,
     permutation_polys_device:
@@ -350,7 +351,8 @@ impl<'a, C: CurveAffine> GpuProvingKey<'a, C> {
     pub(crate) fn permutation_polys_device(
         &self,
     ) -> Option<&[Polynomial<C::Scalar, Coeff, crate::poly::Device>]> {
-        self.permutation_polys_device_wrapper().map(|w| w.as_slice())
+        self.permutation_polys_device_wrapper()
+            .map(|w| w.as_slice())
     }
 
     fn permutation_polys_device_wrapper(
@@ -399,7 +401,11 @@ impl<'a, C: CurveAffine> GpuProvingKey<'a, C> {
         if let Some(v) = self.l0_device.get() {
             return Some(v);
         }
-        try_init_pk_device_mirror_one::<C, Coeff>(self.inner.l0(), "pk.l0_device.init", &self.l0_device)
+        try_init_pk_device_mirror_one::<C, Coeff>(
+            self.inner.l0(),
+            "pk.l0_device.init",
+            &self.l0_device,
+        )
     }
 
     /// Lazy device mirror of `inner.l_last()`. Same contract as `l0_device`.
