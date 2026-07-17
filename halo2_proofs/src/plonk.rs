@@ -102,6 +102,10 @@ where
     }
 }
 
+/// Comm-stream-fenced device mirror of a set of pk polynomials (see
+/// [`CommWrapper`]): first deref syncs `HALO2_COMM_STREAM`.
+type DevicePolys<F, B> = CommWrapper<Vec<Polynomial<F, B, crate::poly::Device>>>;
+
 /// GPU-side proving key. Wraps the canonical [`ProvingKey`] (`inner`) plus the
 /// GPU-crate composing forks (`cs`/`domain`/`ev`) rebuilt from it and the lazy
 /// device mirrors of the pk polynomials.
@@ -132,18 +136,14 @@ pub struct GpuProvingKey<'a, C: CurveAffine> {
     /// regenerated on first use (matches `ParamsKZG`'s `OnceCell` contract).
     /// Uploads run on `HALO2_COMM_STREAM`; the `CommWrapper` fences consumers
     /// (first deref syncs the comm stream).
-    fixed_polys_device:
-        OnceCell<CommWrapper<Vec<Polynomial<C::Scalar, Coeff, crate::poly::Device>>>>,
-    fixed_values_device:
-        OnceCell<CommWrapper<Vec<Polynomial<C::Scalar, LagrangeCoeff, crate::poly::Device>>>>,
-    permutation_polys_device:
-        OnceCell<CommWrapper<Vec<Polynomial<C::Scalar, Coeff, crate::poly::Device>>>>,
+    fixed_polys_device: OnceCell<DevicePolys<C::Scalar, Coeff>>,
+    fixed_values_device: OnceCell<DevicePolys<C::Scalar, LagrangeCoeff>>,
+    permutation_polys_device: OnceCell<DevicePolys<C::Scalar, Coeff>>,
     l0_device: OnceCell<CommWrapper<Polynomial<C::Scalar, Coeff, crate::poly::Device>>>,
     l_last_device: OnceCell<CommWrapper<Polynomial<C::Scalar, Coeff, crate::poly::Device>>>,
     l_active_row_device: OnceCell<CommWrapper<Polynomial<C::Scalar, Coeff, crate::poly::Device>>>,
     /// Lagrange σ-columns, distinct from `permutation_polys_device` (Coeff form).
-    permutation_lagrange_device:
-        OnceCell<CommWrapper<Vec<Polynomial<C::Scalar, LagrangeCoeff, crate::poly::Device>>>>,
+    permutation_lagrange_device: OnceCell<DevicePolys<C::Scalar, LagrangeCoeff>>,
 }
 
 impl<'a, C: CurveAffine> Clone for GpuProvingKey<'a, C> {
@@ -313,9 +313,7 @@ impl<'a, C: CurveAffine> GpuProvingKey<'a, C> {
         self.fixed_polys_device_wrapper().map(|w| w.as_slice())
     }
 
-    fn fixed_polys_device_wrapper(
-        &self,
-    ) -> Option<&CommWrapper<Vec<Polynomial<C::Scalar, Coeff, crate::poly::Device>>>> {
+    fn fixed_polys_device_wrapper(&self) -> Option<&DevicePolys<C::Scalar, Coeff>> {
         if let Some(v) = self.fixed_polys_device.get() {
             return Some(v);
         }
@@ -334,9 +332,7 @@ impl<'a, C: CurveAffine> GpuProvingKey<'a, C> {
         self.fixed_values_device_wrapper().map(|w| w.as_slice())
     }
 
-    fn fixed_values_device_wrapper(
-        &self,
-    ) -> Option<&CommWrapper<Vec<Polynomial<C::Scalar, LagrangeCoeff, crate::poly::Device>>>> {
+    fn fixed_values_device_wrapper(&self) -> Option<&DevicePolys<C::Scalar, LagrangeCoeff>> {
         if let Some(v) = self.fixed_values_device.get() {
             return Some(v);
         }
@@ -355,9 +351,7 @@ impl<'a, C: CurveAffine> GpuProvingKey<'a, C> {
             .map(|w| w.as_slice())
     }
 
-    fn permutation_polys_device_wrapper(
-        &self,
-    ) -> Option<&CommWrapper<Vec<Polynomial<C::Scalar, Coeff, crate::poly::Device>>>> {
+    fn permutation_polys_device_wrapper(&self) -> Option<&DevicePolys<C::Scalar, Coeff>> {
         if let Some(v) = self.permutation_polys_device.get() {
             return Some(v);
         }
@@ -379,7 +373,7 @@ impl<'a, C: CurveAffine> GpuProvingKey<'a, C> {
 
     fn permutation_lagrange_device_wrapper(
         &self,
-    ) -> Option<&CommWrapper<Vec<Polynomial<C::Scalar, LagrangeCoeff, crate::poly::Device>>>> {
+    ) -> Option<&DevicePolys<C::Scalar, LagrangeCoeff>> {
         if let Some(v) = self.permutation_lagrange_device.get() {
             return Some(v);
         }
@@ -480,8 +474,8 @@ where
 fn try_init_pk_device_mirror<'pk, C: CurveAffine, B>(
     host: &[Polynomial<C::Scalar, B, crate::poly::Host>],
     perf_tag: &'static str,
-    cell: &'pk OnceCell<CommWrapper<Vec<Polynomial<C::Scalar, B, crate::poly::Device>>>>,
-) -> Option<&'pk CommWrapper<Vec<Polynomial<C::Scalar, B, crate::poly::Device>>>>
+    cell: &'pk OnceCell<DevicePolys<C::Scalar, B>>,
+) -> Option<&'pk DevicePolys<C::Scalar, B>>
 where
     B: 'static,
 {
