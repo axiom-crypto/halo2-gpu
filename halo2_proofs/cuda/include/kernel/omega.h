@@ -1,5 +1,6 @@
 #pragma once
 
+#include "common.h" // zkpcuda::common::index_revbin
 #include "common/scratch_span.h"
 #include "field/alt_bn128.hpp"
 #include <cuda.h>
@@ -192,6 +193,32 @@ namespace omega {
             if (idx >= length)
                 break;
             d_data[idx] *= power;
+            power *= power_stride;
+        }
+    }
+
+    // CosetFFT_Part pre-DIT stage: `out[revbin(idx, log_n)] = in[idx] * omega^idx`.
+    // `out` must be a distinct buffer from `in`; the bit-reversed scatter-write
+    // would otherwise clobber not-yet-read inputs.
+    __global__ void mult_power_of_omega_revbin(
+        scalar_t* out,
+        const scalar_t* in,
+        scalar_t* d_omega_lut,
+        uint32_t length,
+        uint32_t log_n)
+    {
+        const uint32_t tile_size = blockDim.x;
+        const uint64_t stride = gridDim.x * tile_size;
+        const uint64_t offset = blockIdx.x * blockDim.x + threadIdx.x;
+        if (offset >= length)
+            return;
+
+        scalar_t power = func_compute_power_of_omega(d_omega_lut, offset);
+        scalar_t power_stride = func_compute_power_of_omega(d_omega_lut, stride);
+
+        for (uint64_t idx = offset; idx < length; idx += stride) {
+            const uint32_t rev = zkpcuda::common::index_revbin(log_n, (uint32_t)idx);
+            out[rev] = in[idx] * power;
             power *= power_stride;
         }
     }

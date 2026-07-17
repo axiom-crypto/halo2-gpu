@@ -56,13 +56,17 @@ where
 {
     let queries = queries.into_iter().collect::<Vec<_>>();
 
+    // Evaluate all queries once up front (batched for device polys); the lookup
+    // closure below then just indexes the result.
+    let batched_evals = Q::batch_get_evals(&queries);
+
     // Find evaluation of a commitment at a rotation
     let get_eval = |commitment: Q::Commitment, rotation: F| -> F {
-        queries
+        let idx = queries
             .iter()
-            .find(|query| query.get_commitment() == commitment && query.get_point() == rotation)
-            .unwrap()
-            .get_eval()
+            .position(|query| query.get_commitment() == commitment && query.get_point() == rotation)
+            .unwrap();
+        batched_evals[idx]
     };
 
     // All points that appear in queries

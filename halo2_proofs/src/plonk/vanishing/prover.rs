@@ -11,11 +11,12 @@ use rand_core::RngCore;
 
 use super::Argument;
 use crate::cuda::funcs::{
-    poly_multiply_add_device_with_d_scalar, poly_scale_device_with_d_s_minus_one,
+    poly_fill_one_device, poly_multiply_add_device_with_d_scalar,
+    poly_scale_device_with_d_s_minus_one,
 };
 use crate::cuda::utils::HALO2_GPU_CTX;
 use crate::{
-    arithmetic::{eval_polynomial, CurveAffine},
+    arithmetic::CurveAffine,
     plonk::{ChallengeX, GpuError},
     poly::{
         commitment::{Blind, ParamsProver},
@@ -26,7 +27,7 @@ use crate::{
 };
 
 pub(in crate::plonk) struct Committed<C: CurveAffine> {
-    random_poly: Polynomial<C::Scalar, Coeff>,
+    random_poly: Polynomial<C::Scalar, Coeff, Device>,
 }
 
 /// Quotient pieces produced by `Constructed::construct`. Each variant is a
@@ -77,9 +78,14 @@ impl<C: CurveAffine> Argument<C> {
         transcript: &mut T,
     ) -> Result<Committed<C>, GpuError> {
         crate::perf_section!("vanishing.commit");
-        // Sample a random polynomial of degree n - 1
-        let mut random_poly = domain.empty_coeff();
-        random_poly[0] = C::Scalar::ONE;
+        // zk is disabled (see below), so this commits to the constant poly
+        // `[ONE, 0, .., 0]`: fill ONE on device, then zero coeffs 1..n.
+        let n = domain.get_n() as usize;
+        let mut d_random_poly: DeviceBuffer<C::Scalar> =
+            DeviceBuffer::with_capacity_on(n, &HALO2_GPU_CTX);
+        poly_fill_one_device(&mut d_random_poly)?;
+        d_random_poly.fill_zero_suffix_on(1, &HALO2_GPU_CTX)?;
+        let random_poly = Polynomial::<C::Scalar, Coeff, Device>::from_device(d_random_poly);
         /*
         for coeff in random_poly.iter_mut() {
             *coeff = C::Scalar::random(&mut rng);
@@ -189,7 +195,8 @@ impl<C: CurveAffine> Committed<C> {
 impl<C: CurveAffine> Constructed<C> {
     pub(in crate::plonk) fn evaluate<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
         self,
-        x: ChallengeX<C>,
+        // Unused: random_poly is constant, so its evaluation ignores the point.
+        _x: ChallengeX<C>,
         xn: C::Scalar,
         domain: &EvaluationDomain<'_, C::Scalar>,
         transcript: &mut T,
@@ -200,7 +207,7 @@ impl<C: CurveAffine> Constructed<C> {
         // pieces fold through the CPU `Mul<F>` / `Add` impls.
         let h_poly = match self.h_pieces {
             HPieces::Device(pieces) => {
-                let n = domain.empty_coeff().len();
+                let n = domain.get_n() as usize;
                 // Zero the fold accumulator on-device (memset) instead of
                 // uploading a host zero-vec (~256 MiB alloc + pageable H2D at
                 // k=23). Byte-identical on BN254: all-bits-zero == `Fr::ZERO`,
@@ -248,7 +255,10 @@ impl<C: CurveAffine> Constructed<C> {
             .rev()
             .fold(Blind(C::Scalar::ZERO), |acc, eval| acc * Blind(xn) + *eval);
 
-        let random_eval = eval_polynomial(&self.committed.random_poly, *x);
+        // random_poly is the constant `[ONE, 0, .., 0]` (zk disabled), so its
+        // eval is ONE at any point. TODO(zk): when zk is enabled, random_poly is
+        // sampled and this must become eval_polynomial(&random_poly, x).
+        let random_eval = C::Scalar::ONE;
         transcript.write_scalar(random_eval)?;
 
         Ok(Evaluated {
@@ -275,7 +285,7 @@ impl<C: CurveAffine> Evaluated<C> {
             }))
             .chain(Some(ProverQuery {
                 point: *x,
-                poly: (&self.committed.random_poly).into(),
+                poly: crate::poly::PolyRef::Device(&self.committed.random_poly),
             }))
     }
 }

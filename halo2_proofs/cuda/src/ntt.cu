@@ -244,15 +244,28 @@ RustError run_fft(
             // `_halo2_fft_normal_workspace_size` to always include this
             // slot regardless of ntt_type).
             uint64_t* d_omega_lut = (uint64_t*)inner_span.take((log_n + 1) * Scalar::ELT_BYTES);
-            if (needs_input_copy)
-                CUDA_OK(cudaMemcpyAsync(d_data, input, Scalar::ELT_BYTES << log_n, input_kind, stream));
             zkpcuda::omega::generate_omega_log_lut<<<1, 1, 0, stream>>>((scalar_t*)d_omega_lut, (scalar_t*)d_divisor, log_n);
             auto length = 1 << log_n;
             auto threads = std::min(length, 1024);
             auto blocks = (length + threads - 1) / threads;
+            // Cap the grid so each thread strides over several elements,
+            // amortizing the O(log n) per-element omega-power setup in the
+            // twist kernels below. The result is independent of block count
+            // (grid-stride power recurrence); 1024 still saturates the device.
+            blocks = std::min<decltype(blocks)>(blocks, 1024);
 
-            zkpcuda::omega::mult_power_of_omega<<<blocks, threads, 0, stream>>>((scalar_t*)d_data, (scalar_t*)d_omega_lut, length);
-            zkpcuda::common::revbin(stream, (scalar_t*)d_data, log_n);
+            // Out-of-place device input (out != in): one scatter pass does the
+            // coset twist + bit-reversal. Aliased/host input takes the in-place
+            // copy + twist + revbin path.
+            if (input_on_device && needs_input_copy) {
+                zkpcuda::omega::mult_power_of_omega_revbin<<<blocks, threads, 0, stream>>>(
+                    (scalar_t*)d_data, (const scalar_t*)input, (scalar_t*)d_omega_lut, length, (uint32_t)log_n);
+            } else {
+                if (needs_input_copy)
+                    CUDA_OK(cudaMemcpyAsync(d_data, input, Scalar::ELT_BYTES << log_n, input_kind, stream));
+                zkpcuda::omega::mult_power_of_omega<<<blocks, threads, 0, stream>>>((scalar_t*)d_data, (scalar_t*)d_omega_lut, length);
+                zkpcuda::common::revbin(stream, (scalar_t*)d_data, log_n);
+            }
 #include "ntt_combine.h"
             zkpcuda::ntt::dit_module(log_n, batch_size, log_n % batch_size, combine_size_1, combine_size_2, is_twiddle_dense, (const scalar_t*)d_twiddle, (scalar_t*)d_data, stream);
         } else if (ntt_type == NTT_TYPE::icosetFFT) {
@@ -316,14 +329,29 @@ RustError run_fft_many(
             // `_halo2_fft_many_workspace_size` to always include this slot).
             uint64_t* d_omega_lut = (uint64_t*)inner_span.take((log_n + 1) * Scalar::ELT_BYTES);
             CUDA_OK(cudaMemcpyAsync(d_divisor, h_divisor, Scalar::ELT_BYTES, cudaMemcpyHostToDevice, stream));
-            CUDA_OK(cudaMemcpyAsync(d_data, input, Scalar::ELT_BYTES << log_n, input_kind, stream));
-            zkpcuda::omega::generate_omega_log_lut<<<1, 1, 0, stream>>>((scalar_t*)d_omega_lut, (scalar_t*)d_divisor, log_n);
 
             auto length = 1 << log_n;
             auto threads = std::min(length, 1024);
             auto blocks = (length + threads - 1) / threads;
-            zkpcuda::omega::mult_power_of_omega<<<blocks, threads, 0, stream>>>((scalar_t*)d_data, (scalar_t*)d_omega_lut, length);
-            zkpcuda::common::revbin(stream, (scalar_t*)d_data, log_n);
+            // See the note above: cap the grid to amortize the twist omega-power
+            // setup (result independent of block count via the grid-stride recurrence).
+            blocks = std::min<decltype(blocks)>(blocks, 1024);
+
+            // Out-of-place device input (out != in): one scatter pass does the
+            // coset twist + bit-reversal. Aliased/host input takes the in-place
+            // copy + twist + revbin path.
+            bool fuse_revbin = input_on_device && (input != d_data);
+            if (!fuse_revbin)
+                CUDA_OK(cudaMemcpyAsync(d_data, input, Scalar::ELT_BYTES << log_n, input_kind, stream));
+            zkpcuda::omega::generate_omega_log_lut<<<1, 1, 0, stream>>>((scalar_t*)d_omega_lut, (scalar_t*)d_divisor, log_n);
+
+            if (fuse_revbin) {
+                zkpcuda::omega::mult_power_of_omega_revbin<<<blocks, threads, 0, stream>>>(
+                    (scalar_t*)d_data, (const scalar_t*)input, (scalar_t*)d_omega_lut, length, (uint32_t)log_n);
+            } else {
+                zkpcuda::omega::mult_power_of_omega<<<blocks, threads, 0, stream>>>((scalar_t*)d_data, (scalar_t*)d_omega_lut, length);
+                zkpcuda::common::revbin(stream, (scalar_t*)d_data, log_n);
+            }
 #include "ntt_combine.h"
             zkpcuda::ntt::dit_module(log_n, batch_size, log_n % batch_size, combine_size_1, combine_size_2, is_twiddle_dense, (const scalar_t*)d_twiddle, (scalar_t*)d_data, stream);
         } else if (ntt_type == NTT_TYPE::icosetFFT) {

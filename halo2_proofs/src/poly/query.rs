@@ -3,7 +3,7 @@ use std::fmt::Debug;
 use super::commitment::MSM;
 use crate::{
     arithmetic::eval_polynomial,
-    cuda::funcs::eval_polynomial_device,
+    cuda::funcs::{batch_eval_polynomial_d2h, eval_polynomial_device},
     poly::{Coeff, Device, DevicePolyExt, Host, Polynomial},
 };
 use halo2curves::CurveAffine;
@@ -15,6 +15,12 @@ pub trait Query<F>: Sized + Clone + Send + Sync {
     fn get_point(&self) -> F;
     fn get_eval(&self) -> Self::Eval;
     fn get_commitment(&self) -> Self::Commitment;
+
+    /// Evaluate every query, returning evals in query order. Default: per-query
+    /// `get_eval`; device backends may override to batch the evals.
+    fn batch_get_evals(queries: &[Self]) -> Vec<Self::Eval> {
+        queries.iter().map(|q| q.get_eval()).collect()
+    }
 }
 
 /// A residency-tagged borrow of a `Polynomial<F, Coeff, _>`.
@@ -103,6 +109,48 @@ impl<'com, C: CurveAffine> Query<C::Scalar> for ProverQuery<'com, C> {
     }
     fn get_commitment(&self) -> Self::Commitment {
         PolynomialPointer { poly: self.poly }
+    }
+
+    /// Device-resident polys are evaluated in one batched pass; host polys use
+    /// the per-query CPU eval, run in parallel. Results are in query order.
+    fn batch_get_evals(queries: &[Self]) -> Vec<Self::Eval> {
+        use rayon::prelude::*;
+        let mut evals = vec![C::Scalar::default(); queries.len()];
+        let mut d_polys = Vec::new();
+        let mut d_points = Vec::new();
+        let mut d_slots = Vec::new();
+        for (i, q) in queries.iter().enumerate() {
+            if let PolyRef::Device(p) = q.poly {
+                d_polys.push(p.device_buf());
+                d_points.push(q.point);
+                d_slots.push(i);
+            }
+        }
+        if !d_polys.is_empty() {
+            let mut d_evals = vec![C::Scalar::default(); d_polys.len()];
+            batch_eval_polynomial_d2h(&d_polys, &d_points, &mut d_evals)
+                .expect("batch_eval_polynomial_d2h failed in ProverQuery::batch_get_evals");
+            for (k, &slot) in d_slots.iter().enumerate() {
+                evals[slot] = d_evals[k];
+            }
+        }
+        // Host-resident polys (VRAM fallback): the O(n) Horner evals are
+        // independent, so run them on the rayon pool instead of serially.
+        let host_evals: Vec<(usize, C::Scalar)> = queries
+            .iter()
+            .enumerate()
+            .filter_map(|(i, q)| match q.poly {
+                PolyRef::Host(p) => Some((i, p.values(), q.point)),
+                PolyRef::Device(_) => None,
+            })
+            .collect::<Vec<_>>()
+            .into_par_iter()
+            .map(|(i, values, point)| (i, eval_polynomial(values, point)))
+            .collect();
+        for (i, e) in host_evals {
+            evals[i] = e;
+        }
+        evals
     }
 }
 

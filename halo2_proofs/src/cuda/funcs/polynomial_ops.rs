@@ -2,7 +2,7 @@ use crate::cuda::culib::{
     AssignedLayout, _halo2_decode_assigned, _halo2_eval_poly_batch_max_len, _halo2_eval_polynomial,
     _halo2_eval_polynomial_batch, _halo2_eval_polynomial_batch_workspace_size,
     _halo2_eval_polynomial_workspace_size, _halo2_kate_division_device,
-    _halo2_kate_division_device_padded, _halo2_kate_division_workspace_size,
+    _halo2_kate_division_device_padded, _halo2_kate_division_workspace_size, _halo2_poly_fill_one,
     _halo2_poly_multiply_add, _halo2_poly_sub_scalar_at_zero, _halo2_poly_sub_short_inplace,
     _halo2_poly_sub_short_out_of_place,
 };
@@ -359,6 +359,29 @@ pub(crate) fn poly_multiply_add_device_with_d_scalar<F: Field>(
             d_in.as_raw_ptr(),
             d_scalar.as_raw_ptr(),
             d_acc.len(),
+            HALO2_GPU_CTX.stream.as_raw(),
+        )
+    };
+    if status.code != 0 {
+        return Err(status.into());
+    }
+    Ok(())
+}
+
+/// Broadcast-fills `d_out[i] = *d_scalar` (a single-element device scalar) for
+/// all of `d_out`. Enqueued on `HALO2_GPU_CTX.stream`; returns before
+/// completion — same-stream reads see the fill.
+pub(crate) fn poly_fill_one_device<F: Field>(
+    d_out: &mut DeviceBuffer<F>,
+) -> Result<(), HaloGpuError> {
+    if d_out.is_empty() {
+        return Ok(());
+    }
+    ensure_current_device_matches_ctx()?;
+    let status = unsafe {
+        _halo2_poly_fill_one(
+            d_out.as_mut_raw_ptr(),
+            d_out.len() as u64,
             HALO2_GPU_CTX.stream.as_raw(),
         )
     };
