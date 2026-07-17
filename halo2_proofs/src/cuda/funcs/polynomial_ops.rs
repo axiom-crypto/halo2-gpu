@@ -2,9 +2,9 @@ use crate::cuda::culib::{
     AssignedLayout, _halo2_decode_assigned, _halo2_eval_poly_batch_max_len, _halo2_eval_polynomial,
     _halo2_eval_polynomial_batch, _halo2_eval_polynomial_batch_workspace_size,
     _halo2_eval_polynomial_workspace_size, _halo2_kate_division_device,
-    _halo2_kate_division_device_padded, _halo2_kate_division_workspace_size,
-    _halo2_poly_fill_one, _halo2_poly_multiply_add, _halo2_poly_sub_scalar_at_zero,
-    _halo2_poly_sub_short_inplace, _halo2_poly_sub_short_out_of_place,
+    _halo2_kate_division_device_padded, _halo2_kate_division_workspace_size, _halo2_poly_fill_one,
+    _halo2_poly_multiply_add, _halo2_poly_sub_scalar_at_zero, _halo2_poly_sub_short_inplace,
+    _halo2_poly_sub_short_out_of_place,
 };
 use crate::cuda::utils::{
     ensure_current_device_matches_ctx, query_device_free_bytes_for_chunking, FFITraitObject,
