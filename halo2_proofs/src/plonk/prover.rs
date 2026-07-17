@@ -48,11 +48,10 @@ use openvm_cuda_common::d_buffer::DeviceBuffer;
 /// `params` and a [`ProvingKey`] generated for the same circuit. The
 /// provided `instances` are zero-padded internally.
 ///
-/// Synthesizes the witness on the host, batch-inverts it into device-resident
-/// advice columns, and hands off to [`create_proof_raw`] for commitment and
-/// the remaining proof phases. Only single-circuit, single-phase proving is
-/// supported: multi-phase circuits interleave challenge squeezes with
-/// synthesis, which cannot be expressed as a pre-synthesized advice hand-off.
+/// Synthesizes the witness on the host, then hands device-resident advice
+/// columns to [`create_proof_raw`] for the remaining proof phases.
+/// Single-circuit, single-phase only (multi-phase interleaves challenge
+/// squeezes with synthesis, which a pre-synthesized hand-off cannot express).
 pub fn create_proof<
     'params: 'a,
     'a,
@@ -90,10 +89,8 @@ where
     );
 
     let setup_span = info_span!("setup").entered();
-    // Build the GPU proving-key view by borrowing the canonical key (no
-    // host-poly clone; device mirrors stay lazy). The same view is handed to
-    // `create_proof_raw_with_pk` below, so mirrors warmed during synthesis are
-    // the ones the later phases read.
+    // The same view is handed to `create_proof_raw_with_pk` below, so mirrors
+    // warmed during synthesis are the ones the later phases read.
     let gpu_pk = GpuProvingKey::from_host(pk);
     let meta = &gpu_pk.cs;
 
@@ -112,10 +109,7 @@ where
     let config = ConcreteCircuit::configure_with_params(&mut cs, circuits[0].params());
     #[cfg(not(feature = "circuit-params"))]
     let config = ConcreteCircuit::configure(&mut cs);
-    // The constant columns come from the freshly-configured canonical cs
-    // (`FloorPlanner::synthesize` needs them as `Vec<Column<Fixed>>`).
-    // Selector compression never alters the constant columns, so they
-    // match `pk.cs` by construction.
+    // Selector compression never alters the constant columns, so these match `pk.cs`.
     let constants = cs.constants().clone();
     setup_span.exit();
 
@@ -129,22 +123,16 @@ where
     );
 
     let advice = std::thread::scope(|s| -> Result<Vec<DeviceBuffer<Scheme::Scalar>>, GpuError> {
-        // Warm the witness-independent device caches on a scoped worker while
-        // the CPU runs `synthesize` (GPU otherwise idle), moving their pageable
-        // H2D off the critical path. Byte-neutral: the set-once `OnceCell`s get
-        // exactly what the lazy paths would upload. Joins before the raw
-        // prover's first mirror touch (scope end).
+        // Warm the witness-independent device mirrors while the CPU runs
+        // `synthesize`. Byte-neutral: the set-once `OnceCell`s get exactly what
+        // the lazy paths would upload.
         let gpu_pk = &gpu_pk;
         s.spawn(move || {
-            // Bind this fresh worker to the CUDA ctx device before any H2D:
-            // the getters' `to_device_on` doesn't bind, so an unbound worker
-            // would target the wrong GPU. On bind failure, skip warming — the
-            // main thread then inits the caches lazily as before.
+            // Fresh thread: bind to the ctx device before any H2D. On bind
+            // failure, skip warming and let the caches init lazily as before.
             if crate::cuda::utils::ensure_current_device_matches_ctx().is_err() {
                 return;
             }
-            // SRS base mirrors (see `warm_device_caches`): warms the cold
-            // monomial `g` that phase 4b/5 would otherwise upload.
             params.warm_device_caches();
             let _ = gpu_pk.fixed_polys_device();
             let _ = gpu_pk.fixed_values_device();
@@ -165,12 +153,10 @@ where
         }
 
         let mut challenges = HashMap::<usize, Scheme::Scalar>::with_capacity(meta.num_challenges);
-        // `usable_rows` excludes blinding-factor rows and the permutation-argument row.
         let params_n = params.n() as usize;
         let unusable_rows_start = params_n - (meta.blinding_factors() + 1);
 
-        // Soundness guard for the `assign_advice` reinterpret of `GpuAssigned`
-        // as canonical `Assigned`; verifies the layouts coincide.
+        // Layout guard for the `GpuAssigned` → `Assigned` reinterpret in `assign_advice`.
         crate::plonk::assert_canonical_assigned_matches_gpu_layout::<Scheme::Scalar>();
 
         let witness_alloc = info_span!("alloc_witness_collection").entered();
@@ -204,10 +190,8 @@ where
             .expect("synthesize failed");
         witness_assign_span.exit();
 
-        // Single phase: the blinding rows stay `GpuAssigned::Zero` here.
-        // `create_proof_raw` (via `convert_raw_advice`) draws the blinders
-        // from `rng` and applies them on device, in the same column-major
-        // order as the legacy in-phase path — proof bytes are unchanged.
+        // Blinding rows stay `Zero` here; `convert_raw_advice` draws blinders from
+        // `rng` on device in the legacy column-major order — proof bytes unchanged.
         let batch_invert_span =
             info_span!("halo2_section", phase = "batch invert witness assignment").entered();
         let advice = batch_invert_assigned_device(
@@ -236,11 +220,11 @@ where
     )
 }
 
-/// Diagnostic: runs [`Circuit::synthesize`] on the inputs and returns the
-/// resulting phase-1 tuple without continuing to lookups/permutations/opening.
-/// The transcript is advanced through the pk hash, instance commitments, and
-/// advice commitments, matching the state [`create_proof`] would leave it in
-/// just before `theta` is squeezed.
+/// Diagnostic: runs [`Circuit::synthesize`] and returns the phase-1
+/// instance/advice singles without proving, for comparison against externally
+/// generated witnesses. Not a proving input: the returned advice is post-iFFT
+/// (coefficient basis), whereas [`create_proof_raw`] takes Lagrange-basis
+/// device buffers.
 pub fn synthesize_witness<
     'params: 'a,
     'a,
@@ -413,19 +397,11 @@ pub fn create_proof_raw<
     transcript: &'a mut T,
 ) -> Result<(), GpuError>
 where
-    // `FromUniformBytes<64>` is needed to build the GPU proving-key view via
-    // `GpuProvingKey::from_host` → `ProvingKey::get_vk`.
     Scheme::Scalar: Hash + WithSmallOrderMulGroup<3> + FromUniformBytes<64>,
-    // The prover spawns a scoped thread that borrows `params`, so it needs Sync
-    // (the `ParamsProver` trait itself does not, to match CPU halo2's API).
     Scheme::ParamsProver: Sync,
 {
-    // Resets the GPU memory peak so the reported peak is per-proof. Must run
-    // before any early-return path.
     crate::perf_section_root!("create_proof");
 
-    // Build the GPU proving-key view by borrowing the canonical key (no host-poly
-    // clone; device mirrors stay lazy).
     let pk_span = info_span!("setup_gpu_pk").entered();
     let gpu_pk = GpuProvingKey::from_host(pk);
     pk_span.exit();
@@ -456,8 +432,6 @@ fn create_proof_raw_with_pk<
 ) -> Result<(), GpuError>
 where
     Scheme::Scalar: Hash + WithSmallOrderMulGroup<3>,
-    // The prover spawns a scoped thread that borrows `params`, so it needs Sync
-    // (the `ParamsProver` trait itself does not, to match CPU halo2's API).
     Scheme::ParamsProver: Sync,
 {
     if instances.len() != pk.cs.num_instance_columns {
@@ -1139,10 +1113,8 @@ where
         }
 
         let bf_span = info_span!("halo2_section", phase = "add blinding factors").entered();
-        // Write blinding-factor cells into each phase column's tail before the
-        // device batch_invert. `Trivial(F::random)` round-trips through
-        // batch_invert (denominator None), so the device cells get the value
-        // directly.
+        // `Trivial(F::random)` round-trips through batch_invert unchanged
+        // (denominator None), so the device cells get the blinder directly.
         let column_indices_for_phase = self
             .column_indices
             .get(phase)
@@ -1234,10 +1206,9 @@ where
     }
 }
 
-/// Absorbs the instances, blinds and commits the raw device-resident advice
-/// columns, and squeezes this phase's challenges — the transcript/rng driving
-/// that [`WitnessCollection::next_phase`] performs for host-synthesized
-/// witnesses, for advice that already lives on device.
+/// Mirrors [`WitnessCollection::next_phase`] for advice that already lives on
+/// device: absorbs the instances, blinds and commits the advice columns, and
+/// squeezes this phase's challenges in the same transcript/rng order.
 fn convert_raw_advice<Scheme: CommitmentScheme, R: RngCore, T, E>(
     domain: &poly::EvaluationDomain<Scheme::Scalar>,
     params: &Scheme::ParamsProver,
@@ -1305,13 +1276,10 @@ where
         .collect::<Vec<_>>();
 
     let bf_span = info_span!("halo2_section", phase = "add blinding factors").entered();
-    // Advice buffers are already device-resident (post-batch-invert). Materialize
-    // all blinders for this phase on the host in one pass, then H2D-copy each
-    // column's tail [unusable_rows_start..param_n) on the crate stream.
-    let column_indices_for_phase = column_indices
-        .get(phase)
-        .expect("The API only supports 3 phases right now")
-        .clone();
+    // Draw all blinders on host in the legacy rng order, then H2D each column's
+    // tail on the crate stream.
+    let column_indices_for_phase =
+        column_indices.get(phase).expect("The API only supports 3 phases right now").clone();
     let n_blind = param_n - unusable_rows_start;
     let blinders: Vec<Vec<Scheme::Scalar>> = column_indices_for_phase
         .iter()

@@ -1,16 +1,6 @@
-//! Halo2-gpu extensions to `openvm_cuda_common::d_buffer::DeviceBuffer<T>`:
-//! range-based mutable slicing and host-to-slice copy.
-//!
-//! [`DeviceBufferMutSlice`] borrows the parent buffer mutably and remembers
-//! the `[lo, hi)` element range it covers.
-//! [`DeviceBufferMutSlice::copy_from_host`] copies an equally-sized host
-//! slice into the range with a single `cudaMemcpyAsync`, enqueued on the
-//! provided `GpuDeviceCtx`'s stream (it does not touch the crate-global
-//! `HALO2_GPU_CTX`).
-//!
-//! This lives in halo2-gpu because `openvm_cuda_common` only exposes
-//! zero-fill (`fill_zero_on` / `fill_zero_suffix_on`, both `cudaMemsetAsync`)
-//! and whole-buffer H2D copy (`MemCopyH2D::copy_to_on`), with no slice type.
+//! Range-based mutable slicing and host-to-slice copy for
+//! `openvm_cuda_common::d_buffer::DeviceBuffer<T>`, which itself only exposes
+//! whole-buffer accessors and zero-fill.
 
 use std::ffi::c_void;
 use std::ops::{Bound, RangeBounds};
@@ -47,9 +37,11 @@ impl<'a, T> DeviceBufferMutSlice<'a, T> {
     /// `cudaMemcpyAsync`.
     ///
     /// Errors with [`HaloGpuError::InvalidParameter`] if `src.len() != self.len()`.
-    /// This is a straight H2D transfer of the same byte pattern as
-    /// [`openvm_cuda_common::copy::MemCopyH2D::copy_to_on`] but targeting the
-    /// sub-range `[lo, hi)` rather than the whole buffer.
+    ///
+    /// `src` must be pageable (ordinary heap) memory: `cudaMemcpyAsync` then
+    /// stages the source before returning, so `src` may be freed immediately.
+    /// Pinned host memory would make the copy truly asynchronous and require
+    /// `src` to outlive a stream sync.
     pub fn copy_from_host(
         &mut self,
         src: &[T],
@@ -80,9 +72,7 @@ impl<'a, T> DeviceBufferMutSlice<'a, T> {
 }
 
 /// Extension trait adding range-based mutable slicing to
-/// [`openvm_cuda_common::d_buffer::DeviceBuffer<T>`]. `openvm-cuda-common`
-/// itself only offers whole-buffer accessors and zero-fill; the
-/// halo2-gpu-side implementation lives here rather than upstream.
+/// [`openvm_cuda_common::d_buffer::DeviceBuffer<T>`].
 pub trait DeviceBufferExt<T> {
     /// Returns a mutable slice over the elements indexed by `range`.
     ///
