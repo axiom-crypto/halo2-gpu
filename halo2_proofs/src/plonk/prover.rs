@@ -44,6 +44,27 @@ use crate::plonk::lookup::prover::CommittedUnpacked;
 use openvm_cuda_common::copy::MemCopyH2D;
 use openvm_cuda_common::d_buffer::DeviceBuffer;
 
+/// Warms the witness-independent device caches from a background thread.
+/// Byte-neutral: the set-once `OnceCell`s get exactly what the lazy paths
+/// would upload.
+///
+/// PK mirror and params SRS uploads are all enqueued on `HALO2_COMM_STREAM`
+/// so they overlap with main-stream compute; the warming calls never sync
+/// that stream, and consumers are fenced by `CommWrapper`'s first-deref sync.
+fn warm_pk_device_caches<'params, C, P>(params: &P, pk: &GpuProvingKey<'_, C>)
+where
+    C: CurveAffine,
+    P: Params<'params, C>,
+{
+    // Fresh thread: bind to the ctx device before any H2D. On bind failure,
+    // skip warming and let the caches init lazily as before.
+    if crate::cuda::utils::ensure_current_device_matches_ctx().is_err() {
+        return;
+    }
+    params.warm_device_caches();
+    pk.warm_device_mirrors();
+}
+
 /// Creates a proof for the provided `circuit` given the public parameters
 /// `params` and a [`ProvingKey`] generated for the same circuit. The
 /// provided `instances` are zero-padded internally.
@@ -118,25 +139,12 @@ where
     );
 
     let advice = std::thread::scope(|s| -> Result<Vec<DeviceBuffer<Scheme::Scalar>>, GpuError> {
-        // Warm the witness-independent device mirrors while the CPU runs
-        // `synthesize`. Byte-neutral: the set-once `OnceCell`s get exactly what
-        // the lazy paths would upload.
+        // Warm the witness-independent device mirrors (comm stream) while the
+        // CPU runs `synthesize`. Nothing in this scope consumes the mirrors;
+        // each mirror's `CommWrapper` fences the comm-stream uploads on its
+        // first deref, so consumers in `create_proof_raw_with_pk` are safe.
         let gpu_pk = &gpu_pk;
-        s.spawn(move || {
-            // Fresh thread: bind to the ctx device before any H2D. On bind
-            // failure, skip warming and let the caches init lazily as before.
-            if crate::cuda::utils::ensure_current_device_matches_ctx().is_err() {
-                return;
-            }
-            params.warm_device_caches();
-            let _ = gpu_pk.fixed_polys_device();
-            let _ = gpu_pk.fixed_values_device();
-            let _ = gpu_pk.permutation_polys_device();
-            let _ = gpu_pk.permutation_lagrange_device();
-            let _ = gpu_pk.l0_device();
-            let _ = gpu_pk.l_last_device();
-            let _ = gpu_pk.l_active_row_device();
-        });
+        s.spawn(move || warm_pk_device_caches(params, gpu_pk));
 
         let mut column_indices = [(); 3].map(|_| vec![]);
         for (index, phase) in meta.advice_column_phase.iter().enumerate() {
@@ -430,21 +438,10 @@ where
     let meta = &pk.cs;
 
     std::thread::scope(|s| {
-        let handle = s.spawn(move || {
-            // Fresh thread: bind to the ctx device before any H2D. On bind
-            // failure, skip warming and let the caches init lazily as before.
-            if crate::cuda::utils::ensure_current_device_matches_ctx().is_err() {
-                return;
-            }
-            params.warm_device_caches();
-            let _ = pk.fixed_polys_device();
-            let _ = pk.fixed_values_device();
-            let _ = pk.permutation_polys_device();
-            let _ = pk.permutation_lagrange_device();
-            let _ = pk.l0_device();
-            let _ = pk.l_last_device();
-            let _ = pk.l_active_row_device();
-        });
+        // Warm the pk mirrors and params SRS on the comm stream while phase 1
+        // runs. Each mirror's `CommWrapper` fences its uploads on first deref,
+        // so consumers below never race the warming thread's copies.
+        let handle = s.spawn(move || warm_pk_device_caches(params, pk));
         let (instance, advice, challenges, theta) = {
             let (instance, advice, challenges) = convert_raw_advice::<Scheme, _, _, E>(
                 domain.inner,
