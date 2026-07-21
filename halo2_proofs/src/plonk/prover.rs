@@ -39,7 +39,6 @@ use tracing::info_span;
 
 use crate::cuda::funcs::ColumnPool;
 use crate::cuda::utils::HALO2_GPU_CTX;
-use crate::cuda::DeviceBufferExt;
 use crate::plonk::lookup::prover::CommittedUnpacked;
 use openvm_cuda_common::copy::MemCopyH2D;
 use openvm_cuda_common::d_buffer::DeviceBuffer;
