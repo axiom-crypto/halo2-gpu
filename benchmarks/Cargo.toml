@@ -16,10 +16,10 @@ tracing = "0.1.44"
 tracing-forest = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-openvm = { git = "https://github.com/openvm-org/openvm.git", branch = "main", default-features = false }
-openvm-sdk = { git = "https://github.com/openvm-org/openvm.git", branch = "main", default-features = false }
-openvm-transpiler = { git = "https://github.com/openvm-org/openvm.git", branch = "main", default-features = false }
-openvm-stark-sdk = { git = "https://github.com/openvm-org/stark-backend.git", tag = "v2.0.0", default-features = false }
+openvm = { git = "https://github.com/openvm-org/openvm.git", branch = "develop-v2.1.0", default-features = false }
+openvm-sdk = { git = "https://github.com/openvm-org/openvm.git", branch = "develop-v2.1.0", default-features = false }
+openvm-transpiler = { git = "https://github.com/openvm-org/openvm.git", branch = "develop-v2.1.0", default-features = false }
+openvm-stark-sdk = { git = "https://github.com/openvm-org/stark-backend.git", branch = "develop-v2.1.0", default-features = false }
 
 [features]
 default = ["parallel", "jemalloc", "evm-verify", "cuda", "nvtx", "metrics"]

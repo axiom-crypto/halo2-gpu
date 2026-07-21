@@ -8,7 +8,7 @@ members = ["fibonacci"]
 
 [workspace.dependencies]
 
-openvm = { git = "https://github.com/openvm-org/openvm.git", branch = "develop-v2.0.0-rc.2", default-features = false }
+openvm = { git = "https://github.com/openvm-org/openvm.git", branch = "develop-v2.1.0", default-features = false }
 
 [profile.release]
 panic = "abort"
