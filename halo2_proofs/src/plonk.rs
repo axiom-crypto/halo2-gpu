@@ -348,8 +348,7 @@ impl<'a, C: CurveAffine> GpuProvingKey<'a, C> {
     pub(crate) fn permutation_polys_device(
         &self,
     ) -> Option<&[Polynomial<C::Scalar, Coeff, crate::poly::Device>]> {
-        self.permutation_polys_device_handle()
-            .map(|w| w.as_slice())
+        self.permutation_polys_device_handle().map(|w| w.as_slice())
     }
 
     fn permutation_polys_device_handle(&self) -> Option<&DevicePolys<C::Scalar, Coeff>> {
@@ -372,9 +371,7 @@ impl<'a, C: CurveAffine> GpuProvingKey<'a, C> {
             .map(|w| w.as_slice())
     }
 
-    fn permutation_lagrange_device_handle(
-        &self,
-    ) -> Option<&DevicePolys<C::Scalar, LagrangeCoeff>> {
+    fn permutation_lagrange_device_handle(&self) -> Option<&DevicePolys<C::Scalar, LagrangeCoeff>> {
         if let Some(v) = self.permutation_lagrange_device.get() {
             return Some(v);
         }
@@ -390,9 +387,7 @@ impl<'a, C: CurveAffine> GpuProvingKey<'a, C> {
         self.l0_device_handle().map(|w| &**w)
     }
 
-    fn l0_device_handle(
-        &self,
-    ) -> Option<&DevicePoly<C::Scalar, Coeff>> {
+    fn l0_device_handle(&self) -> Option<&DevicePoly<C::Scalar, Coeff>> {
         if let Some(v) = self.l0_device.get() {
             return Some(v);
         }
@@ -410,9 +405,7 @@ impl<'a, C: CurveAffine> GpuProvingKey<'a, C> {
         self.l_last_device_handle().map(|w| &**w)
     }
 
-    fn l_last_device_handle(
-        &self,
-    ) -> Option<&DevicePoly<C::Scalar, Coeff>> {
+    fn l_last_device_handle(&self) -> Option<&DevicePoly<C::Scalar, Coeff>> {
         if let Some(v) = self.l_last_device.get() {
             return Some(v);
         }
@@ -430,9 +423,7 @@ impl<'a, C: CurveAffine> GpuProvingKey<'a, C> {
         self.l_active_row_device_handle().map(|w| &**w)
     }
 
-    fn l_active_row_device_handle(
-        &self,
-    ) -> Option<&DevicePoly<C::Scalar, Coeff>> {
+    fn l_active_row_device_handle(&self) -> Option<&DevicePoly<C::Scalar, Coeff>> {
         if let Some(v) = self.l_active_row_device.get() {
             return Some(v);
         }
