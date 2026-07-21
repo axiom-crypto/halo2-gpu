@@ -376,7 +376,7 @@ pub fn create_proof_raw<
     params: &'params Scheme::ParamsProver,
     pk: &ProvingKey<Scheme::Curve>,
     instances: &'a [&'a [Scheme::Scalar]],
-    advice: Vec<DeviceBuffer<Scheme::Scalar>>,
+    advice: AdviceColumns<Scheme::Scalar>,
     rng: R,
     transcript: &'a mut T,
 ) -> Result<(), GpuError>
@@ -410,7 +410,7 @@ fn create_proof_raw_with_pk<
     params: &'params Scheme::ParamsProver,
     pk: &GpuProvingKey<'_, Scheme::Curve>,
     instances: &'a [&'a [Scheme::Scalar]],
-    advice: Vec<DeviceBuffer<Scheme::Scalar>>,
+    advice: AdviceColumns<Scheme::Scalar>,
     mut rng: R,
     transcript: &'a mut T,
 ) -> Result<(), GpuError>
@@ -908,6 +908,16 @@ pub struct AdviceSingle<C: CurveAffine> {
     pub advice_values: Vec<Polynomial<C::Scalar, LagrangeCoeff, Device>>,
     pub advice_polys: Vec<Polynomial<C::Scalar, Coeff, Device>>,
 }
+
+/// The shape of advice columns accepted by [`create_proof_raw`]: one
+/// device-resident `DeviceBuffer<F>` per physical advice column, each of
+/// length `params.n()`.
+///
+/// Aliased so downstream crates can name it unconditionally: the CPU halo2
+/// fork exposes the same type name at the same path with a host `Vec<F>`
+/// element type. Callers reading `halo2_proofs::plonk::AdviceColumns`
+/// therefore stay portable across the cpu/cuda forks without a feature gate.
+pub type AdviceColumns<F> = Vec<DeviceBuffer<F>>;
 
 struct AdviceSingleOption<C: CurveAffine> {
     pub advice_values: Vec<Option<Polynomial<C::Scalar, LagrangeCoeff, Device>>>,
