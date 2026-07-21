@@ -102,8 +102,9 @@ where
     }
 }
 
-/// Comm-stream-fenced device mirror of a set of pk polynomials (see
+/// Comm-stream-fenced device mirror of pk polynomial(s) (see
 /// [`CommWrapper`]): first deref syncs `HALO2_COMM_STREAM`.
+type DevicePoly<F, B> = CommWrapper<Polynomial<F, B, crate::poly::Device>>;
 type DevicePolys<F, B> = CommWrapper<Vec<Polynomial<F, B, crate::poly::Device>>>;
 
 /// GPU-side proving key. Wraps the canonical [`ProvingKey`] (`inner`) plus the
@@ -139,9 +140,9 @@ pub struct GpuProvingKey<'a, C: CurveAffine> {
     fixed_polys_device: OnceCell<DevicePolys<C::Scalar, Coeff>>,
     fixed_values_device: OnceCell<DevicePolys<C::Scalar, LagrangeCoeff>>,
     permutation_polys_device: OnceCell<DevicePolys<C::Scalar, Coeff>>,
-    l0_device: OnceCell<CommWrapper<Polynomial<C::Scalar, Coeff, crate::poly::Device>>>,
-    l_last_device: OnceCell<CommWrapper<Polynomial<C::Scalar, Coeff, crate::poly::Device>>>,
-    l_active_row_device: OnceCell<CommWrapper<Polynomial<C::Scalar, Coeff, crate::poly::Device>>>,
+    l0_device: OnceCell<DevicePoly<C::Scalar, Coeff>>,
+    l_last_device: OnceCell<DevicePoly<C::Scalar, Coeff>>,
+    l_active_row_device: OnceCell<DevicePoly<C::Scalar, Coeff>>,
     /// Lagrange σ-columns, distinct from `permutation_polys_device` (Coeff form).
     permutation_lagrange_device: OnceCell<DevicePolys<C::Scalar, LagrangeCoeff>>,
 }
@@ -295,13 +296,13 @@ impl<'a, C: CurveAffine> GpuProvingKey<'a, C> {
     /// Each mirror's first consumer pays the comm-stream sync once via
     /// [`CommWrapper`]'s deref.
     pub(crate) fn warm_device_mirrors(&self) {
-        let _ = self.fixed_polys_device_wrapper();
+        let _ = self.fixed_polys_device_handle();
         let _ = self.fixed_values_device_wrapper();
-        let _ = self.permutation_polys_device_wrapper();
-        let _ = self.permutation_lagrange_device_wrapper();
-        let _ = self.l0_device_wrapper();
-        let _ = self.l_last_device_wrapper();
-        let _ = self.l_active_row_device_wrapper();
+        let _ = self.permutation_polys_device_handle();
+        let _ = self.permutation_lagrange_device_handle();
+        let _ = self.l0_device_handle();
+        let _ = self.l_last_device_handle();
+        let _ = self.l_active_row_device_handle();
     }
 
     /// Lazy device mirror of `inner.fixed_polys()` (Coeff form). `None` if
@@ -310,10 +311,10 @@ impl<'a, C: CurveAffine> GpuProvingKey<'a, C> {
     pub(crate) fn fixed_polys_device(
         &self,
     ) -> Option<&[Polynomial<C::Scalar, Coeff, crate::poly::Device>]> {
-        self.fixed_polys_device_wrapper().map(|w| w.as_slice())
+        self.fixed_polys_device_handle().map(|w| w.as_slice())
     }
 
-    fn fixed_polys_device_wrapper(&self) -> Option<&DevicePolys<C::Scalar, Coeff>> {
+    fn fixed_polys_device_handle(&self) -> Option<&DevicePolys<C::Scalar, Coeff>> {
         if let Some(v) = self.fixed_polys_device.get() {
             return Some(v);
         }
@@ -347,11 +348,11 @@ impl<'a, C: CurveAffine> GpuProvingKey<'a, C> {
     pub(crate) fn permutation_polys_device(
         &self,
     ) -> Option<&[Polynomial<C::Scalar, Coeff, crate::poly::Device>]> {
-        self.permutation_polys_device_wrapper()
+        self.permutation_polys_device_handle()
             .map(|w| w.as_slice())
     }
 
-    fn permutation_polys_device_wrapper(&self) -> Option<&DevicePolys<C::Scalar, Coeff>> {
+    fn permutation_polys_device_handle(&self) -> Option<&DevicePolys<C::Scalar, Coeff>> {
         if let Some(v) = self.permutation_polys_device.get() {
             return Some(v);
         }
@@ -367,11 +368,11 @@ impl<'a, C: CurveAffine> GpuProvingKey<'a, C> {
     pub(crate) fn permutation_lagrange_device(
         &self,
     ) -> Option<&[Polynomial<C::Scalar, LagrangeCoeff, crate::poly::Device>]> {
-        self.permutation_lagrange_device_wrapper()
+        self.permutation_lagrange_device_handle()
             .map(|w| w.as_slice())
     }
 
-    fn permutation_lagrange_device_wrapper(
+    fn permutation_lagrange_device_handle(
         &self,
     ) -> Option<&DevicePolys<C::Scalar, LagrangeCoeff>> {
         if let Some(v) = self.permutation_lagrange_device.get() {
@@ -386,12 +387,12 @@ impl<'a, C: CurveAffine> GpuProvingKey<'a, C> {
 
     /// Lazy device mirror of `inner.l0()`. Returns `None` only if the H2D upload fails.
     pub(crate) fn l0_device(&self) -> Option<&Polynomial<C::Scalar, Coeff, crate::poly::Device>> {
-        self.l0_device_wrapper().map(|w| &**w)
+        self.l0_device_handle().map(|w| &**w)
     }
 
-    fn l0_device_wrapper(
+    fn l0_device_handle(
         &self,
-    ) -> Option<&CommWrapper<Polynomial<C::Scalar, Coeff, crate::poly::Device>>> {
+    ) -> Option<&DevicePoly<C::Scalar, Coeff>> {
         if let Some(v) = self.l0_device.get() {
             return Some(v);
         }
@@ -406,12 +407,12 @@ impl<'a, C: CurveAffine> GpuProvingKey<'a, C> {
     pub(crate) fn l_last_device(
         &self,
     ) -> Option<&Polynomial<C::Scalar, Coeff, crate::poly::Device>> {
-        self.l_last_device_wrapper().map(|w| &**w)
+        self.l_last_device_handle().map(|w| &**w)
     }
 
-    fn l_last_device_wrapper(
+    fn l_last_device_handle(
         &self,
-    ) -> Option<&CommWrapper<Polynomial<C::Scalar, Coeff, crate::poly::Device>>> {
+    ) -> Option<&DevicePoly<C::Scalar, Coeff>> {
         if let Some(v) = self.l_last_device.get() {
             return Some(v);
         }
@@ -426,12 +427,12 @@ impl<'a, C: CurveAffine> GpuProvingKey<'a, C> {
     pub(crate) fn l_active_row_device(
         &self,
     ) -> Option<&Polynomial<C::Scalar, Coeff, crate::poly::Device>> {
-        self.l_active_row_device_wrapper().map(|w| &**w)
+        self.l_active_row_device_handle().map(|w| &**w)
     }
 
-    fn l_active_row_device_wrapper(
+    fn l_active_row_device_handle(
         &self,
-    ) -> Option<&CommWrapper<Polynomial<C::Scalar, Coeff, crate::poly::Device>>> {
+    ) -> Option<&DevicePoly<C::Scalar, Coeff>> {
         if let Some(v) = self.l_active_row_device.get() {
             return Some(v);
         }

@@ -8,7 +8,3 @@ pub mod tests;
 pub mod utils;
 
 pub use halo_gpu_error::HaloGpuError;
-pub use openvm_cuda_common::{
-    copy::{MemCopyD2H, MemCopyH2D},
-    d_buffer::DeviceBuffer,
-};
