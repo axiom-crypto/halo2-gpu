@@ -181,8 +181,10 @@ where
         );
 
         // 3-4% witness-gen speedup vs `get_mut` + bounds checks.
-        let advice_get_mut =
-            unsafe { self.advice.get_unchecked_mut(column.index() * self.params_n + row) };
+        let advice_get_mut = unsafe {
+            self.advice
+                .get_unchecked_mut(column.index() * self.params_n + row)
+        };
         // `Value::assign()` is `pub(crate)`; extract the known `Assigned` via
         // the public `map`, preserving the panic-on-unknown contract.
         let mut assigned = None;
@@ -254,11 +256,12 @@ where
                         values.len() <= self.unusable_rows_start,
                         "GpuError: InstanceTooLarge"
                     );
-                    poly.values_mut().par_iter_mut().zip(values.par_iter()).for_each(
-                        |(poly, value)| {
+                    poly.values_mut()
+                        .par_iter_mut()
+                        .zip(values.par_iter())
+                        .for_each(|(poly, value)| {
                             *poly = *value;
-                        },
-                    );
+                        });
                     poly
                 })
                 .collect::<Vec<_>>();
@@ -298,9 +301,11 @@ where
         .expect("batch_invert_assigned_device (CUDA) failed inside Assignment::next_phase");
         batch_invert_span.exit();
 
-        let timer =
-            info_span!("halo2_section", phase = "ifft & MSM on instance/advice columns (GPU)")
-                .entered();
+        let timer = info_span!(
+            "halo2_section",
+            phase = "ifft & MSM on instance/advice columns (GPU)"
+        )
+        .entered();
         let (instance_single, advice_polys, commitments) = new_gpu_thread::<Scheme, C>(
             self.params,
             self.domain,
@@ -322,14 +327,18 @@ where
             for _ in 0..num_instance_commitments {
                 self.transcript
                     .common_point(
-                        commitments.next().expect("Did not commit to instance polynomials"),
+                        commitments
+                            .next()
+                            .expect("Did not commit to instance polynomials"),
                     )
                     .unwrap();
             }
         }
 
         for commitment in commitments {
-            self.transcript.write_point(commitment).expect("absorb commitment point");
+            self.transcript
+                .write_point(commitment)
+                .expect("absorb commitment point");
         }
         let column_indices = self.column_indices[phase].iter().copied();
         let advice_values = advice_values.into_iter();
@@ -342,9 +351,10 @@ where
         }
 
         for challenge_index in self.challenge_indices[phase].iter() {
-            let existing = self
-                .challenges
-                .insert(*challenge_index, *self.transcript.squeeze_challenge_scalar::<()>());
+            let existing = self.challenges.insert(
+                *challenge_index,
+                *self.transcript.squeeze_challenge_scalar::<()>(),
+            );
             assert!(existing.is_none());
         }
         self.current_phase = self.current_phase.next();
@@ -478,7 +488,9 @@ where
     let num_instance = pk.cs.num_instance_columns;
     for instance in instances.iter() {
         if instance.len() != num_instance {
-            return Err(GpuError::Canonical(halo2_axiom::plonk::Error::InvalidInstances));
+            return Err(GpuError::Canonical(
+                halo2_axiom::plonk::Error::InvalidInstances,
+            ));
         }
     }
 
@@ -493,7 +505,7 @@ where
             instances[0],
             rng,
             transcript,
-            &circuits[0]
+            &circuits[0],
         );
         // Move the advice buffer out; `witness` (with its outstanding borrows) drops here.
         witness.advice
@@ -506,16 +518,16 @@ where
         info_span!("halo2_section", phase = "batch invert witness assignment").entered();
     let advice = batch_invert_assigned_device(
         (0..num_advice_columns)
-            .map(|column_index| {
-                &advice_raw[column_index * params_n..(column_index + 1) * params_n]
-            })
+            .map(|column_index| &advice_raw[column_index * params_n..(column_index + 1) * params_n])
             .collect::<Vec<&[GpuAssigned<Scheme::Scalar>]>>(),
     )
     .map_err(GpuError::HaloGpu)?;
     batch_invert_span.exit();
 
-    let advice: AdviceColumns<Scheme::Scalar> =
-        advice.into_iter().map(DevicePolyExt::into_device_buf).collect();
+    let advice: AdviceColumns<Scheme::Scalar> = advice
+        .into_iter()
+        .map(DevicePolyExt::into_device_buf)
+        .collect();
 
     Ok((advice, instances[0]))
 }
@@ -540,7 +552,11 @@ pub fn synthesize_witness<
     mut rng: R,
     mut transcript: &'a mut T,
 ) -> Result<
-    (Vec<InstanceSingle<Scheme::Curve>>, Vec<AdviceSingle<Scheme::Curve>>, Vec<Scheme::Scalar>),
+    (
+        Vec<InstanceSingle<Scheme::Curve>>,
+        Vec<AdviceSingle<Scheme::Curve>>,
+        Vec<Scheme::Scalar>,
+    ),
     GpuError,
 >
 where
@@ -560,11 +576,12 @@ where
     let num_instance = pk.cs.num_instance_columns;
     for instance in instances.iter() {
         if instance.len() != num_instance {
-            return Err(GpuError::Canonical(halo2_axiom::plonk::Error::InvalidInstances));
+            return Err(GpuError::Canonical(
+                halo2_axiom::plonk::Error::InvalidInstances,
+            ));
         }
     }
     pk.hash_into(transcript)?;
-
 
     let mut witness = make_witness_collection::<Scheme, P, E, R, T, ConcreteCircuit>(
         params,
@@ -572,16 +589,27 @@ where
         instances[0],
         &mut rng,
         &mut transcript,
-        &circuits[0]
+        &circuits[0],
     );
 
     witness.next_phase();
 
-    let advice_values =
-        witness.advice_single.advice_values.into_iter().map(|c| c.unwrap()).collect();
-    let advice_polys =
-        witness.advice_single.advice_polys.into_iter().map(|c| c.unwrap()).collect();
-    let advice = AdviceSingle::<Scheme::Curve> { advice_values, advice_polys };
+    let advice_values = witness
+        .advice_single
+        .advice_values
+        .into_iter()
+        .map(|c| c.unwrap())
+        .collect();
+    let advice_polys = witness
+        .advice_single
+        .advice_polys
+        .into_iter()
+        .map(|c| c.unwrap())
+        .collect();
+    let advice = AdviceSingle::<Scheme::Curve> {
+        advice_values,
+        advice_polys,
+    };
     let instance = witness.instance_single;
     let mut challenges = witness.challenges;
 
@@ -634,7 +662,9 @@ where
     if !prover_query_instance {
         for values in instances.iter() {
             for value in values.iter() {
-                transcript.common_scalar(*value).expect("Absorb instance value failed");
+                transcript
+                    .common_scalar(*value)
+                    .expect("Absorb instance value failed");
             }
         }
     }
@@ -645,10 +675,16 @@ where
         .map(|values| {
             let mut poly = domain.empty_lagrange();
             debug_assert_eq!(poly.len(), param_n);
-            debug_assert!(values.len() <= unusable_rows_start, "GpuError: InstanceTooLarge");
-            poly.values_mut().par_iter_mut().zip(values.par_iter()).for_each(|(poly, value)| {
-                *poly = *value;
-            });
+            debug_assert!(
+                values.len() <= unusable_rows_start,
+                "GpuError: InstanceTooLarge"
+            );
+            poly.values_mut()
+                .par_iter_mut()
+                .zip(values.par_iter())
+                .for_each(|(poly, value)| {
+                    *poly = *value;
+                });
             poly
         })
         .collect::<Vec<_>>();
@@ -656,12 +692,18 @@ where
     let bf_span = info_span!("halo2_section", phase = "add blinding factors").entered();
     // Draw all blinders on host in the legacy rng order, then H2D each column's
     // tail on the crate stream.
-    let column_indices_for_phase =
-        column_indices.get(phase).expect("The API only supports 3 phases right now").clone();
+    let column_indices_for_phase = column_indices
+        .get(phase)
+        .expect("The API only supports 3 phases right now")
+        .clone();
     let n_blind = param_n - unusable_rows_start;
     let blinders: Vec<Vec<Scheme::Scalar>> = column_indices_for_phase
         .iter()
-        .map(|_| (0..n_blind).map(|_| Scheme::Scalar::random(&mut rng)).collect())
+        .map(|_| {
+            (0..n_blind)
+                .map(|_| Scheme::Scalar::random(&mut rng))
+                .collect()
+        })
         .collect();
     for (column_index, col_blinders) in column_indices_for_phase.iter().zip(blinders.iter()) {
         advice_values[*column_index]
@@ -671,10 +713,16 @@ where
     }
     bf_span.exit();
 
-    let advice_values = advice_values.into_iter().map(Polynomial::from_device).collect_vec();
+    let advice_values = advice_values
+        .into_iter()
+        .map(Polynomial::from_device)
+        .collect_vec();
 
-    let timer = info_span!("halo2_section", phase = "ifft & MSM on instance/advice columns (GPU)")
-        .entered();
+    let timer = info_span!(
+        "halo2_section",
+        phase = "ifft & MSM on instance/advice columns (GPU)"
+    )
+    .entered();
     let (instance_single, advice_polys, commitments) = new_gpu_thread::<Scheme, _>(
         params,
         &EvaluationDomain::from_host_domain(domain),
@@ -692,13 +740,19 @@ where
         let num_instance_commitments = instance_single.instance_polys.len();
         for _ in 0..num_instance_commitments {
             transcript
-                .common_point(commitments.next().expect("Did not commit to instance polynomials"))
+                .common_point(
+                    commitments
+                        .next()
+                        .expect("Did not commit to instance polynomials"),
+                )
                 .unwrap();
         }
     }
 
     for commitment in commitments {
-        transcript.write_point(commitment).expect("absorb commitment point");
+        transcript
+            .write_point(commitment)
+            .expect("absorb commitment point");
     }
 
     let mut challenges = vec![];
@@ -707,7 +761,14 @@ where
     }
     timer.exit();
 
-    Ok((instance_single, AdviceSingle { advice_polys, advice_values }, challenges))
+    Ok((
+        instance_single,
+        AdviceSingle {
+            advice_polys,
+            advice_values,
+        },
+        challenges,
+    ))
 }
 
 pub(super) fn new_gpu_thread<Scheme, C>(
@@ -716,7 +777,14 @@ pub(super) fn new_gpu_thread<Scheme, C>(
     instance_values: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
     advice_values: &[Polynomial<C::Scalar, LagrangeCoeff, Device>],
     query_instance: bool,
-) -> Result<(InstanceSingle<C>, Vec<Polynomial<C::Scalar, Coeff, Device>>, Vec<C>), GpuError>
+) -> Result<
+    (
+        InstanceSingle<C>,
+        Vec<Polynomial<C::Scalar, Coeff, Device>>,
+        Vec<C>,
+    ),
+    GpuError,
+>
 where
     Scheme: CommitmentScheme<Curve = C, Scalar = C::ScalarExt>,
     C: CurveAffine,
@@ -782,13 +850,17 @@ where
                     .values()
                     .to_device_on(&HALO2_GPU_CTX)
                     .map_err(crate::cuda::HaloGpuError::from)?;
-                Ok(Polynomial::<C::Scalar, LagrangeCoeff, Device>::from_device(d_buf))
+                Ok(Polynomial::<C::Scalar, LagrangeCoeff, Device>::from_device(
+                    d_buf,
+                ))
             })
             .collect::<Result<_, _>>()?
     };
 
-    let instance_single =
-        InstanceSingle { instance_values: instance_values_device, instance_polys };
+    let instance_single = InstanceSingle {
+        instance_values: instance_values_device,
+        instance_polys,
+    };
     let batch_span =
         info_span!("halo2_section", phase = "batch normalize projective points").entered();
     let commitments_projective = commitments;

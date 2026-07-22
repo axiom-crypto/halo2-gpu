@@ -89,14 +89,15 @@ where
     let gpu_pk = GpuProvingKey::from_host(pk);
     setup_span.exit();
 
-    let (advice, instance_refs) = witness::synthesize_advices_and_instances::<
-        Scheme,
-        P,
-        E,
-        R,
-        T,
-        ConcreteCircuit,
-    >(params, &gpu_pk, circuits, instances, &mut rng, &mut transcript)?;
+    let (advice, instance_refs) =
+        witness::synthesize_advices_and_instances::<Scheme, P, E, R, T, ConcreteCircuit>(
+            params,
+            &gpu_pk,
+            circuits,
+            instances,
+            &mut rng,
+            &mut transcript,
+        )?;
 
     create_proof_from_advice_with_pk::<Scheme, P, E, R, T>(
         params,
@@ -164,7 +165,9 @@ where
     Scheme::ParamsProver: Sync,
 {
     if instances.len() != pk.cs.num_instance_columns {
-        return Err(GpuError::Canonical(halo2_axiom::plonk::Error::InvalidInstances));
+        return Err(GpuError::Canonical(
+            halo2_axiom::plonk::Error::InvalidInstances,
+        ));
     }
     pk.hash_into(transcript)?;
 
@@ -309,9 +312,11 @@ where
             (permutations, lookups)
         };
 
-        let vanishing_span =
-            info_span!("halo2_section", phase = "Commit to vanishing argument's random poly")
-                .entered();
+        let vanishing_span = info_span!(
+            "halo2_section",
+            phase = "Commit to vanishing argument's random poly"
+        )
+        .entered();
         // Random polynomial blinds h(x_3).
         let vanishing = vanishing::Argument::commit(params, domain, &mut rng, transcript).unwrap();
         vanishing_span.exit();
@@ -327,7 +332,11 @@ where
         info!("cals: {:?}", pk.ev.custom_gates.calculations.len());
         info!(
             "num_of_gates: {}",
-            pk.cs.gates.iter().map(|gate| gate.polynomials().len()).sum::<usize>()
+            pk.cs
+                .gates
+                .iter()
+                .map(|gate| gate.polynomials().len())
+                .sum::<usize>()
         );
         info!("rotations: {:?}", pk.ev.custom_gates.rotations.len());
 
@@ -338,8 +347,14 @@ where
             evaluation::evaluate_h_device(
                 &pk.ev,
                 pk,
-                &advice.iter().map(|a| a.advice_polys.as_slice()).collect::<Vec<_>>(),
-                &instance.iter().map(|i| i.instance_polys.as_slice()).collect::<Vec<_>>(),
+                &advice
+                    .iter()
+                    .map(|a| a.advice_polys.as_slice())
+                    .collect::<Vec<_>>(),
+                &instance
+                    .iter()
+                    .map(|i| i.instance_polys.as_slice())
+                    .collect::<Vec<_>>(),
                 &challenges,
                 *y,
                 *beta,
@@ -394,12 +409,18 @@ where
                     for instance in instance.iter() {
                         let batch_size = meta.instance_queries.len();
                         info!("    batch_size: {}", batch_size);
-                        info!("    instance.instance_polys.len: {}", instance.instance_polys.len());
+                        info!(
+                            "    instance.instance_polys.len: {}",
+                            instance.instance_polys.len()
+                        );
                         if batch_size == 0 || instance.instance_polys.is_empty() {
                             continue;
                         }
-                        let queries_idx: Vec<_> =
-                            meta.instance_queries.iter().map(|(c, at)| (c.index(), *at)).collect();
+                        let queries_idx: Vec<_> = meta
+                            .instance_queries
+                            .iter()
+                            .map(|(c, at)| (c.index(), *at))
+                            .collect();
                         let (poly_in_many_ori, eval_points) =
                             materialize_polys_for_batch_eval::<Scheme::Curve>(
                                 domain,
@@ -427,15 +448,20 @@ where
                     if advice.advice_polys.is_empty() {
                         continue;
                     }
-                    let queries_idx: Vec<_> =
-                        meta.advice_queries.iter().map(|(c, at)| (c.index(), *at)).collect();
+                    let queries_idx: Vec<_> = meta
+                        .advice_queries
+                        .iter()
+                        .map(|(c, at)| (c.index(), *at))
+                        .collect();
                     // Per-query DeviceBuffer references borrowed from `advice_polys`.
                     let d_polys: Vec<&DeviceBuffer<Scheme::Scalar>> = queries_idx
                         .iter()
                         .map(|(col_idx, _)| advice.advice_polys[*col_idx].device_buf())
                         .collect();
-                    let eval_points: Vec<Scheme::Scalar> =
-                        queries_idx.iter().map(|(_, at)| domain.rotate_omega(*x, *at)).collect();
+                    let eval_points: Vec<Scheme::Scalar> = queries_idx
+                        .iter()
+                        .map(|(_, at)| domain.rotate_omega(*x, *at))
+                        .collect();
                     let mut advice_evals = vec![Scheme::Scalar::ZERO; batch_size];
                     batch_eval_polynomial_d2h(&d_polys, &eval_points, &mut advice_evals)?;
                     for eval in advice_evals.iter() {
@@ -447,8 +473,11 @@ where
                 info!("fixed batch size: {}", batch_size);
                 info!("    pk.fixed_polys.len: {}", pk.inner.fixed_polys().len());
                 if batch_size > 0 && !pk.inner.fixed_polys().is_empty() {
-                    let queries_idx: Vec<_> =
-                        meta.fixed_queries.iter().map(|(c, at)| (c.index(), *at)).collect();
+                    let queries_idx: Vec<_> = meta
+                        .fixed_queries
+                        .iter()
+                        .map(|(c, at)| (c.index(), *at))
+                        .collect();
                     let (poly_in_many_ori, eval_points) =
                         materialize_polys_for_batch_eval::<Scheme::Curve>(
                             domain,
@@ -524,7 +553,10 @@ where
             let lookups: Vec<Vec<lookup::prover::Evaluated<Scheme::Curve>>> = lookups
                 .into_iter()
                 .map(|lookups| -> Vec<_> {
-                    lookups.into_iter().map(|p| p.evaluate(pk, x, transcript).unwrap()).collect()
+                    lookups
+                        .into_iter()
+                        .map(|p| p.evaluate(pk, x, transcript).unwrap())
+                        .collect()
                 })
                 .collect();
             eval_polys_span.exit();
@@ -566,10 +598,15 @@ where
                                 .into_iter()
                                 .flatten(),
                         )
-                        .chain(pk.cs.advice_queries.iter().map(move |&(column, at)| ProverQuery {
-                            point: domain.rotate_omega(*x, at),
-                            poly: (&advice.advice_polys[column.index()]).into(),
-                        }))
+                        .chain(
+                            pk.cs
+                                .advice_queries
+                                .iter()
+                                .map(move |&(column, at)| ProverQuery {
+                                    point: domain.rotate_omega(*x, at),
+                                    poly: (&advice.advice_polys[column.index()]).into(),
+                                }),
+                        )
                         .chain(permutation.open(pk, x))
                         .chain(lookups.iter().flat_map(move |p| p.open(pk, x)))
                 })
@@ -578,7 +615,10 @@ where
                         Some(d) => crate::poly::PolyRef::Device(&d[column.index()]),
                         None => crate::poly::PolyRef::Host(&pk.inner.fixed_polys()[column.index()]),
                     };
-                    ProverQuery { point: domain.rotate_omega(*x, at), poly }
+                    ProverQuery {
+                        point: domain.rotate_omega(*x, at),
+                        poly,
+                    }
                 }))
                 .chain((0..permutation_host_polys.len()).map(|idx| {
                     let poly = match permutation_polys_device_opt {
@@ -591,9 +631,11 @@ where
 
             let prover = P::new(params);
             let multiopen_span = info_span!("halo2_section", phase = "phase5 multiopen").entered();
-            let multiopen_res = prover.create_proof(rng, transcript, instances).map_err(|_| {
-                GpuError::Canonical(halo2_axiom::plonk::Error::ConstraintSystemFailure)
-            });
+            let multiopen_res = prover
+                .create_proof(rng, transcript, instances)
+                .map_err(|_| {
+                    GpuError::Canonical(halo2_axiom::plonk::Error::ConstraintSystemFailure)
+                });
             multiopen_span.exit();
 
             multiopen_res
