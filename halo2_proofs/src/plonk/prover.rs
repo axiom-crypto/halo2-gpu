@@ -89,20 +89,19 @@ where
     let gpu_pk = GpuProvingKey::from_host(pk);
     setup_span.exit();
 
-    let (advice, instance_refs) =
-        witness::synthesize_advices_and_instances::<Scheme, P, E, R, T, ConcreteCircuit>(
-            params,
-            &gpu_pk,
-            circuits,
-            instances,
-            &mut rng,
-            &mut transcript,
-        )?;
+    let advice = witness::synthesize_advice_columns::<Scheme, P, E, R, T, ConcreteCircuit>(
+        params,
+        &gpu_pk,
+        circuits,
+        instances,
+        &mut rng,
+        &mut transcript,
+    )?;
 
     create_proof_from_advice_with_pk::<Scheme, P, E, R, T>(
         params,
         &gpu_pk,
-        instance_refs,
+        instances[0],
         advice,
         rng,
         transcript,

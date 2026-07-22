@@ -438,15 +438,14 @@ where
 }
 
 /// Runs `Circuit::synthesize` and returns device-resident advice columns in
-/// the shape [`super::create_proof_from_advice`] expects, along with the
-/// single-circuit instance slice.
+/// the shape [`super::create_proof_from_advice`] expects
 ///
 /// Restricted to single-circuit, single-phase circuits: the returned advice
 /// still needs [`convert_raw_advice`] (invoked inside
 /// `create_proof_from_advice_with_pk`) to blind, commit, and squeeze the
 /// phase-0 challenges, so multi-phase would need additional round trips this
 /// entry point does not support.
-pub fn synthesize_advices_and_instances<
+pub fn synthesize_advice_columns<
     'params: 'a,
     'a,
     Scheme: CommitmentScheme,
@@ -462,7 +461,7 @@ pub fn synthesize_advices_and_instances<
     instances: &[&'a [&'a [Scheme::Scalar]]],
     rng: &mut R,
     transcript: &mut &'a mut T,
-) -> Result<(AdviceColumns<Scheme::Scalar>, &'a [&'a [Scheme::Scalar]]), GpuError>
+) -> Result<AdviceColumns<Scheme::Scalar>, GpuError>
 where
     Scheme::Scalar: Hash + WithSmallOrderMulGroup<3>,
     Scheme::ParamsProver: Sync,
@@ -526,12 +525,13 @@ where
         .map(DevicePolyExt::into_device_buf)
         .collect();
 
-    Ok((advice, instances[0]))
+    Ok(advice)
 }
 
 /// Diagnostic: runs [`Circuit::synthesize`] and returns the phase-1
 /// instance/advice singles without proving, for comparison against externally
 /// generated witnesses.
+#[allow(clippy::type_complexity)]
 pub fn synthesize_witness<
     'params: 'a,
     'a,
@@ -620,6 +620,7 @@ where
 /// Mirrors [`WitnessCollection::next_phase`] for advice that already lives on
 /// device: absorbs the instances, blinds and commits the advice columns, and
 /// squeezes this phase's challenges in the same transcript/rng order.
+#[allow(clippy::type_complexity)]
 pub(super) fn convert_raw_advice<Scheme: CommitmentScheme, R: RngCore, T, E>(
     domain: &poly::EvaluationDomain<Scheme::Scalar>,
     params: &Scheme::ParamsProver,
@@ -768,6 +769,7 @@ where
     ))
 }
 
+#[allow(clippy::type_complexity)]
 pub(super) fn new_gpu_thread<Scheme, C>(
     params: &Scheme::ParamsProver,
     domain: &EvaluationDomain<'_, C::Scalar>,
