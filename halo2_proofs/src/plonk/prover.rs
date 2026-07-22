@@ -1,46 +1,33 @@
 #![allow(clippy::type_complexity)]
 use ff::{Field, FromUniformBytes, WithSmallOrderMulGroup};
-use group::Curve;
-use itertools::Itertools;
 use log::info;
 use rand_core::RngCore;
-use rayon::prelude::*;
 
 use std::hash::Hash;
-use std::marker::PhantomData;
-use std::ops::RangeTo;
-use std::{collections::HashMap, iter};
+use std::iter;
 
+use super::witness::{convert_raw_advice, AdviceColumns};
 use super::{
-    circuit::sealed::{self},
-    lookup, permutation, vanishing, ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX,
-    ChallengeY, GpuError, GpuProvingKey, ProvingKey,
+    lookup, permutation, vanishing, witness, ChallengeBeta, ChallengeGamma, ChallengeTheta,
+    ChallengeX, ChallengeY, GpuError, GpuProvingKey, ProvingKey,
 };
-use crate::plonk::GpuConstraintSystem;
 use crate::{
     arithmetic::CurveAffine,
-    circuit::Value,
     cuda::funcs::batch_eval_polynomial_d2h,
-    plonk::{
-        evaluation, Advice, Any, Assigned, Assignment, Challenge, Circuit, Column,
-        ConstraintSystem, Fixed, FloorPlanner, GpuAssigned, Instance, Selector,
-    },
+    plonk::{evaluation, Circuit},
     poly::{
-        commitment::{Blind, CommitmentScheme, Params, Prover},
-        Coeff, EvaluationDomain, LagrangeCoeff, Polynomial, ProverQuery,
+        commitment::{CommitmentScheme, Params, Prover},
+        Coeff, EvaluationDomain, Polynomial, ProverQuery,
     },
 };
 use crate::{
-    poly::{batch_invert_assigned_device, Device, DevicePolyExt, HostPolyExt},
+    poly::{Device, DevicePolyExt},
     transcript::{EncodedChallenge, TranscriptWrite},
 };
-use halo2_axiom::poly;
 use tracing::info_span;
 
 use crate::cuda::funcs::ColumnPool;
-use crate::cuda::utils::HALO2_GPU_CTX;
 use crate::plonk::lookup::prover::CommittedUnpacked;
-use openvm_cuda_common::copy::MemCopyH2D;
 use openvm_cuda_common::d_buffer::DeviceBuffer;
 
 /// Warms the witness-independent device caches from a background thread.
@@ -96,270 +83,29 @@ where
     // before any early-return path.
     crate::perf_section_root!("create_proof");
 
-    assert_eq!(circuits.len(), instances.len());
-    assert_eq!(
-        circuits.len(),
-        1,
-        "create_proof supports exactly one circuit"
-    );
-
     let setup_span = info_span!("setup").entered();
     // The same view is handed to `create_proof_from_advice_with_pk` below, so mirrors
     // warmed during synthesis are the ones the later phases read.
     let gpu_pk = GpuProvingKey::from_host(pk);
-    let meta = &gpu_pk.cs;
-
-    let num_instance = meta.num_instance_columns;
-    for instance in instances.iter() {
-        if instance.len() != num_instance {
-            return Err(GpuError::Canonical(
-                halo2_axiom::plonk::Error::InvalidInstances,
-            ));
-        }
-    }
-
-    let domain = &gpu_pk.domain;
-    let mut cs = ConstraintSystem::default();
-    #[cfg(feature = "circuit-params")]
-    let config = ConcreteCircuit::configure_with_params(&mut cs, circuits[0].params());
-    #[cfg(not(feature = "circuit-params"))]
-    let config = ConcreteCircuit::configure(&mut cs);
-    // Selector compression never alters the constant columns, so these match `pk.cs`.
-    let constants = cs.constants().clone();
     setup_span.exit();
 
-    let phases = meta.phases().collect::<Vec<_>>();
-    assert_eq!(
-        phases.len(),
-        1,
-        "create_proof supports single-phase circuits only: multi-phase \
-         challenge squeezes interleave with synthesis and cannot go \
-         through create_proof_from_advice"
-    );
-
-    let mut column_indices = [(); 3].map(|_| vec![]);
-    for (index, phase) in meta.advice_column_phase.iter().enumerate() {
-        column_indices[phase.to_u8() as usize].push(index);
-    }
-    let mut challenge_indices = [(); 3].map(|_| vec![]);
-    for (index, phase) in meta.challenge_phase.iter().enumerate() {
-        challenge_indices[phase.to_u8() as usize].push(index);
-    }
-
-    let mut challenges = HashMap::<usize, Scheme::Scalar>::with_capacity(meta.num_challenges);
-    let params_n = params.n() as usize;
-    let unusable_rows_start = params_n - (meta.blinding_factors() + 1);
-
-    // Layout guard for the `GpuAssigned` → `Assigned` reinterpret in `assign_advice`.
-    crate::plonk::assert_canonical_assigned_matches_gpu_layout::<Scheme::Scalar>();
-
-    let witness_alloc = info_span!("alloc_witness_collection").entered();
-    let mut witness: WitnessCollection<Scheme, P, _, E, _, _> = WitnessCollection {
-        params,
-        params_n,
-        domain,
-        current_phase: phases[0],
-        num_instance_columns: num_instance,
-        num_advice_columns: meta.num_advice_columns,
-        advice: vec![GpuAssigned::Zero; params_n * meta.num_advice_columns],
-        instances: instances[0],
-        challenges: &mut challenges,
-        usable_rows: ..unusable_rows_start,
-        advice_single: AdviceSingleOption::<Scheme::Curve> {
-            advice_values: (0..meta.num_advice_columns).map(|_| None).collect(),
-            advice_polys: (0..meta.num_advice_columns).map(|_| None).collect(),
-        },
-        instance_single: InstanceSingle::<Scheme::Curve>::default(),
-        rng: &mut rng,
-        transcript: &mut transcript,
-        column_indices,
-        challenge_indices,
-        unusable_rows_start,
-        _marker: PhantomData,
-    };
-    witness_alloc.exit();
-
-    let witness_assign_span = info_span!("halo2_section", phase = "synthesize").entered();
-    ConcreteCircuit::FloorPlanner::synthesize(&mut witness, &circuits[0], config, constants)
-        .expect("synthesize failed");
-    witness_assign_span.exit();
-
-    // Blinding rows stay `Zero` here; `convert_raw_advice` draws blinders from
-    // `rng` on device in the legacy column-major order — proof bytes unchanged.
-    let batch_invert_span =
-        info_span!("halo2_section", phase = "batch invert witness assignment").entered();
-    let advice = batch_invert_assigned_device(
-        (0..meta.num_advice_columns)
-            .map(|column_index| {
-                &witness.advice[column_index * params_n..(column_index + 1) * params_n]
-            })
-            .collect::<Vec<&[GpuAssigned<Scheme::Scalar>]>>(),
-    )
-    .map_err(GpuError::HaloGpu)?;
-    batch_invert_span.exit();
-
-    let advice = advice
-        .into_iter()
-        .map(DevicePolyExt::into_device_buf)
-        .collect();
+    let (advice, instance_refs) = witness::synthesize_advices_and_instances::<
+        Scheme,
+        P,
+        E,
+        R,
+        T,
+        ConcreteCircuit,
+    >(params, &gpu_pk, circuits, instances, &mut rng, &mut transcript)?;
 
     create_proof_from_advice_with_pk::<Scheme, P, E, R, T>(
         params,
         &gpu_pk,
-        instances[0],
+        instance_refs,
         advice,
         rng,
         transcript,
     )
-}
-
-/// Diagnostic: runs [`Circuit::synthesize`] and returns the phase-1
-/// instance/advice singles without proving, for comparison against externally
-/// generated witnesses.
-pub fn synthesize_witness<
-    'params: 'a,
-    'a,
-    Scheme: CommitmentScheme,
-    P: Prover<'params, Scheme>,
-    E: EncodedChallenge<Scheme::Curve>,
-    R: RngCore + Send + 'a,
-    T: TranscriptWrite<Scheme::Curve, E>,
-    ConcreteCircuit: Circuit<Scheme::Scalar>,
->(
-    params: &'params Scheme::ParamsProver,
-    pk: &ProvingKey<Scheme::Curve>,
-    circuits: &[ConcreteCircuit],
-    instances: &[&'a [&'a [Scheme::Scalar]]],
-    mut rng: R,
-    mut transcript: &'a mut T,
-) -> Result<
-    (
-        Vec<InstanceSingle<Scheme::Curve>>,
-        Vec<AdviceSingle<Scheme::Curve>>,
-        Vec<Scheme::Scalar>,
-    ),
-    GpuError,
->
-where
-    Scheme::Scalar: Hash + WithSmallOrderMulGroup<3> + FromUniformBytes<64>,
-    Scheme::ParamsProver: Sync,
-{
-    assert_eq!(circuits.len(), instances.len());
-    assert!(!circuits.is_empty());
-
-    let gpu_pk = GpuProvingKey::from_host(pk);
-    let pk = &gpu_pk;
-
-    let num_instance = pk.cs.num_instance_columns;
-    for instance in instances.iter() {
-        if instance.len() != num_instance {
-            return Err(GpuError::Canonical(
-                halo2_axiom::plonk::Error::InvalidInstances,
-            ));
-        }
-    }
-    pk.hash_into(transcript)?;
-
-    let domain = &pk.domain;
-    let mut meta = ConstraintSystem::default();
-    #[cfg(feature = "circuit-params")]
-    let config = ConcreteCircuit::configure_with_params(&mut meta, circuits[0].params());
-    #[cfg(not(feature = "circuit-params"))]
-    let config = ConcreteCircuit::configure(&mut meta);
-
-    let constants = meta.constants().clone();
-    let meta = &pk.cs;
-
-    let mut column_indices = [(); 3].map(|_| vec![]);
-    for (index, phase) in meta.advice_column_phase.iter().enumerate() {
-        column_indices[phase.to_u8() as usize].push(index);
-    }
-    let mut challenge_indices = [(); 3].map(|_| vec![]);
-    for (index, phase) in meta.challenge_phase.iter().enumerate() {
-        challenge_indices[phase.to_u8() as usize].push(index);
-    }
-
-    let mut advice = Vec::with_capacity(instances.len());
-    let mut instance = Vec::with_capacity(instances.len());
-
-    let unusable_rows_start = params.n() as usize - (meta.blinding_factors() + 1);
-    let phases = pk.cs.phases().collect::<Vec<_>>();
-    let num_phases = phases.len();
-    if num_phases > 1 {
-        assert_eq!(
-            circuits.len(),
-            1,
-            "New challenge API doesn't work with multiple circuits yet"
-        );
-    }
-
-    let mut challenges = HashMap::<usize, Scheme::Scalar>::with_capacity(meta.num_challenges);
-
-    crate::plonk::assert_canonical_assigned_matches_gpu_layout::<Scheme::Scalar>();
-
-    for (circuit, instances) in circuits.iter().zip(instances) {
-        let mut witness: WitnessCollection<Scheme, P, _, E, _, _> = WitnessCollection {
-            params,
-            params_n: params.n() as usize,
-            domain,
-            current_phase: phases[0],
-            num_instance_columns: num_instance,
-            num_advice_columns: meta.num_advice_columns,
-            advice: vec![GpuAssigned::Zero; params.n() as usize * meta.num_advice_columns],
-            instances,
-            challenges: &mut challenges,
-            usable_rows: ..unusable_rows_start,
-            advice_single: AdviceSingleOption::<Scheme::Curve> {
-                advice_values: (0..meta.num_advice_columns).map(|_| None).collect(),
-                advice_polys: (0..meta.num_advice_columns).map(|_| None).collect(),
-            },
-            instance_single: InstanceSingle::<Scheme::Curve>::default(),
-            rng: &mut rng,
-            transcript: &mut transcript,
-            column_indices: column_indices.clone(),
-            challenge_indices: challenge_indices.clone(),
-            unusable_rows_start,
-            _marker: PhantomData,
-        };
-
-        while witness.current_phase.to_u8() < num_phases as u8 {
-            ConcreteCircuit::FloorPlanner::synthesize(
-                &mut witness,
-                circuit,
-                config.clone(),
-                constants.clone(),
-            )
-            .expect("synthesize failed");
-            if witness.current_phase.to_u8() < num_phases as u8 {
-                witness.next_phase();
-            }
-        }
-
-        let advice_values = witness
-            .advice_single
-            .advice_values
-            .into_iter()
-            .map(|c| c.unwrap())
-            .collect();
-        let advice_polys = witness
-            .advice_single
-            .advice_polys
-            .into_iter()
-            .map(|c| c.unwrap())
-            .collect();
-        advice.push(AdviceSingle::<Scheme::Curve> {
-            advice_values,
-            advice_polys,
-        });
-        instance.push(witness.instance_single);
-    }
-
-    assert_eq!(challenges.len(), meta.num_challenges);
-    let challenges = (0..meta.num_challenges)
-        .map(|index| challenges.remove(&index).unwrap())
-        .collect::<Vec<_>>();
-
-    Ok((instance, advice, challenges))
 }
 
 /// Creates a proof from pre-synthesized advice columns.
@@ -418,9 +164,7 @@ where
     Scheme::ParamsProver: Sync,
 {
     if instances.len() != pk.cs.num_instance_columns {
-        return Err(GpuError::Canonical(
-            halo2_axiom::plonk::Error::InvalidInstances,
-        ));
+        return Err(GpuError::Canonical(halo2_axiom::plonk::Error::InvalidInstances));
     }
     pk.hash_into(transcript)?;
 
@@ -565,11 +309,9 @@ where
             (permutations, lookups)
         };
 
-        let vanishing_span = info_span!(
-            "halo2_section",
-            phase = "Commit to vanishing argument's random poly"
-        )
-        .entered();
+        let vanishing_span =
+            info_span!("halo2_section", phase = "Commit to vanishing argument's random poly")
+                .entered();
         // Random polynomial blinds h(x_3).
         let vanishing = vanishing::Argument::commit(params, domain, &mut rng, transcript).unwrap();
         vanishing_span.exit();
@@ -585,11 +327,7 @@ where
         info!("cals: {:?}", pk.ev.custom_gates.calculations.len());
         info!(
             "num_of_gates: {}",
-            pk.cs
-                .gates
-                .iter()
-                .map(|gate| gate.polynomials().len())
-                .sum::<usize>()
+            pk.cs.gates.iter().map(|gate| gate.polynomials().len()).sum::<usize>()
         );
         info!("rotations: {:?}", pk.ev.custom_gates.rotations.len());
 
@@ -600,14 +338,8 @@ where
             evaluation::evaluate_h_device(
                 &pk.ev,
                 pk,
-                &advice
-                    .iter()
-                    .map(|a| a.advice_polys.as_slice())
-                    .collect::<Vec<_>>(),
-                &instance
-                    .iter()
-                    .map(|i| i.instance_polys.as_slice())
-                    .collect::<Vec<_>>(),
+                &advice.iter().map(|a| a.advice_polys.as_slice()).collect::<Vec<_>>(),
+                &instance.iter().map(|i| i.instance_polys.as_slice()).collect::<Vec<_>>(),
                 &challenges,
                 *y,
                 *beta,
@@ -662,18 +394,12 @@ where
                     for instance in instance.iter() {
                         let batch_size = meta.instance_queries.len();
                         info!("    batch_size: {}", batch_size);
-                        info!(
-                            "    instance.instance_polys.len: {}",
-                            instance.instance_polys.len()
-                        );
+                        info!("    instance.instance_polys.len: {}", instance.instance_polys.len());
                         if batch_size == 0 || instance.instance_polys.is_empty() {
                             continue;
                         }
-                        let queries_idx: Vec<_> = meta
-                            .instance_queries
-                            .iter()
-                            .map(|(c, at)| (c.index(), *at))
-                            .collect();
+                        let queries_idx: Vec<_> =
+                            meta.instance_queries.iter().map(|(c, at)| (c.index(), *at)).collect();
                         let (poly_in_many_ori, eval_points) =
                             materialize_polys_for_batch_eval::<Scheme::Curve>(
                                 domain,
@@ -701,20 +427,15 @@ where
                     if advice.advice_polys.is_empty() {
                         continue;
                     }
-                    let queries_idx: Vec<_> = meta
-                        .advice_queries
-                        .iter()
-                        .map(|(c, at)| (c.index(), *at))
-                        .collect();
+                    let queries_idx: Vec<_> =
+                        meta.advice_queries.iter().map(|(c, at)| (c.index(), *at)).collect();
                     // Per-query DeviceBuffer references borrowed from `advice_polys`.
                     let d_polys: Vec<&DeviceBuffer<Scheme::Scalar>> = queries_idx
                         .iter()
                         .map(|(col_idx, _)| advice.advice_polys[*col_idx].device_buf())
                         .collect();
-                    let eval_points: Vec<Scheme::Scalar> = queries_idx
-                        .iter()
-                        .map(|(_, at)| domain.rotate_omega(*x, *at))
-                        .collect();
+                    let eval_points: Vec<Scheme::Scalar> =
+                        queries_idx.iter().map(|(_, at)| domain.rotate_omega(*x, *at)).collect();
                     let mut advice_evals = vec![Scheme::Scalar::ZERO; batch_size];
                     batch_eval_polynomial_d2h(&d_polys, &eval_points, &mut advice_evals)?;
                     for eval in advice_evals.iter() {
@@ -726,11 +447,8 @@ where
                 info!("fixed batch size: {}", batch_size);
                 info!("    pk.fixed_polys.len: {}", pk.inner.fixed_polys().len());
                 if batch_size > 0 && !pk.inner.fixed_polys().is_empty() {
-                    let queries_idx: Vec<_> = meta
-                        .fixed_queries
-                        .iter()
-                        .map(|(c, at)| (c.index(), *at))
-                        .collect();
+                    let queries_idx: Vec<_> =
+                        meta.fixed_queries.iter().map(|(c, at)| (c.index(), *at)).collect();
                     let (poly_in_many_ori, eval_points) =
                         materialize_polys_for_batch_eval::<Scheme::Curve>(
                             domain,
@@ -806,10 +524,7 @@ where
             let lookups: Vec<Vec<lookup::prover::Evaluated<Scheme::Curve>>> = lookups
                 .into_iter()
                 .map(|lookups| -> Vec<_> {
-                    lookups
-                        .into_iter()
-                        .map(|p| p.evaluate(pk, x, transcript).unwrap())
-                        .collect()
+                    lookups.into_iter().map(|p| p.evaluate(pk, x, transcript).unwrap()).collect()
                 })
                 .collect();
             eval_polys_span.exit();
@@ -851,15 +566,10 @@ where
                                 .into_iter()
                                 .flatten(),
                         )
-                        .chain(
-                            pk.cs
-                                .advice_queries
-                                .iter()
-                                .map(move |&(column, at)| ProverQuery {
-                                    point: domain.rotate_omega(*x, at),
-                                    poly: (&advice.advice_polys[column.index()]).into(),
-                                }),
-                        )
+                        .chain(pk.cs.advice_queries.iter().map(move |&(column, at)| ProverQuery {
+                            point: domain.rotate_omega(*x, at),
+                            poly: (&advice.advice_polys[column.index()]).into(),
+                        }))
                         .chain(permutation.open(pk, x))
                         .chain(lookups.iter().flat_map(move |p| p.open(pk, x)))
                 })
@@ -868,10 +578,7 @@ where
                         Some(d) => crate::poly::PolyRef::Device(&d[column.index()]),
                         None => crate::poly::PolyRef::Host(&pk.inner.fixed_polys()[column.index()]),
                     };
-                    ProverQuery {
-                        point: domain.rotate_omega(*x, at),
-                        poly,
-                    }
+                    ProverQuery { point: domain.rotate_omega(*x, at), poly }
                 }))
                 .chain((0..permutation_host_polys.len()).map(|idx| {
                     let poly = match permutation_polys_device_opt {
@@ -884,580 +591,12 @@ where
 
             let prover = P::new(params);
             let multiopen_span = info_span!("halo2_section", phase = "phase5 multiopen").entered();
-            let multiopen_res = prover
-                .create_proof(rng, transcript, instances)
-                .map_err(|_| {
-                    GpuError::Canonical(halo2_axiom::plonk::Error::ConstraintSystemFailure)
-                });
+            let multiopen_res = prover.create_proof(rng, transcript, instances).map_err(|_| {
+                GpuError::Canonical(halo2_axiom::plonk::Error::ConstraintSystemFailure)
+            });
             multiopen_span.exit();
 
             multiopen_res
         }
     })
-}
-
-#[derive(Default, Debug)]
-pub struct InstanceSingle<C: CurveAffine> {
-    pub instance_values: Vec<Polynomial<C::Scalar, LagrangeCoeff, Device>>,
-    pub instance_polys: Vec<Polynomial<C::Scalar, Coeff, Device>>,
-}
-
-#[derive(Default, Debug)]
-pub struct AdviceSingle<C: CurveAffine> {
-    pub advice_values: Vec<Polynomial<C::Scalar, LagrangeCoeff, Device>>,
-    pub advice_polys: Vec<Polynomial<C::Scalar, Coeff, Device>>,
-}
-
-/// The shape of advice columns accepted by [`create_proof_from_advice`]: one
-/// device-resident `DeviceBuffer<F>` per physical advice column, each of
-/// length `params.n()`.
-///
-/// Aliased so downstream crates can name it unconditionally: the CPU halo2
-/// fork exposes the same type name at the same path with a host `Vec<F>`
-/// element type. Callers reading `halo2_proofs::plonk::AdviceColumns`
-/// therefore stay portable across the cpu/cuda forks without a feature gate.
-pub type AdviceColumns<F> = Vec<DeviceBuffer<F>>;
-
-struct AdviceSingleOption<C: CurveAffine> {
-    pub advice_values: Vec<Option<Polynomial<C::Scalar, LagrangeCoeff, Device>>>,
-    pub advice_polys: Vec<Option<Polynomial<C::Scalar, Coeff, Device>>>,
-}
-
-struct WitnessCollection<'params, 'a, 'b, Scheme, P, C, E, R, T>
-where
-    Scheme: CommitmentScheme<Curve = C, Scalar = C::ScalarExt>,
-    P: Prover<'params, Scheme>,
-    C: CurveAffine,
-    E: EncodedChallenge<C>,
-    R: RngCore + 'a,
-    T: TranscriptWrite<C, E>,
-{
-    params: &'params Scheme::ParamsProver,
-    params_n: usize,
-    domain: &'b EvaluationDomain<'b, Scheme::Scalar>,
-    current_phase: sealed::Phase,
-    #[allow(dead_code)]
-    num_instance_columns: usize,
-    #[allow(dead_code)]
-    num_advice_columns: usize,
-    // Advice cells in device-repr `GpuAssigned` so the per-phase
-    // `batch_invert_assigned_device` upload borrows each column directly. The
-    // canonical `Assigned` from `assign_advice` is reinterpreted from these
-    // bytes (layouts checked by `assert_canonical_assigned_matches_gpu_layout`).
-    pub advice: Vec<GpuAssigned<C::Scalar>>,
-    challenges: &'b mut HashMap<usize, C::Scalar>,
-    instances: &'a [&'a [C::Scalar]],
-    usable_rows: RangeTo<usize>,
-    advice_single: AdviceSingleOption<C>,
-    instance_single: InstanceSingle<C>,
-    rng: &'b mut R,
-    transcript: &'b mut &'a mut T,
-    column_indices: [Vec<usize>; 3],
-    challenge_indices: [Vec<usize>; 3],
-    unusable_rows_start: usize,
-    _marker: PhantomData<(P, E)>,
-}
-
-impl<'params: 'b, 'a, 'b, F, Scheme, P, C, E, R, T> Assignment<F>
-    for WitnessCollection<'params, 'a, 'b, Scheme, P, C, E, R, T>
-where
-    F: WithSmallOrderMulGroup<3>,
-    Scheme: CommitmentScheme<Curve = C, Scalar = C::ScalarExt>,
-    P: Prover<'params, Scheme>,
-    C: CurveAffine<ScalarExt = F>,
-    E: EncodedChallenge<C>,
-    R: RngCore + Send + 'a,
-    T: TranscriptWrite<C, E>,
-{
-    fn enter_region<NR, N>(&mut self, _: N)
-    where
-        NR: Into<String>,
-        N: FnOnce() -> NR,
-    {
-    }
-
-    fn exit_region(&mut self) {}
-
-    fn enable_selector<A, AR>(
-        &mut self,
-        _: A,
-        _: &Selector,
-        _: usize,
-    ) -> Result<(), halo2_axiom::plonk::Error>
-    where
-        A: FnOnce() -> AR,
-        AR: Into<String>,
-    {
-        Ok(())
-    }
-
-    fn annotate_column<A, AR>(&mut self, _annotation: A, _column: Column<Any>)
-    where
-        A: FnOnce() -> AR,
-        AR: Into<String>,
-    {
-    }
-
-    fn query_instance(
-        &self,
-        column: Column<Instance>,
-        row: usize,
-    ) -> Result<Value<F>, halo2_axiom::plonk::Error> {
-        if !self.usable_rows.contains(&row) {
-            // Build the canonical error variant directly (its constructor is `pub(crate)`).
-            return Err(halo2_axiom::plonk::Error::NotEnoughRowsAvailable {
-                current_k: self.params.k(),
-            });
-        }
-
-        self.instances
-            .get(column.index())
-            .and_then(|column| column.get(row))
-            .map(|v| Value::known(*v))
-            .ok_or(halo2_axiom::plonk::Error::BoundsFailure)
-    }
-
-    fn assign_advice<'v>(
-        &mut self,
-        column: Column<Advice>,
-        row: usize,
-        to: Value<Assigned<F>>,
-    ) -> Value<&'v Assigned<F>> {
-        debug_assert!(
-            self.usable_rows.contains(&row),
-            "{:?}",
-            GpuError::not_enough_rows_available(self.params.k())
-        );
-
-        // 3-4% witness-gen speedup vs `get_mut` + bounds checks.
-        let advice_get_mut = unsafe {
-            self.advice
-                .get_unchecked_mut(column.index() * self.params_n + row)
-        };
-        // `Value::assign()` is `pub(crate)`; extract the known `Assigned` via
-        // the public `map`, preserving the panic-on-unknown contract.
-        let mut assigned = None;
-        to.map(|v| assigned = Some(v));
-        *advice_get_mut = GpuAssigned::from(
-            assigned.expect("No Value::unknown() in advice column allowed during create_proof"),
-        );
-        // The contract returns `Value<&Assigned<F>>`. The stored cell is
-        // reinterpreted in place (layouts coincide per
-        // `assert_canonical_assigned_matches_gpu_layout`); the reference stays
-        // valid because `advice` is pre-sized and never reallocated.
-        let immutable_raw_ptr = advice_get_mut as *const GpuAssigned<F> as *const Assigned<F>;
-        Value::known(unsafe { &*immutable_raw_ptr })
-    }
-
-    fn assign_fixed(&mut self, _: Column<Fixed>, _: usize, _: Assigned<F>) {}
-
-    fn copy(&mut self, _: Column<Any>, _: usize, _: Column<Any>, _: usize) {}
-
-    fn fill_from_row(
-        &mut self,
-        _: Column<Fixed>,
-        _: usize,
-        _: Value<Assigned<F>>,
-    ) -> Result<(), halo2_axiom::plonk::Error> {
-        Ok(())
-    }
-
-    fn get_challenge(&self, challenge: Challenge) -> Value<F> {
-        self.challenges
-            .get(&challenge.index())
-            .cloned()
-            .map(Value::known)
-            .unwrap_or_else(Value::unknown)
-    }
-
-    fn push_namespace<NR, N>(&mut self, _: N)
-    where
-        NR: Into<String>,
-        N: FnOnce() -> NR,
-    {
-    }
-
-    fn pop_namespace(&mut self, _: Option<String>) {}
-
-    fn next_phase(&mut self) {
-        crate::perf_section!("witness.next_phase");
-        let phase = self.current_phase.to_u8() as usize;
-        let mut instance_values = vec![];
-        if phase == 0 {
-            let timer =
-                info_span!("halo2_section", phase = "absorb instances into transcript").entered();
-            if !P::QUERY_INSTANCE {
-                for values in self.instances.iter() {
-                    for value in values.iter() {
-                        self.transcript
-                            .common_scalar(*value)
-                            .expect("Absorb instance value failed");
-                    }
-                }
-            }
-            instance_values = self
-                .instances
-                .iter()
-                .map(|values| {
-                    let mut poly = self.domain.empty_lagrange();
-                    debug_assert_eq!(poly.len(), self.params.n() as usize);
-                    debug_assert!(
-                        values.len() <= self.unusable_rows_start,
-                        "GpuError: InstanceTooLarge"
-                    );
-                    poly.values_mut()
-                        .par_iter_mut()
-                        .zip(values.par_iter())
-                        .for_each(|(poly, value)| {
-                            *poly = *value;
-                        });
-                    poly
-                })
-                .collect::<Vec<_>>();
-            timer.exit();
-        }
-
-        let bf_span = info_span!("halo2_section", phase = "add blinding factors").entered();
-        // `Trivial(F::random)` round-trips through batch_invert unchanged
-        // (denominator None), so the device cells get the blinder directly.
-        let column_indices_for_phase = self
-            .column_indices
-            .get(phase)
-            .expect("The API only supports 3 phases right now")
-            .clone();
-        for column_index in column_indices_for_phase.iter() {
-            let col_start = *column_index * self.params_n;
-            let blind_start = col_start + self.unusable_rows_start;
-            let col_end = col_start + self.params_n;
-            for cell in &mut self.advice[blind_start..col_end] {
-                *cell = GpuAssigned::Trivial(F::random(&mut self.rng));
-            }
-        }
-        bf_span.exit();
-
-        let batch_invert_span =
-            info_span!("halo2_section", phase = "batch invert witness assignment").entered();
-        // Advice cells are already device-repr `GpuAssigned`, handed to the upload
-        // kernel by borrow.
-        let advice_values = batch_invert_assigned_device(
-            column_indices_for_phase
-                .iter()
-                .map(|column_index| {
-                    &self.advice[*column_index * self.params_n..(*column_index + 1) * self.params_n]
-                })
-                .collect::<Vec<&[GpuAssigned<C::Scalar>]>>(),
-        )
-        .expect("batch_invert_assigned_device (CUDA) failed inside Assignment::next_phase");
-        batch_invert_span.exit();
-
-        let timer = info_span!(
-            "halo2_section",
-            phase = "ifft & MSM on instance/advice columns (GPU)"
-        )
-        .entered();
-        let (instance_single, advice_polys, commitments) = new_gpu_thread::<Scheme, C>(
-            self.params,
-            self.domain,
-            instance_values,
-            &advice_values,
-            P::QUERY_INSTANCE,
-        )
-        .expect("new_gpu_thread (CUDA FFT/MSM) failed inside Assignment::next_phase");
-        timer.exit();
-        let timer = info_span!("halo2_section", phase = "transcript write / squeeze").entered();
-
-        if phase == 0 {
-            self.instance_single = instance_single;
-        }
-
-        let mut commitments = commitments.into_iter();
-        if phase == 0 && P::QUERY_INSTANCE {
-            let num_instance_commitments = self.instance_single.instance_polys.len();
-            for _ in 0..num_instance_commitments {
-                self.transcript
-                    .common_point(
-                        commitments
-                            .next()
-                            .expect("Did not commit to instance polynomials"),
-                    )
-                    .unwrap();
-            }
-        }
-
-        for commitment in commitments {
-            self.transcript
-                .write_point(commitment)
-                .expect("absorb commitment point");
-        }
-        let column_indices = self.column_indices[phase].iter().copied();
-        let advice_values = advice_values.into_iter();
-        let advice_polys = advice_polys.into_iter();
-        for (column_index, (advice_value, advice_poly)) in
-            column_indices.zip(advice_values.zip(advice_polys))
-        {
-            self.advice_single.advice_values[column_index] = Some(advice_value);
-            self.advice_single.advice_polys[column_index] = Some(advice_poly);
-        }
-
-        for challenge_index in self.challenge_indices[phase].iter() {
-            let existing = self.challenges.insert(
-                *challenge_index,
-                *self.transcript.squeeze_challenge_scalar::<()>(),
-            );
-            assert!(existing.is_none());
-        }
-        self.current_phase = self.current_phase.next();
-        timer.exit();
-    }
-}
-
-/// Mirrors [`WitnessCollection::next_phase`] for advice that already lives on
-/// device: absorbs the instances, blinds and commits the advice columns, and
-/// squeezes this phase's challenges in the same transcript/rng order.
-fn convert_raw_advice<Scheme: CommitmentScheme, R: RngCore, T, E>(
-    domain: &poly::EvaluationDomain<Scheme::Scalar>,
-    params: &Scheme::ParamsProver,
-    meta: &GpuConstraintSystem<Scheme::Scalar>,
-    instances: &[&[Scheme::Scalar]],
-    mut advice_values: Vec<DeviceBuffer<Scheme::Scalar>>,
-    transcript: &mut T,
-    mut rng: &mut R,
-    phase: usize,
-    prover_query_instance: bool,
-) -> Result<
-    (
-        InstanceSingle<Scheme::Curve>,
-        AdviceSingle<Scheme::Curve>,
-        Vec<Scheme::Scalar>, // challenge
-    ),
-    GpuError,
->
-where
-    T: TranscriptWrite<Scheme::Curve, E>,
-    E: EncodedChallenge<Scheme::Curve>,
-    Scheme::Scalar: WithSmallOrderMulGroup<3>,
-{
-    crate::perf_section!("convert_raw_advice");
-
-    let param_n = params.n() as usize;
-    let mut challenge_indices = [(); 3].map(|_| vec![]);
-    for (index, phase) in meta.challenge_phase().iter().enumerate() {
-        challenge_indices[*phase as usize].push(index);
-    }
-
-    let mut column_indices = [(); 3].map(|_| vec![]);
-    for (index, phase) in meta.advice_column_phase().iter().enumerate() {
-        column_indices[*phase as usize].push(index);
-    }
-
-    if !prover_query_instance {
-        for values in instances.iter() {
-            for value in values.iter() {
-                transcript
-                    .common_scalar(*value)
-                    .expect("Absorb instance value failed");
-            }
-        }
-    }
-
-    let unusable_rows_start = param_n - (meta.blinding_factors() + 1);
-    let instance_values = instances
-        .iter()
-        .map(|values| {
-            let mut poly = domain.empty_lagrange();
-            debug_assert_eq!(poly.len(), param_n);
-            debug_assert!(
-                values.len() <= unusable_rows_start,
-                "GpuError: InstanceTooLarge"
-            );
-            poly.values_mut()
-                .par_iter_mut()
-                .zip(values.par_iter())
-                .for_each(|(poly, value)| {
-                    *poly = *value;
-                });
-            poly
-        })
-        .collect::<Vec<_>>();
-
-    let bf_span = info_span!("halo2_section", phase = "add blinding factors").entered();
-    // Draw all blinders on host in the legacy rng order, then H2D each column's
-    // tail on the crate stream.
-    let column_indices_for_phase = column_indices
-        .get(phase)
-        .expect("The API only supports 3 phases right now")
-        .clone();
-    let n_blind = param_n - unusable_rows_start;
-    let blinders: Vec<Vec<Scheme::Scalar>> = column_indices_for_phase
-        .iter()
-        .map(|_| {
-            (0..n_blind)
-                .map(|_| Scheme::Scalar::random(&mut rng))
-                .collect()
-        })
-        .collect();
-    for (column_index, col_blinders) in column_indices_for_phase.iter().zip(blinders.iter()) {
-        advice_values[*column_index]
-            .mut_slice(unusable_rows_start..param_n)
-            .copy_from_host(col_blinders, &HALO2_GPU_CTX)
-            .expect("blinding factor H2D copy failed");
-    }
-    bf_span.exit();
-
-    let advice_values = advice_values
-        .into_iter()
-        .map(Polynomial::from_device)
-        .collect_vec();
-
-    let timer = info_span!(
-        "halo2_section",
-        phase = "ifft & MSM on instance/advice columns (GPU)"
-    )
-    .entered();
-    let (instance_single, advice_polys, commitments) = new_gpu_thread::<Scheme, _>(
-        params,
-        &EvaluationDomain::from_host_domain(domain),
-        instance_values,
-        &advice_values,
-        prover_query_instance,
-    )
-    .expect("new_gpu_thread (CUDA FFT/MSM) failed inside convert_raw_advice");
-    timer.exit();
-
-    let timer = info_span!("halo2_section", phase = "transcript write / squeeze").entered();
-
-    let mut commitments = commitments.into_iter();
-    if phase == 0 && prover_query_instance {
-        let num_instance_commitments = instance_single.instance_polys.len();
-        for _ in 0..num_instance_commitments {
-            transcript
-                .common_point(
-                    commitments
-                        .next()
-                        .expect("Did not commit to instance polynomials"),
-                )
-                .unwrap();
-        }
-    }
-
-    for commitment in commitments {
-        transcript
-            .write_point(commitment)
-            .expect("absorb commitment point");
-    }
-
-    let mut challenges = vec![];
-    for _ in challenge_indices[phase].iter() {
-        challenges.push(*transcript.squeeze_challenge_scalar::<()>());
-    }
-    timer.exit();
-
-    Ok((
-        instance_single,
-        AdviceSingle {
-            advice_polys,
-            advice_values,
-        },
-        challenges,
-    ))
-}
-
-fn new_gpu_thread<Scheme, C>(
-    params: &Scheme::ParamsProver,
-    domain: &EvaluationDomain<'_, C::Scalar>,
-    instance_values: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
-    advice_values: &[Polynomial<C::Scalar, LagrangeCoeff, Device>],
-    query_instance: bool,
-) -> Result<
-    (
-        InstanceSingle<C>,
-        Vec<Polynomial<C::Scalar, Coeff, Device>>,
-        Vec<C>,
-    ),
-    GpuError,
->
-where
-    Scheme: CommitmentScheme<Curve = C, Scalar = C::ScalarExt>,
-    C: CurveAffine,
-{
-    crate::perf_section!("new_gpu_thread");
-    let num_instance = instance_values.len();
-    let num_advice = advice_values.len();
-    let mut instance_polys = Vec::with_capacity(num_instance);
-
-    let mut commitments = Vec::with_capacity(num_advice + (query_instance as usize) * num_instance);
-
-    if query_instance {
-        let msm_span =
-            info_span!("halo2_section", phase = %format!("{} MSMs", instance_values.len()))
-                .entered();
-        for v in instance_values.iter() {
-            let commit = params.commit_lagrange(v, Blind::default());
-            commitments.push(commit);
-        }
-        msm_span.exit();
-    }
-
-    let msm_span =
-        info_span!("halo2_section", phase = %format!("{} MSMs", advice_values.len())).entered();
-    for v in advice_values.iter() {
-        let commit = params.commit_lagrange_device(v, Blind::default());
-        commitments.push(commit);
-    }
-    msm_span.exit();
-
-    if !instance_values.is_empty() {
-        let ifft_span =
-            info_span!("halo2_section", phase = %format!("{} ifft time", instance_values.len()))
-                .entered();
-        let batch_polys = domain.lagrange_to_coeff_many(
-            &instance_values
-                .iter()
-                .map(|p| p.to_device_on(&HALO2_GPU_CTX).unwrap())
-                .collect::<Vec<_>>(),
-        )?;
-        ifft_span.exit();
-        instance_polys.extend(batch_polys);
-    }
-
-    // Device-resident advice iFFT: `advice_values` → `advice_polys`.
-    let advice_ifft_span = info_span!(
-        "halo2_section",
-        phase = %format!("{} advice ifft (device)", advice_values.len())
-    )
-    .entered();
-    let advice_polys: Vec<Polynomial<C::Scalar, Coeff, Device>> = {
-        crate::perf_section!("advice_ifft");
-        domain.lagrange_to_coeff_many_device_inputs(advice_values)?
-    };
-    advice_ifft_span.exit();
-
-    let instance_values_device: Vec<Polynomial<C::Scalar, LagrangeCoeff, Device>> = {
-        crate::perf_section!("new_gpu_thread.instance_to_device");
-        instance_values
-            .iter()
-            .map(|p| -> Result<_, GpuError> {
-                let d_buf = p
-                    .values()
-                    .to_device_on(&HALO2_GPU_CTX)
-                    .map_err(crate::cuda::HaloGpuError::from)?;
-                Ok(Polynomial::<C::Scalar, LagrangeCoeff, Device>::from_device(
-                    d_buf,
-                ))
-            })
-            .collect::<Result<_, _>>()?
-    };
-
-    let instance_single = InstanceSingle {
-        instance_values: instance_values_device,
-        instance_polys,
-    };
-    let batch_span =
-        info_span!("halo2_section", phase = "batch normalize projective points").entered();
-    let commitments_projective = commitments;
-    let mut commitments = vec![Scheme::Curve::identity(); commitments_projective.len()];
-    C::CurveExt::batch_normalize(&commitments_projective, &mut commitments);
-    batch_span.exit();
-
-    Ok((instance_single, advice_polys, commitments))
 }
