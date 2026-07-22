@@ -104,7 +104,7 @@ where
     );
 
     let setup_span = info_span!("setup").entered();
-    // The same view is handed to `create_proof_raw_with_pk` below, so mirrors
+    // The same view is handed to `create_proof_from_advice_with_pk` below, so mirrors
     // warmed during synthesis are the ones the later phases read.
     let gpu_pk = GpuProvingKey::from_host(pk);
     let meta = &gpu_pk.cs;
@@ -134,7 +134,7 @@ where
         1,
         "create_proof supports single-phase circuits only: multi-phase \
          challenge squeezes interleave with synthesis and cannot go \
-         through create_proof_raw"
+         through create_proof_from_advice"
     );
 
     let mut column_indices = [(); 3].map(|_| vec![]);
@@ -203,7 +203,7 @@ where
         .map(DevicePolyExt::into_device_buf)
         .collect();
 
-    create_proof_raw_with_pk::<Scheme, P, E, R, T>(
+    create_proof_from_advice_with_pk::<Scheme, P, E, R, T>(
         params,
         &gpu_pk,
         instances[0],
@@ -363,7 +363,7 @@ where
 }
 
 /// Creates a proof from pre-synthesized advice columns.
-pub fn create_proof_raw<
+pub fn create_proof_from_advice<
     'params: 'a,
     'a,
     Scheme: CommitmentScheme,
@@ -389,15 +389,15 @@ where
     let gpu_pk = GpuProvingKey::from_host(pk);
     pk_span.exit();
 
-    create_proof_raw_with_pk::<Scheme, P, E, R, T>(
+    create_proof_from_advice_with_pk::<Scheme, P, E, R, T>(
         params, &gpu_pk, instances, advice, rng, transcript,
     )
 }
 
-/// [`create_proof_raw`] over an already-built [`GpuProvingKey`] view, so
+/// [`create_proof_from_advice`] over an already-built [`GpuProvingKey`] view, so
 /// callers that constructed (and possibly warmed) the view reuse its device
 /// mirrors instead of re-uploading them.
-fn create_proof_raw_with_pk<
+fn create_proof_from_advice_with_pk<
     'params: 'a,
     'a,
     Scheme: CommitmentScheme,
@@ -908,7 +908,7 @@ pub struct AdviceSingle<C: CurveAffine> {
     pub advice_polys: Vec<Polynomial<C::Scalar, Coeff, Device>>,
 }
 
-/// The shape of advice columns accepted by [`create_proof_raw`]: one
+/// The shape of advice columns accepted by [`create_proof_from_advice`]: one
 /// device-resident `DeviceBuffer<F>` per physical advice column, each of
 /// length `params.n()`.
 ///
