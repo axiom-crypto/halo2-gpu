@@ -363,10 +363,7 @@ where
 }
 
 /// Builds a fresh [`WitnessCollection`] for a single circuit's phase-1
-/// synthesis. The returned collection borrows `challenges`, `rng`, and
-/// `transcript`; the caller drives `Circuit::synthesize` and any subsequent
-/// `next_phase` calls, then drops the collection to release those borrows.
-///
+/// synthesis. 
 /// Shared by [`synthesize_advices_and_instances`] and [`synthesize_witness`].
 #[allow(clippy::too_many_arguments)]
 pub(super) fn make_witness_collection<
