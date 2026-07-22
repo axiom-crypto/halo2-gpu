@@ -363,7 +363,7 @@ where
 }
 
 /// Builds a fresh [`WitnessCollection`] for a single circuit's phase-1
-/// synthesis. 
+/// synthesis.
 /// Shared by [`synthesize_advices_and_instances`] and [`synthesize_witness`].
 #[allow(clippy::too_many_arguments)]
 pub(super) fn make_witness_collection<
