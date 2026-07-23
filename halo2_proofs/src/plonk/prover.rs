@@ -24,7 +24,6 @@ use crate::{
     poly::{Device, DevicePolyExt},
     transcript::{EncodedChallenge, TranscriptWrite},
 };
-use tracing::info_span;
 
 use crate::cuda::funcs::ColumnPool;
 use crate::plonk::lookup::prover::CommittedUnpacked;
@@ -83,11 +82,9 @@ where
     // before any early-return path.
     crate::perf_section_root!("create_proof");
 
-    let setup_span = info_span!("setup").entered();
     // The same view is handed to `create_proof_from_advice_with_pk` below, so mirrors
     // warmed during synthesis are the ones the later phases read.
     let gpu_pk = GpuProvingKey::from_host(pk);
-    setup_span.exit();
 
     let advice = witness::synthesize_advice_columns::<Scheme, P, E, R, T, ConcreteCircuit>(
         params,
@@ -131,9 +128,7 @@ where
 {
     crate::perf_section_root!("create_proof");
 
-    let pk_span = info_span!("setup_gpu_pk").entered();
     let gpu_pk = GpuProvingKey::from_host(pk);
-    pk_span.exit();
 
     create_proof_from_advice_with_pk::<Scheme, P, E, R, T>(
         params, &gpu_pk, instances, advice, rng, transcript,
@@ -179,6 +174,7 @@ where
         // so consumers below never race the warming thread's copies.
         let handle = s.spawn(move || warm_pk_device_caches(params, pk));
         let (instance, advice, challenges, theta) = {
+            crate::perf_section!("phase1");
             let (instance, advice, challenges) = convert_raw_advice::<Scheme, _, _, E>(
                 domain.inner,
                 params,
@@ -311,14 +307,11 @@ where
             (permutations, lookups)
         };
 
-        let vanishing_span = info_span!(
-            "halo2_section",
-            phase = "Commit to vanishing argument's random poly"
-        )
-        .entered();
         // Random polynomial blinds h(x_3).
-        let vanishing = vanishing::Argument::commit(params, domain, &mut rng, transcript).unwrap();
-        vanishing_span.exit();
+        let vanishing = {
+            crate::perf_section!("commit_vanishing_random_poly");
+            vanishing::Argument::commit(params, domain, &mut rng, transcript).unwrap()
+        };
 
         // y keeps all gates linearly independent.
         let y: ChallengeY<_> = transcript.squeeze_challenge_scalar();
@@ -366,25 +359,20 @@ where
 
         let (vanishing, x, xn) = {
             crate::perf_section!("phase4b");
-            let timer = info_span!(
-                "halo2_section",
-                phase = "Commit to vanishing argument's h(X) commitments"
-            )
-            .entered();
-            let vanishing = vanishing.construct(params, domain, h_poly, &mut rng, transcript)?;
+            let vanishing = {
+                crate::perf_section!("commit_vanishing_h_x");
+                vanishing.construct(params, domain, h_poly, &mut rng, transcript)?
+            };
 
             let x: ChallengeX<_> = transcript.squeeze_challenge_scalar();
             let xn = x.pow([params.n(), 0, 0, 0]);
 
-            timer.exit();
             (vanishing, x, xn)
         };
 
         handle.join().expect("handle shouldn't fail");
         {
             crate::perf_section!("phase5");
-
-            let eval_polys_span = info_span!("halo2_section", phase = "evaluate polys").entered();
 
             {
                 fn materialize_polys_for_batch_eval<'a, C: CurveAffine>(
@@ -504,50 +492,50 @@ where
 
             // Opening prep: per-poly iFFT on GPU, one dispatch per permuted poly per
             // `Committed`.
-            let unpack_span =
-                info_span!("halo2_section", phase = "lagrange_to_coeff_timer").entered();
-            let lookups = lookups
-                .into_iter()
-                .map(
-                    |lookups| -> Result<Vec<lookup::prover::CommittedUnpacked<Scheme::Curve>>, _> {
-                        lookups
-                            .into_iter()
-                            .map(|p| {
-                                // Device-output iFFT for the lookup permuted polys,
-                                // which then flow into multiopen via `ProverQuery`.
-                                // Route on residency: the device-fused lookup path
-                                // yields `MaybeDevice::Device`, so feed its device
-                                // buffer straight into the device-input iFFT
-                                // (device-in → device-out, no PCIe round-trip). The
-                                // `Host` arm (VRAM fallback) keeps the H2D+iFFT path
-                                // and doubles as the byte-identity oracle.
-                                let permuted_input_poly = match p.permuted_input_expression {
-                                    crate::poly::MaybeDevice::Device(dp) => {
-                                        domain.lagrange_to_coeff_device_input(dp)?
-                                    }
-                                    crate::poly::MaybeDevice::Host(hp) => {
-                                        domain.lagrange_to_coeff_device(hp)?
-                                    }
-                                };
-                                let permuted_table_poly = match p.permuted_table_expression {
-                                    crate::poly::MaybeDevice::Device(dp) => {
-                                        domain.lagrange_to_coeff_device_input(dp)?
-                                    }
-                                    crate::poly::MaybeDevice::Host(hp) => {
-                                        domain.lagrange_to_coeff_device(hp)?
-                                    }
-                                };
-                                Ok(CommittedUnpacked {
-                                    permuted_input_poly,
-                                    permuted_table_poly,
-                                    product_poly: p.product_poly,
+            let lookups = {
+                crate::perf_section!("lagrange_to_coeff");
+                lookups
+                    .into_iter()
+                    .map(
+                        |lookups| -> Result<Vec<lookup::prover::CommittedUnpacked<Scheme::Curve>>, _> {
+                            lookups
+                                .into_iter()
+                                .map(|p| {
+                                    // Device-output iFFT for the lookup permuted polys,
+                                    // which then flow into multiopen via `ProverQuery`.
+                                    // Route on residency: the device-fused lookup path
+                                    // yields `MaybeDevice::Device`, so feed its device
+                                    // buffer straight into the device-input iFFT
+                                    // (device-in → device-out, no PCIe round-trip). The
+                                    // `Host` arm (VRAM fallback) keeps the H2D+iFFT path
+                                    // and doubles as the byte-identity oracle.
+                                    let permuted_input_poly = match p.permuted_input_expression {
+                                        crate::poly::MaybeDevice::Device(dp) => {
+                                            domain.lagrange_to_coeff_device_input(dp)?
+                                        }
+                                        crate::poly::MaybeDevice::Host(hp) => {
+                                            domain.lagrange_to_coeff_device(hp)?
+                                        }
+                                    };
+                                    let permuted_table_poly = match p.permuted_table_expression {
+                                        crate::poly::MaybeDevice::Device(dp) => {
+                                            domain.lagrange_to_coeff_device_input(dp)?
+                                        }
+                                        crate::poly::MaybeDevice::Host(hp) => {
+                                            domain.lagrange_to_coeff_device(hp)?
+                                        }
+                                    };
+                                    Ok(CommittedUnpacked {
+                                        permuted_input_poly,
+                                        permuted_table_poly,
+                                        product_poly: p.product_poly,
+                                    })
                                 })
-                            })
-                            .collect::<Result<Vec<_>, _>>()
-                    },
-                )
-                .collect::<Result<Vec<_>, GpuError>>()?;
-            unpack_span.exit();
+                                .collect::<Result<Vec<_>, _>>()
+                        },
+                    )
+                    .collect::<Result<Vec<_>, GpuError>>()?
+            };
 
             let lookups: Vec<Vec<lookup::prover::Evaluated<Scheme::Curve>>> = lookups
                 .into_iter()
@@ -558,7 +546,6 @@ where
                         .collect()
                 })
                 .collect();
-            eval_polys_span.exit();
 
             // Use `PolyRef::Device` when the PK Coeff device mirrors are populated,
             // else fall back to `PolyRef::Host` over the host slices.
@@ -629,15 +616,14 @@ where
                 .chain(vanishing.open(x));
 
             let prover = P::new(params);
-            let multiopen_span = info_span!("halo2_section", phase = "phase5 multiopen").entered();
-            let multiopen_res = prover
-                .create_proof(rng, transcript, instances)
-                .map_err(|_| {
-                    GpuError::Canonical(halo2_axiom::plonk::Error::ConstraintSystemFailure)
-                });
-            multiopen_span.exit();
-
-            multiopen_res
+            {
+                crate::perf_section!("phase5_multiopen");
+                prover
+                    .create_proof(rng, transcript, instances)
+                    .map_err(|_| {
+                        GpuError::Canonical(halo2_axiom::plonk::Error::ConstraintSystemFailure)
+                    })
+            }
         }
     })
 }

@@ -18,7 +18,6 @@ use ff::{Field, PrimeField, WithSmallOrderMulGroup};
 use halo2curves::CurveAffine;
 use openvm_cuda_common::copy::MemCopyH2D;
 use openvm_cuda_common::d_buffer::DeviceBuffer;
-use tracing::info_span;
 
 // a view of the VK fields that is used by the evaluator
 // this is useful for tests and separating out what's needed
@@ -1157,19 +1156,14 @@ where
                 crate::poly::MaybeDevice<C::ScalarExt, LagrangeCoeff>,
                 crate::plonk::GpuError,
             > {
-                let c2e_part_many_time = info_span!(
-                    "halo2_section",
-                    phase = %format!("coeff_to_extended_part_{}",  _i)
-                )
-                .entered();
-
-                let parts: Vec<Polynomial<C::ScalarExt, LagrangeCoeff, crate::poly::Device>> = domain
-                    .coeff_to_extended_part_many_device_device_inputs(parts_device_refs.clone(), current_extended_omega)?
-                    .into_iter()
-                    .map(Polynomial::<C::ScalarExt, LagrangeCoeff, crate::poly::Device>::from_device)
-                    .collect();
-
-                c2e_part_many_time.exit();
+                let parts: Vec<Polynomial<C::ScalarExt, LagrangeCoeff, crate::poly::Device>> = {
+                    crate::perf_section!("coeff_to_extended_part");
+                    domain
+                        .coeff_to_extended_part_many_device_device_inputs(parts_device_refs.clone(), current_extended_omega)?
+                        .into_iter()
+                        .map(Polynomial::<C::ScalarExt, LagrangeCoeff, crate::poly::Device>::from_device)
+                        .collect()
+                };
 
                 let mut offset = 0;
                 let fixed = &parts[offset..(offset + pk_fixed_polys.len())];
@@ -1226,9 +1220,8 @@ where
                         .try_init_device::<_, _, _>(Some(fixed), &[], advice, instance)?;
 
                     // Custom gates part
-                    let quotient_h_time = info_span!("halo2_section", phase = "custom_gates").entered();
-
                     let quotient_values_device = {
+                        crate::perf_section!("custom_gates");
                         let calc_count = evaluator.custom_gates.calculations.len();
                         log::debug!(
                             "custom_gates.calculations.len={}, size={}, using quotient_gpu",
@@ -1247,8 +1240,6 @@ where
                         )?
                     };
 
-                    quotient_h_time.exit();
-
                     let mut gpu_compute = QuotientLookupsGpu::new_with_device_selectors(
                         quotient_values_device,
                         parts[l0_part_idx].device_buf(),
@@ -1265,104 +1256,95 @@ where
                     )?;
 
                     // Permutations
-                    let permutation_time =
-                        info_span!("halo2_section", phase = "permutation quotient poly part").entered();
-                    let sets = &permutation.sets;
-                    if !sets.is_empty() {
-                        let blinding_factors = view.blinding_factors;
-                        let last_rotation = Rotation(-((blinding_factors + 1) as i32));
-                        let chunk_len = view.cs_degree - 2;
-                        let delta_start = beta * &C::Scalar::ZETA;
+                    {
+                        crate::perf_section!("permutation_quotient_poly_part");
+                        let sets = &permutation.sets;
+                        if !sets.is_empty() {
+                            let blinding_factors = view.blinding_factors;
+                            let last_rotation = Rotation(-((blinding_factors + 1) as i32));
+                            let chunk_len = view.cs_degree - 2;
+                            let delta_start = beta * &C::Scalar::ZETA;
 
-                        let column_values_device_ptrs: Vec<*const std::ffi::c_void> = p
-                            .columns
-                            .iter()
-                            .map(|column| match column.column_type() {
-                                GpuAny::Advice(_) => advice[column.index()].device_buf().as_raw_ptr(),
-                                GpuAny::Fixed => fixed[column.index()].device_buf().as_raw_ptr(),
-                                GpuAny::Instance => instance[column.index()].device_buf().as_raw_ptr(),
-                            })
-                            .collect();
-
-                        let values_time = info_span!("halo2_section", phase = "permutations").entered();
-
-                        let coeff_to_extended_part_time = info_span!(
-                            "halo2_section",
-                            phase = "permutation_coset_fft"
-                        )
-                        .entered();
-                        let permutation_product_cosets_device = domain
-                            .coeff_to_extended_part_many_device(
-                                sets.iter()
-                                    .map(|set| &set.permutation_product_poly)
-                                    .collect::<Vec<_>>(),
-                                current_extended_omega,
-                            )?;
-                        // The fixed permutation (sigma) cosets are recomputed at
-                        // this circuit's coset shift: `current_extended_omega`
-                        // advances across the batch, so each circuit transforms
-                        // `pk_permutation_polys` at its own shift.
-                        let permutation_cosets_device = domain
-                            .coeff_to_extended_part_many_device(
-                                pk_permutation_polys.iter().collect::<Vec<_>>(),
-                                current_extended_omega,
-                            )?;
-
-                        coeff_to_extended_part_time.exit();
-
-                        let perm_prod_dev_ptrs: Vec<*const std::ffi::c_void> =
-                            permutation_product_cosets_device
+                            let column_values_device_ptrs: Vec<*const std::ffi::c_void> = p
+                                .columns
                                 .iter()
-                                .map(|b| b.as_raw_ptr())
-                                .collect();
-                        let perm_coset_dev_ptrs: Vec<*const std::ffi::c_void> =
-                            permutation_cosets_device
-                                .iter()
-                                .map(|b| b.as_raw_ptr())
+                                .map(|column| match column.column_type() {
+                                    GpuAny::Advice(_) => advice[column.index()].device_buf().as_raw_ptr(),
+                                    GpuAny::Fixed => fixed[column.index()].device_buf().as_raw_ptr(),
+                                    GpuAny::Instance => instance[column.index()].device_buf().as_raw_ptr(),
+                                })
                                 .collect();
 
-                        gpu_compute.add_permutation_constraints(
-                            &perm_prod_dev_ptrs,
-                            &perm_coset_dev_ptrs,
-                            &column_values_device_ptrs,
-                            last_rotation.0,
-                            rot_scale,
-                            isize,
-                            chunk_len,
-                            C::Scalar::DELTA,
-                            delta_start,
-                            current_extended_omega,
-                        )?;
-                        values_time.exit();
+                            crate::perf_section!("permutations");
+
+                            let (permutation_product_cosets_device, permutation_cosets_device) = {
+                                crate::perf_section!("permutation_coset_fft");
+                                let permutation_product_cosets_device = domain
+                                    .coeff_to_extended_part_many_device(
+                                        sets.iter()
+                                            .map(|set| &set.permutation_product_poly)
+                                            .collect::<Vec<_>>(),
+                                        current_extended_omega,
+                                    )?;
+                                // The fixed permutation (sigma) cosets are recomputed at
+                                // this circuit's coset shift: `current_extended_omega`
+                                // advances across the batch, so each circuit transforms
+                                // `pk_permutation_polys` at its own shift.
+                                let permutation_cosets_device = domain
+                                    .coeff_to_extended_part_many_device(
+                                        pk_permutation_polys.iter().collect::<Vec<_>>(),
+                                        current_extended_omega,
+                                    )?;
+                                (permutation_product_cosets_device, permutation_cosets_device)
+                            };
+
+                            let perm_prod_dev_ptrs: Vec<*const std::ffi::c_void> =
+                                permutation_product_cosets_device
+                                    .iter()
+                                    .map(|b| b.as_raw_ptr())
+                                    .collect();
+                            let perm_coset_dev_ptrs: Vec<*const std::ffi::c_void> =
+                                permutation_cosets_device
+                                    .iter()
+                                    .map(|b| b.as_raw_ptr())
+                                    .collect();
+
+                            gpu_compute.add_permutation_constraints(
+                                &perm_prod_dev_ptrs,
+                                &perm_coset_dev_ptrs,
+                                &column_values_device_ptrs,
+                                last_rotation.0,
+                                rot_scale,
+                                isize,
+                                chunk_len,
+                                C::Scalar::DELTA,
+                                delta_start,
+                                current_extended_omega,
+                            )?;
+                        }
                     }
-                    permutation_time.exit();
-
-                    let lookups_time = info_span!("halo2_section", phase = "lookups").entered();
 
                     {
+                        crate::perf_section!("lookups");
                         let d_buf = {
                             for (n, lookup) in lookups.iter().enumerate() {
-                                let table_values_time =
-                                    info_span!("halo2_section", phase = "table_values").entered();
-                                compress_expressions_with_runtime_constants_device::<C>(
-                                    &evaluator.lookups[n],
-                                    theta,
-                                    beta,
-                                    gamma,
-                                    y,
-                                    size,
-                                    rot_scale,
-                                    &part_pool,
-                                    challenges,
-                                    &mut d_table_values,
-                                )?;
-                                table_values_time.exit();
+                                {
+                                    crate::perf_section!("table_values");
+                                    compress_expressions_with_runtime_constants_device::<C>(
+                                        &evaluator.lookups[n],
+                                        theta,
+                                        beta,
+                                        gamma,
+                                        y,
+                                        size,
+                                        rot_scale,
+                                        &part_pool,
+                                        challenges,
+                                        &mut d_table_values,
+                                    )?;
+                                }
 
-                                let gpu_quotient_lookups_time = info_span!(
-                                    "halo2_section",
-                                    phase = "gpu_quotient_lookups"
-                                )
-                                .entered();
+                                crate::perf_section!("gpu_quotient_lookups");
                                 // The `MaybeDevice` carrier may arrive host-resident; in that case
                                 // its values are staged to a temporary device buffer here.
                                 // TODO: refactor in future PR, remove the MaybeDevice so this won't be necessary
@@ -1403,7 +1385,6 @@ where
                                     d_permuted_table,
                                     (*domain.g_coset()) * current_extended_omega,
                                 )?;
-                                gpu_quotient_lookups_time.exit();
                             }
                             crate::perf_section!("take_values_device_for_assembly");
                             gpu_compute.take_values_device()
@@ -1411,8 +1392,6 @@ where
 
                         acc = Some(d_buf);
                     }
-
-                    lookups_time.exit();
 
                     current_extended_omega *= extended_omega;
                 }
@@ -2425,8 +2404,6 @@ mod tests {
 
         use halo2curves::bn256::{Fr, G1Affine};
 
-        use tracing::info_span;
-
         use crate::{
             circuit::{Layouter, SimpleFloorPlanner, Value},
             plonk::{Advice, Circuit, Column, Error, Fixed, TableColumn},
@@ -2751,34 +2728,35 @@ mod tests {
             // this is the correct h
             let isize = num_rows as i32;
             let rot_scale = 1;
-            let cpu_timer = info_span!("halo2_section", phase = "cpu evaluate_h").entered();
-            for (i, value_gpu) in quotient_poly
-                .iter()
-                .enumerate()
-                .take(row_end)
-                .skip(row_start)
             {
-                let mut eval_data = custom_gates.instance();
-                let mut value = Fr::ZERO;
-                value = custom_gates.evaluate(
-                    &mut eval_data,
-                    &fixed_polys,
-                    &advice_polys,
-                    &instance_polys,
-                    &challenges,
-                    &beta,
-                    &gamma,
-                    &theta,
-                    &expr_constant[4],
-                    &value,
-                    i,
-                    rot_scale,
-                    isize,
-                );
+                crate::perf_section!("cpu_evaluate_h");
+                for (i, value_gpu) in quotient_poly
+                    .iter()
+                    .enumerate()
+                    .take(row_end)
+                    .skip(row_start)
+                {
+                    let mut eval_data = custom_gates.instance();
+                    let mut value = Fr::ZERO;
+                    value = custom_gates.evaluate(
+                        &mut eval_data,
+                        &fixed_polys,
+                        &advice_polys,
+                        &instance_polys,
+                        &challenges,
+                        &beta,
+                        &gamma,
+                        &theta,
+                        &expr_constant[4],
+                        &value,
+                        i,
+                        rot_scale,
+                        isize,
+                    );
 
-                assert_eq!(value, *value_gpu, "i = {}", i);
+                    assert_eq!(value, *value_gpu, "i = {}", i);
+                }
             }
-            cpu_timer.exit();
         };
 
         let intermediate_rule_ffi = get_rule_ffi(&intermediate_rules);

@@ -31,7 +31,6 @@ use crate::{
     transcript::{EncodedChallenge, TranscriptWrite},
 };
 use halo2_axiom::poly;
-use tracing::info_span;
 
 use crate::cuda::utils::HALO2_GPU_CTX;
 use openvm_cuda_common::copy::MemCopyH2D;
@@ -231,12 +230,11 @@ where
     fn pop_namespace(&mut self, _: Option<String>) {}
 
     fn next_phase(&mut self) {
-        crate::perf_section!("witness.next_phase");
+        crate::perf_section!("witness_next_phase");
         let phase = self.current_phase.to_u8() as usize;
         let mut instance_values = vec![];
         if phase == 0 {
-            let timer =
-                info_span!("halo2_section", phase = "absorb instances into transcript").entered();
+            crate::perf_section!("absorb_instances_into_transcript");
             if !P::QUERY_INSTANCE {
                 for values in self.instances.iter() {
                     for value in values.iter() {
@@ -265,10 +263,8 @@ where
                     poly
                 })
                 .collect::<Vec<_>>();
-            timer.exit();
         }
 
-        let bf_span = info_span!("halo2_section", phase = "add blinding factors").entered();
         // `Trivial(F::random)` round-trips through batch_invert unchanged
         // (denominator None), so the device cells get the blinder directly.
         let column_indices_for_phase = self
@@ -276,89 +272,91 @@ where
             .get(phase)
             .expect("The API only supports 3 phases right now")
             .clone();
-        for column_index in column_indices_for_phase.iter() {
-            let col_start = *column_index * self.params_n;
-            let blind_start = col_start + self.unusable_rows_start;
-            let col_end = col_start + self.params_n;
-            for cell in &mut self.advice[blind_start..col_end] {
-                *cell = GpuAssigned::Trivial(F::random(&mut self.rng));
+        {
+            crate::perf_section!("add_blinding_factors");
+            for column_index in column_indices_for_phase.iter() {
+                let col_start = *column_index * self.params_n;
+                let blind_start = col_start + self.unusable_rows_start;
+                let col_end = col_start + self.params_n;
+                for cell in &mut self.advice[blind_start..col_end] {
+                    *cell = GpuAssigned::Trivial(F::random(&mut self.rng));
+                }
             }
         }
-        bf_span.exit();
 
-        let batch_invert_span =
-            info_span!("halo2_section", phase = "batch invert witness assignment").entered();
         // Advice cells are already device-repr `GpuAssigned`, handed to the upload
         // kernel by borrow.
-        let advice_values = batch_invert_assigned_device(
-            column_indices_for_phase
-                .iter()
-                .map(|column_index| {
-                    &self.advice[*column_index * self.params_n..(*column_index + 1) * self.params_n]
-                })
-                .collect::<Vec<&[GpuAssigned<C::Scalar>]>>(),
-        )
-        .expect("batch_invert_assigned_device (CUDA) failed inside Assignment::next_phase");
-        batch_invert_span.exit();
+        let advice_values = {
+            crate::perf_section!("batch_invert_witness");
+            batch_invert_assigned_device(
+                column_indices_for_phase
+                    .iter()
+                    .map(|column_index| {
+                        &self.advice
+                            [*column_index * self.params_n..(*column_index + 1) * self.params_n]
+                    })
+                    .collect::<Vec<&[GpuAssigned<C::Scalar>]>>(),
+            )
+            .expect("batch_invert_assigned_device (CUDA) failed inside Assignment::next_phase")
+        };
 
-        let timer = info_span!(
-            "halo2_section",
-            phase = "ifft & MSM on instance/advice columns (GPU)"
-        )
-        .entered();
-        let (instance_single, advice_polys, commitments) = new_gpu_thread::<Scheme, C>(
-            self.params,
-            self.domain,
-            instance_values,
-            &advice_values,
-            P::QUERY_INSTANCE,
-        )
-        .expect("new_gpu_thread (CUDA FFT/MSM) failed inside Assignment::next_phase");
-        timer.exit();
-        let timer = info_span!("halo2_section", phase = "transcript write / squeeze").entered();
+        let (instance_single, advice_polys, commitments) = {
+            crate::perf_section!("ifft_msm_instance_advice");
+            new_gpu_thread::<Scheme, C>(
+                self.params,
+                self.domain,
+                instance_values,
+                &advice_values,
+                P::QUERY_INSTANCE,
+            )
+            .expect("new_gpu_thread (CUDA FFT/MSM) failed inside Assignment::next_phase")
+        };
 
-        if phase == 0 {
-            self.instance_single = instance_single;
-        }
-
-        let mut commitments = commitments.into_iter();
-        if phase == 0 && P::QUERY_INSTANCE {
-            let num_instance_commitments = self.instance_single.instance_polys.len();
-            for _ in 0..num_instance_commitments {
-                self.transcript
-                    .common_point(
-                        commitments
-                            .next()
-                            .expect("Did not commit to instance polynomials"),
-                    )
-                    .unwrap();
-            }
-        }
-
-        for commitment in commitments {
-            self.transcript
-                .write_point(commitment)
-                .expect("absorb commitment point");
-        }
-        let column_indices = self.column_indices[phase].iter().copied();
-        let advice_values = advice_values.into_iter();
-        let advice_polys = advice_polys.into_iter();
-        for (column_index, (advice_value, advice_poly)) in
-            column_indices.zip(advice_values.zip(advice_polys))
         {
-            self.advice_single.advice_values[column_index] = Some(advice_value);
-            self.advice_single.advice_polys[column_index] = Some(advice_poly);
-        }
+            crate::perf_section!("transcript_write_squeeze");
 
-        for challenge_index in self.challenge_indices[phase].iter() {
-            let existing = self.challenges.insert(
-                *challenge_index,
-                *self.transcript.squeeze_challenge_scalar::<()>(),
-            );
-            assert!(existing.is_none());
+            if phase == 0 {
+                self.instance_single = instance_single;
+            }
+
+            let mut commitments = commitments.into_iter();
+            if phase == 0 && P::QUERY_INSTANCE {
+                let num_instance_commitments = self.instance_single.instance_polys.len();
+                for _ in 0..num_instance_commitments {
+                    self.transcript
+                        .common_point(
+                            commitments
+                                .next()
+                                .expect("Did not commit to instance polynomials"),
+                        )
+                        .unwrap();
+                }
+            }
+
+            for commitment in commitments {
+                self.transcript
+                    .write_point(commitment)
+                    .expect("absorb commitment point");
+            }
+            let column_indices = self.column_indices[phase].iter().copied();
+            let advice_values = advice_values.into_iter();
+            let advice_polys = advice_polys.into_iter();
+            for (column_index, (advice_value, advice_poly)) in
+                column_indices.zip(advice_values.zip(advice_polys))
+            {
+                self.advice_single.advice_values[column_index] = Some(advice_value);
+                self.advice_single.advice_polys[column_index] = Some(advice_poly);
+            }
+
+            for challenge_index in self.challenge_indices[phase].iter() {
+                let existing = self.challenges.insert(
+                    *challenge_index,
+                    *self.transcript.squeeze_challenge_scalar::<()>(),
+                );
+                assert!(existing.is_none());
+            }
+            self.current_phase = self.current_phase.next();
         }
-        self.current_phase = self.current_phase.next();
-        timer.exit();
     }
 }
 
@@ -493,8 +491,8 @@ where
     let params_n = params.n() as usize;
     let num_advice_columns = pk.cs.num_advice_columns;
 
-    let witness_assign_span = info_span!("halo2_section", phase = "synthesize").entered();
     let advice_raw = {
+        crate::perf_section!("synthesize");
         let witness = make_witness_collection::<Scheme, P, E, R, T, ConcreteCircuit>(
             params,
             pk,
@@ -506,19 +504,20 @@ where
         // Move the advice buffer out; `witness` (with its outstanding borrows) drops here.
         witness.advice
     };
-    witness_assign_span.exit();
 
     // Blinding rows stay `Zero` here; `convert_raw_advice` draws blinders from
     // `rng` on device in the legacy column-major order — proof bytes unchanged.
-    let batch_invert_span =
-        info_span!("halo2_section", phase = "batch invert witness assignment").entered();
-    let advice = batch_invert_assigned_device(
-        (0..num_advice_columns)
-            .map(|column_index| &advice_raw[column_index * params_n..(column_index + 1) * params_n])
-            .collect::<Vec<&[GpuAssigned<Scheme::Scalar>]>>(),
-    )
-    .map_err(GpuError::HaloGpu)?;
-    batch_invert_span.exit();
+    let advice = {
+        crate::perf_section!("batch_invert_witness");
+        batch_invert_assigned_device(
+            (0..num_advice_columns)
+                .map(|column_index| {
+                    &advice_raw[column_index * params_n..(column_index + 1) * params_n]
+                })
+                .collect::<Vec<&[GpuAssigned<Scheme::Scalar>]>>(),
+        )
+        .map_err(GpuError::HaloGpu)?
+    };
 
     let advice: AdviceColumns<Scheme::Scalar> = advice
         .into_iter()
@@ -687,77 +686,77 @@ where
         })
         .collect::<Vec<_>>();
 
-    let bf_span = info_span!("halo2_section", phase = "add blinding factors").entered();
     // Draw all blinders on host in the legacy rng order, then H2D each column's
     // tail on the crate stream.
     let column_indices_for_phase = column_indices
         .get(phase)
         .expect("The API only supports 3 phases right now")
         .clone();
-    let n_blind = param_n - unusable_rows_start;
-    let blinders: Vec<Vec<Scheme::Scalar>> = column_indices_for_phase
-        .iter()
-        .map(|_| {
-            (0..n_blind)
-                .map(|_| Scheme::Scalar::random(&mut rng))
-                .collect()
-        })
-        .collect();
-    for (column_index, col_blinders) in column_indices_for_phase.iter().zip(blinders.iter()) {
-        advice_values[*column_index]
-            .mut_slice(unusable_rows_start..param_n)
-            .copy_from_host(col_blinders, &HALO2_GPU_CTX)
-            .expect("blinding factor H2D copy failed");
+    {
+        crate::perf_section!("add_blinding_factors");
+        let n_blind = param_n - unusable_rows_start;
+        let blinders: Vec<Vec<Scheme::Scalar>> = column_indices_for_phase
+            .iter()
+            .map(|_| {
+                (0..n_blind)
+                    .map(|_| Scheme::Scalar::random(&mut rng))
+                    .collect()
+            })
+            .collect();
+        for (column_index, col_blinders) in column_indices_for_phase.iter().zip(blinders.iter()) {
+            advice_values[*column_index]
+                .mut_slice(unusable_rows_start..param_n)
+                .copy_from_host(col_blinders, &HALO2_GPU_CTX)
+                .expect("blinding factor H2D copy failed");
+        }
     }
-    bf_span.exit();
 
     let advice_values = advice_values
         .into_iter()
         .map(Polynomial::from_device)
         .collect_vec();
 
-    let timer = info_span!(
-        "halo2_section",
-        phase = "ifft & MSM on instance/advice columns (GPU)"
-    )
-    .entered();
-    let (instance_single, advice_polys, commitments) = new_gpu_thread::<Scheme, _>(
-        params,
-        &EvaluationDomain::from_host_domain(domain),
-        instance_values,
-        &advice_values,
-        prover_query_instance,
-    )
-    .expect("new_gpu_thread (CUDA FFT/MSM) failed inside convert_raw_advice");
-    timer.exit();
+    let (instance_single, advice_polys, commitments) = {
+        crate::perf_section!("ifft_msm_instance_advice");
+        new_gpu_thread::<Scheme, _>(
+            params,
+            &EvaluationDomain::from_host_domain(domain),
+            instance_values,
+            &advice_values,
+            prover_query_instance,
+        )
+        .expect("new_gpu_thread (CUDA FFT/MSM) failed inside convert_raw_advice")
+    };
 
-    let timer = info_span!("halo2_section", phase = "transcript write / squeeze").entered();
+    let challenges = {
+        crate::perf_section!("transcript_write_squeeze");
 
-    let mut commitments = commitments.into_iter();
-    if phase == 0 && prover_query_instance {
-        let num_instance_commitments = instance_single.instance_polys.len();
-        for _ in 0..num_instance_commitments {
-            transcript
-                .common_point(
-                    commitments
-                        .next()
-                        .expect("Did not commit to instance polynomials"),
-                )
-                .unwrap();
+        let mut commitments = commitments.into_iter();
+        if phase == 0 && prover_query_instance {
+            let num_instance_commitments = instance_single.instance_polys.len();
+            for _ in 0..num_instance_commitments {
+                transcript
+                    .common_point(
+                        commitments
+                            .next()
+                            .expect("Did not commit to instance polynomials"),
+                    )
+                    .unwrap();
+            }
         }
-    }
 
-    for commitment in commitments {
-        transcript
-            .write_point(commitment)
-            .expect("absorb commitment point");
-    }
+        for commitment in commitments {
+            transcript
+                .write_point(commitment)
+                .expect("absorb commitment point");
+        }
 
-    let mut challenges = vec![];
-    for _ in challenge_indices[phase].iter() {
-        challenges.push(*transcript.squeeze_challenge_scalar::<()>());
-    }
-    timer.exit();
+        let mut challenges = vec![];
+        for _ in challenge_indices[phase].iter() {
+            challenges.push(*transcript.squeeze_challenge_scalar::<()>());
+        }
+        challenges
+    };
 
     Ok((
         instance_single,
@@ -796,52 +795,40 @@ where
     let mut commitments = Vec::with_capacity(num_advice + (query_instance as usize) * num_instance);
 
     if query_instance {
-        let msm_span =
-            info_span!("halo2_section", phase = %format!("{} MSMs", instance_values.len()))
-                .entered();
+        crate::perf_section!("instance_msms");
         for v in instance_values.iter() {
             let commit = params.commit_lagrange(v, Blind::default());
             commitments.push(commit);
         }
-        msm_span.exit();
     }
 
-    let msm_span =
-        info_span!("halo2_section", phase = %format!("{} MSMs", advice_values.len())).entered();
-    for v in advice_values.iter() {
-        let commit = params.commit_lagrange_device(v, Blind::default());
-        commitments.push(commit);
+    {
+        crate::perf_section!("advice_msms");
+        for v in advice_values.iter() {
+            let commit = params.commit_lagrange_device(v, Blind::default());
+            commitments.push(commit);
+        }
     }
-    msm_span.exit();
 
     if !instance_values.is_empty() {
-        let ifft_span =
-            info_span!("halo2_section", phase = %format!("{} ifft time", instance_values.len()))
-                .entered();
+        crate::perf_section!("instance_ifft");
         let batch_polys = domain.lagrange_to_coeff_many(
             &instance_values
                 .iter()
                 .map(|p| p.to_device_on(&HALO2_GPU_CTX).unwrap())
                 .collect::<Vec<_>>(),
         )?;
-        ifft_span.exit();
         instance_polys.extend(batch_polys);
     }
 
     // Device-resident advice iFFT: `advice_values` → `advice_polys`.
-    let advice_ifft_span = info_span!(
-        "halo2_section",
-        phase = %format!("{} advice ifft (device)", advice_values.len())
-    )
-    .entered();
     let advice_polys: Vec<Polynomial<C::Scalar, Coeff, Device>> = {
         crate::perf_section!("advice_ifft");
         domain.lagrange_to_coeff_many_device_inputs(advice_values)?
     };
-    advice_ifft_span.exit();
 
     let instance_values_device: Vec<Polynomial<C::Scalar, LagrangeCoeff, Device>> = {
-        crate::perf_section!("new_gpu_thread.instance_to_device");
+        crate::perf_section!("instance_to_device");
         instance_values
             .iter()
             .map(|p| -> Result<_, GpuError> {
@@ -860,12 +847,13 @@ where
         instance_values: instance_values_device,
         instance_polys,
     };
-    let batch_span =
-        info_span!("halo2_section", phase = "batch normalize projective points").entered();
-    let commitments_projective = commitments;
-    let mut commitments = vec![C::identity(); commitments_projective.len()];
-    C::CurveExt::batch_normalize(&commitments_projective, &mut commitments);
-    batch_span.exit();
+    let commitments = {
+        crate::perf_section!("batch_normalize_commitments");
+        let commitments_projective = commitments;
+        let mut commitments = vec![C::identity(); commitments_projective.len()];
+        C::CurveExt::batch_normalize(&commitments_projective, &mut commitments);
+        commitments
+    };
 
     Ok((instance_single, advice_polys, commitments))
 }

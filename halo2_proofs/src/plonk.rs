@@ -181,6 +181,7 @@ where
     /// Pure host rebuild: no device traffic, no kernel launch. Device mirrors
     /// start empty and populate lazily at first prove.
     pub fn from_host(inner: &'a ProvingKey<C>) -> Self {
+        crate::perf_section!("gpu_pk_from_host");
         let cs = GpuConstraintSystem::from(inner.get_vk().cs());
         let hdomain = inner.get_vk().get_domain();
         let domain = EvaluationDomain::from_host_domain(hdomain);
