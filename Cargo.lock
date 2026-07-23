@@ -2126,7 +2126,28 @@ dependencies = [
  "crossbeam",
  "ff 0.13.1",
  "group 0.13.0",
- "halo2curves-axiom 0.7.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "halo2curves-axiom 0.7.3",
+ "itertools 0.11.0",
+ "maybe-rayon",
+ "pairing 0.23.0",
+ "rand 0.8.6",
+ "rand_core 0.6.4",
+ "rayon",
+ "rustc-hash 1.1.0",
+ "sha3 0.10.9",
+ "tracing",
+]
+
+[[package]]
+name = "halo2-axiom"
+version = "0.5.3"
+source = "git+https://github.com/axiom-crypto/halo2?branch=main#5e4f0e524956f23b50d51b3a2f7bb07834948598"
+dependencies = [
+ "blake2b_simd",
+ "crossbeam",
+ "ff 0.13.1",
+ "group 0.13.0",
+ "halo2curves-axiom 0.7.3",
  "itertools 0.11.0",
  "maybe-rayon",
  "pairing 0.23.0",
@@ -2157,9 +2178,9 @@ dependencies = [
  "getrandom 0.2.17",
  "git-version",
  "group 0.13.0",
- "halo2-axiom",
+ "halo2-axiom 0.5.3",
  "halo2_legacy_pdqsort",
- "halo2curves-axiom 0.7.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "halo2curves-axiom 0.7.3",
  "itertools 0.11.0",
  "lazy_static",
  "libc",
@@ -2189,7 +2210,7 @@ version = "0.5.4"
 source = "git+https://github.com/axiom-crypto/halo2-lib.git?tag=v0.5.4#088dfe83ef4c1cdab233cb18d3a5c9637a6383ed"
 dependencies = [
  "getset",
- "halo2-axiom",
+ "halo2-axiom 0.5.2",
  "halo2-axiom-gpu",
  "itertools 0.11.0",
  "log",
@@ -2246,8 +2267,7 @@ dependencies = [
 [[package]]
 name = "halo2curves-axiom"
 version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0cd39c0df23c8b72cb7158ccb106341b078d5019b5478b3bfdaf14e898177d3"
+source = "git+https://github.com/axiom-crypto/halo2curves.git?tag=v0.7.2#3a65a710e27fe03711f6fb4fc0c4469ae351974a"
 dependencies = [
  "blake2b_simd",
  "digest 0.10.7",
@@ -2273,8 +2293,9 @@ dependencies = [
 
 [[package]]
 name = "halo2curves-axiom"
-version = "0.7.2"
-source = "git+https://github.com/axiom-crypto/halo2curves.git?tag=v0.7.2#3a65a710e27fe03711f6fb4fc0c4469ae351974a"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "276d6c463e0e8e70c1a221baae62b670453f6ef851dd1c73f0764e5215fda64d"
 dependencies = [
  "blake2b_simd",
  "digest 0.10.7",
@@ -3111,7 +3132,7 @@ dependencies = [
  "derive-new 0.6.0",
  "derive_more 1.0.0",
  "eyre",
- "halo2curves-axiom 0.7.2 (git+https://github.com/axiom-crypto/halo2curves.git?tag=v0.7.2)",
+ "halo2curves-axiom 0.7.2",
  "num-bigint",
  "num-traits",
  "once_cell",
@@ -3150,7 +3171,7 @@ name = "openvm-algebra-guest"
 version = "2.0.1"
 source = "git+https://github.com/openvm-org/openvm.git?branch=chore%2Fstark-backend-main-track#97f24c2d3204766f02f7db1a329a62716fff1f94"
 dependencies = [
- "halo2curves-axiom 0.7.2 (git+https://github.com/axiom-crypto/halo2curves.git?tag=v0.7.2)",
+ "halo2curves-axiom 0.7.2",
  "num-bigint",
  "once_cell",
  "openvm-algebra-complex-macros",
@@ -3525,7 +3546,7 @@ dependencies = [
  "cfg-if 1.0.4",
  "derive-new 0.6.0",
  "derive_more 1.0.0",
- "halo2curves-axiom 0.7.2 (git+https://github.com/axiom-crypto/halo2curves.git?tag=v0.7.2)",
+ "halo2curves-axiom 0.7.2",
  "hex-literal",
  "lazy_static",
  "num-bigint",
@@ -3558,7 +3579,7 @@ dependencies = [
  "ecdsa",
  "elliptic-curve",
  "group 0.13.0",
- "halo2curves-axiom 0.7.2 (git+https://github.com/axiom-crypto/halo2curves.git?tag=v0.7.2)",
+ "halo2curves-axiom 0.7.2",
  "once_cell",
  "openvm",
  "openvm-algebra-guest",
@@ -3704,7 +3725,7 @@ dependencies = [
  "derive-new 0.6.0",
  "derive_more 1.0.0",
  "eyre",
- "halo2curves-axiom 0.7.2 (git+https://github.com/axiom-crypto/halo2curves.git?tag=v0.7.2)",
+ "halo2curves-axiom 0.7.2",
  "num-bigint",
  "num-traits",
  "openvm-algebra-circuit",
@@ -3733,7 +3754,7 @@ version = "2.0.1"
 source = "git+https://github.com/openvm-org/openvm.git?branch=chore%2Fstark-backend-main-track#97f24c2d3204766f02f7db1a329a62716fff1f94"
 dependencies = [
  "blstrs",
- "halo2curves-axiom 0.7.2 (git+https://github.com/axiom-crypto/halo2curves.git?tag=v0.7.2)",
+ "halo2curves-axiom 0.7.2",
  "hex-literal",
  "itertools 0.14.0",
  "lazy_static",
