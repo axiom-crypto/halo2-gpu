@@ -3,7 +3,7 @@ use crate::cpu::arithmetic::{best_multiexp_cpu, parallelize};
 use crate::cuda::funcs::{
     multiexp_gpu_device_bases, multiexp_gpu_device_scalars_device_bases, GPU_MSM_THRESHOLD,
 };
-use crate::cuda::utils::HALO2_GPU_CTX;
+use crate::cuda::utils::{CommWrapper, HALO2_COMM_STREAM};
 use crate::poly::commitment::{Blind, CommitmentScheme, Params, ParamsProver, ParamsVerifier};
 use crate::poly::{Coeff, DevicePolyExt, LagrangeCoeff, Polynomial};
 use crate::SerdeCurveAffine;
@@ -33,14 +33,16 @@ pub struct ParamsKZG<E: Engine> {
     pub(crate) s_g2: E::G2Affine,
     /// Cached device-resident mirror of `g`. Lazy-populated on first
     /// `commit` / `commit_with_gpu` call that crosses the GPU dispatch
-    /// threshold. Assumes `g` is treated as immutable after `ParamsKZG`
+    /// threshold. Uploaded on `HALO2_COMM_STREAM`; the [`CommWrapper`]
+    /// syncs that stream on first deref, fencing consumers on other
+    /// streams. Assumes `g` is treated as immutable after `ParamsKZG`
     /// construction; any mutator that touches `g` MUST `take()` this
     /// cell to invalidate. Empty after `Clone`, by design — a clone
     /// regenerates its device mirror lazily.
-    pub(crate) g_device: OnceCell<DeviceBuffer<E::G1Affine>>,
+    pub(crate) g_device: OnceCell<CommWrapper<DeviceBuffer<E::G1Affine>>>,
     /// Cached device-resident mirror of `g_lagrange`. Same lifecycle
     /// and invalidation contract as `g_device`.
-    pub(crate) g_lagrange_device: OnceCell<DeviceBuffer<E::G1Affine>>,
+    pub(crate) g_lagrange_device: OnceCell<CommWrapper<DeviceBuffer<E::G1Affine>>>,
 }
 
 impl<E: Engine> Clone for ParamsKZG<E> {
@@ -64,7 +66,7 @@ where
     E::G2Affine: Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let cache_state = |cell: &OnceCell<DeviceBuffer<E::G1Affine>>| {
+        let cache_state = |cell: &OnceCell<CommWrapper<DeviceBuffer<E::G1Affine>>>| {
             if cell.get().is_some() {
                 "init"
             } else {
@@ -238,17 +240,27 @@ impl<E: Engine + Debug> ParamsKZG<E> {
     }
 
     /// Lazily upload `g_lagrange` to its device-mirror cache on first
-    /// touch and return the cached buffer; subsequent calls hit the
-    /// populated `OnceCell`. The `assert_eq!` guards against a stale
-    /// cache (host `g_lagrange` mutated without invalidating the cell).
-    fn ensure_g_lagrange_device(&self) -> &DeviceBuffer<E::G1Affine> {
+    /// touch. The upload is enqueued on `HALO2_COMM_STREAM` and the cell
+    /// is populated *without* deref-ing the [`CommWrapper`], so callers
+    /// (e.g. the warming thread) don't block on the comm-stream sync.
+    fn init_g_lagrange_device(&self) -> &CommWrapper<DeviceBuffer<E::G1Affine>> {
         crate::perf_section!("kzg.g_lagrange_device_first_touch");
-        let d_bases = self.g_lagrange_device.get_or_init(|| {
-            self.g_lagrange
-                .as_slice()
-                .to_device_on(&HALO2_GPU_CTX)
-                .expect("failed to upload g_lagrange to device for GPU MSM cache")
-        });
+        self.g_lagrange_device.get_or_init(|| {
+            CommWrapper::new(
+                self.g_lagrange
+                    .as_slice()
+                    .to_device_on(&HALO2_COMM_STREAM)
+                    .expect("failed to upload g_lagrange to device for GPU MSM cache"),
+            )
+        })
+    }
+
+    /// Returns the device mirror of `g_lagrange`, comm-stream-synced
+    /// (derefs the [`CommWrapper`]); subsequent calls hit the populated
+    /// `OnceCell`. The `assert_eq!` guards against a stale cache (host
+    /// `g_lagrange` mutated without invalidating the cell).
+    fn ensure_g_lagrange_device(&self) -> &DeviceBuffer<E::G1Affine> {
+        let d_bases: &DeviceBuffer<E::G1Affine> = self.init_g_lagrange_device();
         assert_eq!(
             d_bases.len(),
             self.g_lagrange.len(),
@@ -261,17 +273,24 @@ impl<E: Engine + Debug> ParamsKZG<E> {
         d_bases
     }
 
-    /// Lazily upload `g` to its device-mirror cache on first touch and
-    /// return the cached buffer. Mirror of [`Self::ensure_g_lagrange_device`]
-    /// for the coefficient-form bases.
-    fn ensure_g_device(&self) -> &DeviceBuffer<E::G1Affine> {
+    /// Mirror of [`Self::init_g_lagrange_device`] for the coefficient-form
+    /// bases: enqueue-only, no comm-stream sync.
+    fn init_g_device(&self) -> &CommWrapper<DeviceBuffer<E::G1Affine>> {
         crate::perf_section!("kzg.g_device_first_touch");
-        let d_bases = self.g_device.get_or_init(|| {
-            self.g
-                .as_slice()
-                .to_device_on(&HALO2_GPU_CTX)
-                .expect("failed to upload g to device for GPU MSM cache")
-        });
+        self.g_device.get_or_init(|| {
+            CommWrapper::new(
+                self.g
+                    .as_slice()
+                    .to_device_on(&HALO2_COMM_STREAM)
+                    .expect("failed to upload g to device for GPU MSM cache"),
+            )
+        })
+    }
+
+    /// Returns the device mirror of `g`, comm-stream-synced. Mirror of
+    /// [`Self::ensure_g_lagrange_device`] for the coefficient-form bases.
+    fn ensure_g_device(&self) -> &DeviceBuffer<E::G1Affine> {
+        let d_bases: &DeviceBuffer<E::G1Affine> = self.init_g_device();
         assert_eq!(
             d_bases.len(),
             self.g.len(),
@@ -472,8 +491,8 @@ where
         if (self.n() as usize) < GPU_MSM_THRESHOLD {
             return;
         }
-        let _ = self.ensure_g_lagrange_device();
-        let _ = self.ensure_g_device();
+        let _ = self.init_g_lagrange_device();
+        let _ = self.init_g_device();
     }
 
     /// Writes params to a buffer.
@@ -552,21 +571,7 @@ where
             return self.commit(&host, r);
         }
         let d_coeffs = poly.device_buf();
-        let d_bases = self.g_device.get_or_init(|| {
-            self.g
-                .as_slice()
-                .to_device_on(&HALO2_GPU_CTX)
-                .expect("failed to upload g to device for GPU MSM cache")
-        });
-        assert_eq!(
-            d_bases.len(),
-            self.g.len(),
-            "g_device cache is stale (host len {} vs device len {}); \
-             g was mutated outside `downsize` — reconstruct ParamsKZG \
-             or invalidate the cache via the mutator that touched it",
-            self.g.len(),
-            d_bases.len(),
-        );
+        let d_bases = self.ensure_g_device();
         multiexp_gpu_device_scalars_device_bases::<E::G1Affine>(d_coeffs, d_bases)
             .expect("multiexp_gpu_device_scalars_device_bases failed in commit_device")
     }

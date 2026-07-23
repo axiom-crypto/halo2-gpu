@@ -30,7 +30,7 @@ use halo2_axiom::poly::EvaluationDomain as EvaluationDomainCPU;
 /// Runs `Circuit::configure` to build the GPU evaluation domain, the canonical
 /// constraint system, and the circuit config. The vk's canonical-typed domain
 /// is reconstructed identically from `(degree, k)` by the callers.
-fn create_constraint_system<C, ConcreteCircuit>(
+pub fn create_constraint_system<C, ConcreteCircuit>(
     #[cfg(feature = "circuit-params")] params: ConcreteCircuit::Params,
 ) -> (ConstraintSystem<C::Scalar>, ConcreteCircuit::Config)
 where

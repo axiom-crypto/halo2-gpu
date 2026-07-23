@@ -34,6 +34,67 @@ pub static HALO2_GPU_CTX: Lazy<GpuDeviceCtx> = Lazy::new(|| {
     GpuDeviceCtx::for_current_device().expect("failed to create halo2-gpu GpuDeviceCtx")
 });
 
+/// Communication stream: a second non-blocking stream on `HALO2_GPU_CTX`'s
+/// device, dedicated to background H2D uploads (PK device-mirror warming) so
+/// they overlap with compute on the main stream instead of serializing.
+///
+/// Allocations and copies enqueued here are stream-ordered
+/// (`cudaMallocAsync`/`cudaMemcpyAsync`), so work on *other* streams may only
+/// touch the resulting buffers after this stream has been synchronized —
+/// consumers get that fence from [`CommWrapper`]'s first deref.
+pub static HALO2_COMM_STREAM: Lazy<GpuDeviceCtx> = Lazy::new(|| {
+    GpuDeviceCtx::for_device(HALO2_GPU_CTX.device_id)
+        .expect("failed to create halo2-gpu comm-stream GpuDeviceCtx")
+});
+
+/// Wraps a device resource whose backing uploads were enqueued on
+/// [`HALO2_COMM_STREAM`]. The first deref synchronizes the comm stream, so
+/// the wrapped buffers are safe to consume from any other stream from that
+/// point on; subsequent derefs are a single atomic load.
+///
+/// Soundness of the lazy-init pattern (`OnceCell<CommWrapper<..>>`): the
+/// producer enqueues every comm-stream copy *before* publishing the wrapper
+/// into the cell, and `OnceCell` publication is release/acquire. Any thread
+/// that can observe the wrapper therefore syncs a stream that already holds
+/// those copies — no producer-thread join is needed.
+pub struct CommWrapper<T> {
+    inner: T,
+    synced: std::sync::Once,
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for CommWrapper<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Debug must not trigger the sync side effect, so read `inner` directly.
+        f.debug_struct("CommWrapper")
+            .field("inner", &self.inner)
+            .field("synced", &self.synced.is_completed())
+            .finish()
+    }
+}
+
+impl<T> CommWrapper<T> {
+    pub fn new(inner: T) -> Self {
+        Self {
+            inner,
+            synced: std::sync::Once::new(),
+        }
+    }
+}
+
+impl<T> std::ops::Deref for CommWrapper<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        self.synced.call_once(|| {
+            HALO2_COMM_STREAM
+                .stream
+                .synchronize()
+                .expect("HALO2_COMM_STREAM synchronize failed");
+        });
+        &self.inner
+    }
+}
+
 /// Opaque handle used by kernel ABIs that take an array of polynomial
 /// pointers (e.g. `_halo2_fft_many`, `_halo2_multiopen_poly_calculation`).
 /// The underlying value is a raw device pointer packed into a `usize`.

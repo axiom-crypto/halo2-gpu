@@ -16,10 +16,14 @@ tracing = "0.1.44"
 tracing-forest = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-openvm = { git = "https://github.com/openvm-org/openvm.git", branch = "main", default-features = false }
-openvm-sdk = { git = "https://github.com/openvm-org/openvm.git", branch = "main", default-features = false }
-openvm-transpiler = { git = "https://github.com/openvm-org/openvm.git", branch = "main", default-features = false }
-openvm-stark-sdk = { git = "https://github.com/openvm-org/stark-backend.git", tag = "v2.0.0", default-features = false }
+# Temporarily tracks the openvm branch that bumps stark-backend to main so
+# `openvm-cuda-common` (with `DeviceBuffer::mut_slice`, post-v2.0.0) resolves
+# without a duplicate `cuda-common` native-lib link conflict. Revert to
+# `branch = "main"` once the openvm change lands.
+openvm = { git = "https://github.com/openvm-org/openvm.git", branch = "chore/stark-backend-main-track", default-features = false }
+openvm-sdk = { git = "https://github.com/openvm-org/openvm.git", branch = "chore/stark-backend-main-track", default-features = false }
+openvm-transpiler = { git = "https://github.com/openvm-org/openvm.git", branch = "chore/stark-backend-main-track", default-features = false }
+openvm-stark-sdk = { git = "https://github.com/openvm-org/stark-backend.git", branch = "main", default-features = false }
 
 [features]
 default = ["parallel", "jemalloc", "evm-verify", "cuda", "nvtx", "metrics"]

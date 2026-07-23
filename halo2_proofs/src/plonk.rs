@@ -8,7 +8,7 @@ use group::ff::FromUniformBytes;
 
 use crate::arithmetic::CurveAffine;
 use crate::cuda::funcs::batch_eval_polynomial_device_out;
-use crate::cuda::utils::HALO2_GPU_CTX;
+use crate::cuda::utils::{CommWrapper, HALO2_COMM_STREAM, HALO2_GPU_CTX};
 use crate::cuda::HaloGpuError;
 use crate::poly::{Coeff, DevicePolyExt, EvaluationDomain, HostPolyExt, LagrangeCoeff, Polynomial};
 use crate::transcript::{ChallengeScalar, EncodedChallenge, Transcript, TranscriptWrite};
@@ -29,6 +29,7 @@ mod vanishing;
 
 mod prover;
 mod verifier;
+mod witness;
 
 pub use assigned::*;
 pub use circuit::*;
@@ -36,6 +37,7 @@ pub use error::*;
 pub use keygen::*;
 pub use prover::*;
 pub use verifier::*;
+pub use witness::{synthesize_witness, AdviceColumns, AdviceSingle, InstanceSingle};
 
 use evaluation::Evaluator;
 
@@ -102,6 +104,11 @@ where
     }
 }
 
+/// Comm-stream-fenced device mirror of pk polynomial(s) (see
+/// [`CommWrapper`]): first deref syncs `HALO2_COMM_STREAM`.
+type DevicePoly<F, B> = CommWrapper<Polynomial<F, B, crate::poly::Device>>;
+type DevicePolys<F, B> = CommWrapper<Vec<Polynomial<F, B, crate::poly::Device>>>;
+
 /// GPU-side proving key. Wraps the canonical [`ProvingKey`] (`inner`) plus the
 /// GPU-crate composing forks (`cs`/`domain`/`ev`) rebuilt from it and the lazy
 /// device mirrors of the pk polynomials.
@@ -130,15 +137,16 @@ pub struct GpuProvingKey<'a, C: CurveAffine> {
     transcript_repr: C::Scalar,
     /// Lazy device mirrors of the pk polynomials. Emptied on `Clone` and
     /// regenerated on first use (matches `ParamsKZG`'s `OnceCell` contract).
-    fixed_polys_device: OnceCell<Vec<Polynomial<C::Scalar, Coeff, crate::poly::Device>>>,
-    fixed_values_device: OnceCell<Vec<Polynomial<C::Scalar, LagrangeCoeff, crate::poly::Device>>>,
-    permutation_polys_device: OnceCell<Vec<Polynomial<C::Scalar, Coeff, crate::poly::Device>>>,
-    l0_device: OnceCell<Polynomial<C::Scalar, Coeff, crate::poly::Device>>,
-    l_last_device: OnceCell<Polynomial<C::Scalar, Coeff, crate::poly::Device>>,
-    l_active_row_device: OnceCell<Polynomial<C::Scalar, Coeff, crate::poly::Device>>,
+    /// Uploads run on `HALO2_COMM_STREAM`; the `CommWrapper` fences consumers
+    /// (first deref syncs the comm stream).
+    fixed_polys_device: OnceCell<DevicePolys<C::Scalar, Coeff>>,
+    fixed_values_device: OnceCell<DevicePolys<C::Scalar, LagrangeCoeff>>,
+    permutation_polys_device: OnceCell<DevicePolys<C::Scalar, Coeff>>,
+    l0_device: OnceCell<DevicePoly<C::Scalar, Coeff>>,
+    l_last_device: OnceCell<DevicePoly<C::Scalar, Coeff>>,
+    l_active_row_device: OnceCell<DevicePoly<C::Scalar, Coeff>>,
     /// Lagrange σ-columns, distinct from `permutation_polys_device` (Coeff form).
-    permutation_lagrange_device:
-        OnceCell<Vec<Polynomial<C::Scalar, LagrangeCoeff, crate::poly::Device>>>,
+    permutation_lagrange_device: OnceCell<DevicePolys<C::Scalar, LagrangeCoeff>>,
 }
 
 impl<'a, C: CurveAffine> Clone for GpuProvingKey<'a, C> {
@@ -173,6 +181,7 @@ where
     /// Pure host rebuild: no device traffic, no kernel launch. Device mirrors
     /// start empty and populate lazily at first prove.
     pub fn from_host(inner: &'a ProvingKey<C>) -> Self {
+        crate::perf_section!("gpu_pk_from_host");
         let cs = GpuConstraintSystem::from(inner.get_vk().cs());
         let hdomain = inner.get_vk().get_domain();
         let domain = EvaluationDomain::from_host_domain(hdomain);
@@ -284,20 +293,39 @@ impl<'a, C: CurveAffine> GpuProvingKey<'a, C> {
         }
     }
 
+    /// Forces every lazy PK device mirror. Uploads are enqueued on
+    /// `HALO2_COMM_STREAM` *without* the consumer fence — the `_wrapper`
+    /// getters never deref, so the warming thread never blocks on the sync.
+    /// Each mirror's first consumer pays the comm-stream sync once via
+    /// [`CommWrapper`]'s deref.
+    pub(crate) fn warm_device_mirrors(&self) {
+        let _ = self.fixed_polys_device_handle();
+        let _ = self.fixed_values_device_wrapper();
+        let _ = self.permutation_polys_device_handle();
+        let _ = self.permutation_lagrange_device_handle();
+        let _ = self.l0_device_handle();
+        let _ = self.l_last_device_handle();
+        let _ = self.l_active_row_device_handle();
+    }
+
     /// Lazy device mirror of `inner.fixed_polys()` (Coeff form). `None` if
     /// VRAM-gated out or H2D fails, leaving the host-arm fallback to upload.
+    /// Derefs the `CommWrapper`, so the returned mirror is comm-stream-synced.
     pub(crate) fn fixed_polys_device(
         &self,
     ) -> Option<&[Polynomial<C::Scalar, Coeff, crate::poly::Device>]> {
+        self.fixed_polys_device_handle().map(|w| w.as_slice())
+    }
+
+    fn fixed_polys_device_handle(&self) -> Option<&DevicePolys<C::Scalar, Coeff>> {
         if let Some(v) = self.fixed_polys_device.get() {
-            return Some(v.as_slice());
+            return Some(v);
         }
         try_init_pk_device_mirror::<C, Coeff>(
             self.inner.fixed_polys(),
             "pk.fixed_polys_device.init",
             &self.fixed_polys_device,
         )
-        .map(|v| v.as_slice())
     }
 
     /// Lazy device mirror of `inner.fixed_values()` (Lagrange form). Returns
@@ -305,30 +333,36 @@ impl<'a, C: CurveAffine> GpuProvingKey<'a, C> {
     pub(crate) fn fixed_values_device(
         &self,
     ) -> Option<&[Polynomial<C::Scalar, LagrangeCoeff, crate::poly::Device>]> {
+        self.fixed_values_device_wrapper().map(|w| w.as_slice())
+    }
+
+    fn fixed_values_device_wrapper(&self) -> Option<&DevicePolys<C::Scalar, LagrangeCoeff>> {
         if let Some(v) = self.fixed_values_device.get() {
-            return Some(v.as_slice());
+            return Some(v);
         }
         try_init_pk_device_mirror::<C, LagrangeCoeff>(
             self.inner.fixed_values(),
             "pk.fixed_values_device.init",
             &self.fixed_values_device,
         )
-        .map(|v| v.as_slice())
     }
 
     /// Lazy device mirror of `inner.permutation().polys()` (Coeff form).
     pub(crate) fn permutation_polys_device(
         &self,
     ) -> Option<&[Polynomial<C::Scalar, Coeff, crate::poly::Device>]> {
+        self.permutation_polys_device_handle().map(|w| w.as_slice())
+    }
+
+    fn permutation_polys_device_handle(&self) -> Option<&DevicePolys<C::Scalar, Coeff>> {
         if let Some(v) = self.permutation_polys_device.get() {
-            return Some(v.as_slice());
+            return Some(v);
         }
         try_init_pk_device_mirror::<C, Coeff>(
             self.inner.permutation().polys(),
             "pk.permutation_polys_device.init",
             &self.permutation_polys_device,
         )
-        .map(|v| v.as_slice())
     }
 
     /// Lazy device mirror of `inner.permutation().permutations()` (Lagrange
@@ -336,19 +370,27 @@ impl<'a, C: CurveAffine> GpuProvingKey<'a, C> {
     pub(crate) fn permutation_lagrange_device(
         &self,
     ) -> Option<&[Polynomial<C::Scalar, LagrangeCoeff, crate::poly::Device>]> {
+        self.permutation_lagrange_device_handle()
+            .map(|w| w.as_slice())
+    }
+
+    fn permutation_lagrange_device_handle(&self) -> Option<&DevicePolys<C::Scalar, LagrangeCoeff>> {
         if let Some(v) = self.permutation_lagrange_device.get() {
-            return Some(v.as_slice());
+            return Some(v);
         }
         try_init_pk_device_mirror::<C, LagrangeCoeff>(
             self.inner.permutation().permutations(),
             "pk.permutation.permutations_device.init",
             &self.permutation_lagrange_device,
         )
-        .map(|v| v.as_slice())
     }
 
     /// Lazy device mirror of `inner.l0()`. Returns `None` only if the H2D upload fails.
     pub(crate) fn l0_device(&self) -> Option<&Polynomial<C::Scalar, Coeff, crate::poly::Device>> {
+        self.l0_device_handle().map(|w| &**w)
+    }
+
+    fn l0_device_handle(&self) -> Option<&DevicePoly<C::Scalar, Coeff>> {
         if let Some(v) = self.l0_device.get() {
             return Some(v);
         }
@@ -363,6 +405,10 @@ impl<'a, C: CurveAffine> GpuProvingKey<'a, C> {
     pub(crate) fn l_last_device(
         &self,
     ) -> Option<&Polynomial<C::Scalar, Coeff, crate::poly::Device>> {
+        self.l_last_device_handle().map(|w| &**w)
+    }
+
+    fn l_last_device_handle(&self) -> Option<&DevicePoly<C::Scalar, Coeff>> {
         if let Some(v) = self.l_last_device.get() {
             return Some(v);
         }
@@ -377,6 +423,10 @@ impl<'a, C: CurveAffine> GpuProvingKey<'a, C> {
     pub(crate) fn l_active_row_device(
         &self,
     ) -> Option<&Polynomial<C::Scalar, Coeff, crate::poly::Device>> {
+        self.l_active_row_device_handle().map(|w| &**w)
+    }
+
+    fn l_active_row_device_handle(&self) -> Option<&DevicePoly<C::Scalar, Coeff>> {
         if let Some(v) = self.l_active_row_device.get() {
             return Some(v);
         }
@@ -412,12 +462,15 @@ where
 }
 
 /// Shared lazy initializer for the slice-valued PK device mirrors: per-poly
-/// H2D loop and `perf_h2d!` byte-trace.
+/// H2D loop and `perf_h2d!` byte-trace. Uploads are enqueued on
+/// `HALO2_COMM_STREAM`; the mirror is published as a [`CommWrapper`] whose
+/// first deref syncs the comm stream, so every copy is enqueued before the
+/// `OnceCell` publication and consumers on other streams are fenced.
 fn try_init_pk_device_mirror<'pk, C: CurveAffine, B>(
     host: &[Polynomial<C::Scalar, B, crate::poly::Host>],
     perf_tag: &'static str,
-    cell: &'pk OnceCell<Vec<Polynomial<C::Scalar, B, crate::poly::Device>>>,
-) -> Option<&'pk Vec<Polynomial<C::Scalar, B, crate::poly::Device>>>
+    cell: &'pk OnceCell<DevicePolys<C::Scalar, B>>,
+) -> Option<&'pk DevicePolys<C::Scalar, B>>
 where
     B: 'static,
 {
@@ -426,7 +479,7 @@ where
     let mut mirror: Vec<Polynomial<C::Scalar, B, crate::poly::Device>> =
         Vec::with_capacity(host.len());
     for poly in host {
-        match poly.values().to_device_on(&HALO2_GPU_CTX) {
+        match poly.values().to_device_on(&HALO2_COMM_STREAM) {
             Ok(d) => mirror.push(Polynomial::from_device(d)),
             Err(e) => {
                 log::warn!("PK device mirror {}: H2D failed ({:?}); skip", perf_tag, e);
@@ -443,7 +496,7 @@ where
         bytes = total_bytes as u64,
     );
     // If another thread populated the cell first, keep theirs and drop ours.
-    let _ = cell.set(mirror);
+    let _ = cell.set(CommWrapper::new(mirror));
     cell.get()
 }
 
@@ -452,13 +505,13 @@ where
 fn try_init_pk_device_mirror_one<'pk, C: CurveAffine, B>(
     host: &Polynomial<C::Scalar, B, crate::poly::Host>,
     perf_tag: &'static str,
-    cell: &'pk OnceCell<Polynomial<C::Scalar, B, crate::poly::Device>>,
-) -> Option<&'pk Polynomial<C::Scalar, B, crate::poly::Device>>
+    cell: &'pk OnceCell<CommWrapper<Polynomial<C::Scalar, B, crate::poly::Device>>>,
+) -> Option<&'pk CommWrapper<Polynomial<C::Scalar, B, crate::poly::Device>>>
 where
     B: 'static,
 {
     let total_bytes: usize = host.len() * std::mem::size_of::<C::Scalar>();
-    let mirror = match host.to_device_on(&HALO2_GPU_CTX) {
+    let mirror = match host.to_device_on(&HALO2_COMM_STREAM) {
         Ok(d) => d,
         Err(e) => {
             log::warn!("PK device mirror {}: H2D failed ({:?}); skip", perf_tag, e);
@@ -471,7 +524,7 @@ where
         label = perf_tag,
         bytes = total_bytes as u64,
     );
-    let _ = cell.set(mirror);
+    let _ = cell.set(CommWrapper::new(mirror));
     cell.get()
 }
 
