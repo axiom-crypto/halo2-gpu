@@ -14,6 +14,11 @@
 #define __noinline__
 #endif
 
+// xyzz_t exposes conversions to jacobian_t (see the operator jacobian_t<field_t>()
+// members below), so jacobian_t must be visible as a template. Forward-declare it
+// here so this header compiles standalone without including jacobian_t.hpp.
+template<class field_t> class jacobian_t;
+
 template<class field_t> class xyzz_t {
     field_t X, Y, ZZZ, ZZ;
 
