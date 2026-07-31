@@ -36,6 +36,11 @@ public:
 
         inline affine_t& operator=(const jacobian_t& a)
         {
+            if (a.Z.is_zero()) {    // point at infinity (Z==0): encode as (0,0),
+                X.zero();           // the affine infinity encoding recognized by
+                Y.zero();           // is_inf() above, instead of dividing by 0.
+                return *this;
+            }
             Y = 1/a.Z;
             X = Y^2;    // 1/Z^2
             Y *= X;     // 1/Z^3

@@ -47,6 +47,11 @@ public:
 
         inline affine_t& operator=(const xyzz_t& a)
         {
+            if (a.ZZZ.is_zero()) {  // point at infinity (ZZZ==0): encode as (0,0),
+                X.zero();           // the affine infinity encoding recognized by
+                Y.zero();           // is_inf() above, instead of dividing by 0.
+                return *this;
+            }
             Y = 1/a.ZZZ;
             X = Y * a.ZZ;   // 1/Z
             X = X^2;        // 1/Z^2
