@@ -14,6 +14,11 @@
 #define __noinline__
 #endif
 
+// xyzz_t exposes conversions to jacobian_t (see the operator jacobian_t<field_t>()
+// members below), so jacobian_t must be visible as a template. Forward-declare it
+// here so this header compiles standalone without including jacobian_t.hpp.
+template<class field_t> class jacobian_t;
+
 template<class field_t> class xyzz_t {
     field_t X, Y, ZZZ, ZZ;
 
@@ -47,6 +52,11 @@ public:
 
         inline affine_t& operator=(const xyzz_t& a)
         {
+            if (a.ZZZ.is_zero()) {  // point at infinity (ZZZ==0): encode as (0,0),
+                X.zero();           // the affine infinity encoding recognized by
+                Y.zero();           // is_inf() above, instead of dividing by 0.
+                return *this;
+            }
             Y = 1/a.ZZZ;
             X = Y * a.ZZ;   // 1/Z
             X = X^2;        // 1/Z^2
