@@ -22,7 +22,7 @@ crossbeam = "0.8"
 ff = "0.13"
 group = "0.13"
 pairing = "0.23"
-halo2curves = { package = "halo2curves-axiom", version = "0.7.0", default-features = false, features = [
+halo2curves = { package = "halo2curves-axiom", version = "0.7.3", default-features = false, features = [
   "bits",
   "bn256-table",
   "derive_serde",
@@ -40,7 +40,7 @@ num-integer = "0.1"
 num-bigint = { version = "0.4", features = ["rand"] }
 libc = "0.2"
 cuda-driver-sys = "0.3"
-openvm-cuda-common = { version = "2.0.0", git = "https://github.com/openvm-org/stark-backend.git", branch = "main", default-features = false }
+openvm-cuda-common = { version = "2.0.1", git = "https://github.com/openvm-org/stark-backend.git", branch = "main", default-features = false }
 log = "0.4.17"
 env_logger = "0.7.0"
 anyhow = "1.0.45"
