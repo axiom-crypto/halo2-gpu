@@ -4,7 +4,8 @@ edition = "2021"
 rust-version = "1.91.1"
 
 [workspace]
-members = ["halo2_proofs", "benchmarks"]
+members = ["halo2_proofs"]
+exclude = ["benchmarks"]
 resolver = "2"
 
 

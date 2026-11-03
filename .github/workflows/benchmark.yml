@@ -48,9 +48,8 @@ env:
 jobs:
   bench:
     name: halo2-gpu benchmark
-    if: >-
-      github.event_name != 'pull_request' ||
-      contains(github.event.pull_request.labels.*.name, 'benchmark')
+    # Disabled for this release: benchmarks is excluded from the workspace.
+    if: ${{ false }}
     timeout-minutes: 120
     runs-on:
       - runs-on=${{ github.run_id }}/runner=test-gpu-nvidia-ondemand/family=${{ inputs.instance_family || github.event.inputs.instance_family || 'g6e.2xlarge' }}/extras=s3-cache
